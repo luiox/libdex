@@ -18,7 +18,7 @@ constexpr ca::u32 kProtoCount = 2;
 constexpr ca::u32 kFieldCount = 1;
 constexpr ca::u32 kMethodCount = 1;
 constexpr ca::u32 kClassDefCount = 1;
-constexpr ca::u32 kMapItemCount = 12;
+constexpr ca::u32 kMapItemCount = 16;
 
 // string_ids 按 UTF-16 内容升序排列（DEX 规范约束）。
 constexpr std::string_view kStrings[kStringCount] = {
@@ -111,12 +111,27 @@ std::vector<ca::u8> makeHelloDex()
     appendU16(data, 0);          // ins_size
     appendU16(data, 0);          // outs_size
     appendU16(data, 0);          // tries_size
-    appendU32(data, 0);          // debug_info_off
+    appendU32(data, 0);          // debug_info_off（稍后回填）
     appendU32(data, 1);          // insns_size
     appendU16(data, 0x000eu);    // return-void
 
+    const ca::u32 debugInfoOff = dataOff + static_cast<ca::u32>(data.size());
+    appendUleb128(data, 0);      // line_start
+    appendUleb128(data, 0);      // parameters_size
+    data.push_back(0);           // END_SEQUENCE
+
     const ca::u32 staticValuesOff = dataOff + static_cast<ca::u32>(data.size());
     appendUleb128(data, 0);      // encoded_array_item：空数组
+
+    const ca::u32 methodHandleOff = align4(dataOff + static_cast<ca::u32>(data.size()));
+    data.resize(methodHandleOff - dataOff, 0);
+    appendU16(data, 4);          // method_handle_type：invoke-static
+    appendU16(data, 0xBEEF);     // unused（保真保留）
+    appendU16(data, 0);          // field_or_method_id：method 0
+    appendU16(data, 0xCAFE);     // unused（保真保留）
+
+    const ca::u32 callSiteOff = dataOff + static_cast<ca::u32>(data.size());
+    appendU32(data, staticValuesOff);  // call_site_off → 空 encoded_array
 
     const ca::u32 classDataOff = dataOff + static_cast<ca::u32>(data.size());
     appendUleb128(data, 0);      // static_fields_size
@@ -128,6 +143,13 @@ std::vector<ca::u8> makeHelloDex()
     appendUleb128(data, 0);      // method_idx_diff：method 0
     appendUleb128(data, 0x9);    // access_flags：public static
     appendUleb128(data, codeOff);
+
+    // 未建模 section：map 类型 0x7F00（未定义类型，避免与真实 hiddenapi 语义混淆），内容按原字节透传。
+    const ca::u32 unknownOff = dataOff + static_cast<ca::u32>(data.size());
+    data.push_back(0xDE);
+    data.push_back(0xAD);
+    data.push_back(0xBE);
+    data.push_back(0xEF);
 
     const ca::u32 mapOff = align4(dataOff + static_cast<ca::u32>(data.size()));
     data.resize(mapOff - dataOff, 0);
@@ -141,8 +163,12 @@ std::vector<ca::u8> makeHelloDex()
     appendMapItem(data, 0x0006, kClassDefCount, kClassDefsTableOff);
     appendMapItem(data, 0x2002, kStringCount, dataOff);   // string_data_item
     appendMapItem(data, 0x2001, 1, codeOff);              // code_item
+    appendMapItem(data, 0x2003, 1, debugInfoOff);         // debug_info_item
     appendMapItem(data, 0x2005, 1, staticValuesOff);      // encoded_array_item
+    appendMapItem(data, 0x0008, 1, methodHandleOff);      // method_handle_item
+    appendMapItem(data, 0x0007, 1, callSiteOff);          // call_site_id_item
     appendMapItem(data, 0x2000, 1, classDataOff);         // class_data_item
+    appendMapItem(data, 0x7F00, 1, unknownOff);         // 未建模 section
     appendMapItem(data, 0x1000, 1, mapOff);               // map_list
 
     const ca::u32 fileSize = dataOff + static_cast<ca::u32>(data.size());
@@ -210,6 +236,7 @@ std::vector<ca::u8> makeHelloDex()
     putU32(file, kClassDefsTableOff + 28, staticValuesOff);  // static_values_off
 
     std::memcpy(file.data() + dataOff, data.data(), data.size());
+    putU32(file, codeOff + 8, debugInfoOff);  // code_item.debug_info_off
 
     // 先写 signature（覆盖 offset 32 起），再算 checksum（覆盖 offset 12 起，
     // 因此必须包含已写入的 signature 字段）。

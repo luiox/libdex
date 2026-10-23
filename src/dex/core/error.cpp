@@ -20,6 +20,7 @@ const char* to_string(ReadError e) noexcept
         case ReadError::BadLeb128: return "bad_leb128";
         case ReadError::BadClassData: return "bad_class_data";
         case ReadError::BadCodeItem: return "bad_code_item";
+        case ReadError::BadEncodedValue: return "bad_encoded_value";
         case ReadError::BadIndex: return "bad_index";
         case ReadError::BadChecksum: return "bad_checksum";
         case ReadError::BadSignature: return "bad_signature";
@@ -32,6 +33,10 @@ const char* to_string(WriteError e) noexcept
     switch (e) {
         case WriteError::Ok: return "ok";
         case WriteError::MissingSource: return "missing_source";
+        case WriteError::Unencodable: return "unencodable";
+        case WriteError::NotModeled: return "not_modeled";
+        case WriteError::SourceUnreadable: return "source_unreadable";
+        case WriteError::InvalidModel: return "invalid_model";
     }
     return "unknown";
 }

@@ -29,6 +29,10 @@ compile_commands.json
 /private-corpus-src/
 /dev/
 
+### Oracle jars and scratch output ###
+/.oracle-cache/
+/oracle-out/
+
 ### Binaries / debug artifacts ###
 *.exe
 *.pdb

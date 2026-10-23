@@ -32,7 +32,9 @@
 
 #include "jstr/mutf8_string.hpp"
 
+#include "dex/core/annotation.hpp"
 #include "dex/core/bytes.hpp"
+#include "dex/core/debug_info.hpp"
 #include "dex/core/error.hpp"
 
 namespace dex::core {
@@ -109,6 +111,20 @@ struct MapItem
     ca::u32 offset = 0;
 };
 
+/// @brief 未建模 map section 的原始区间。
+///
+/// 区间从 section 起始到下一个 map 条目（或文件尾）；长度含对齐填充，
+/// 因为未知 section 的条目边界不可知。写回时按原字节透传。
+struct RawSection
+{
+    ca::u16 type = 0;  ///< 原始 map type 值（含未知类型）
+    ca::u32 size = 0;  ///< map 声明的条目数
+    ByteSpan span;
+};
+
+/// @brief 该 map 类型是否已有结构化条目模型。
+bool isModeledMapType(MapType type) noexcept;
+
 /// @brief string_id_item：指向 string_data_item 的文件偏移。
 struct StringId
 {
@@ -156,6 +172,24 @@ struct ClassDef
     ca::u32 annotationsOff = 0;  ///< 0 表示无注解目录
     ca::u32 classDataOff = 0;    ///< 0 表示无类数据（标记接口）
     ca::u32 staticValuesOff = 0; ///< 0 表示无静态初值
+};
+
+/// @brief call_site_id_item：指向一个 encoded_array_item。
+struct CallSiteId
+{
+    ca::u32 callSiteOff = 0;
+};
+
+/// @brief method_handle_item：类型、目标索引与两个未用字段。
+///
+/// @ref handleType 决定 @ref targetIdx 指向 field_ids 还是 method_ids；
+/// 两个 unused 字段原样保留，不按规范值清零。
+struct MethodHandle
+{
+    ca::u16 handleType = 0;
+    ca::u16 unused1 = 0;
+    ca::u16 targetIdx = 0;
+    ca::u16 unused2 = 0;
 };
 
 /// @brief class_data_item 的字段条目（索引已从差分展开为绝对值）。
@@ -241,6 +275,20 @@ Result<CodeItem, ReadError> parseCodeItem(ByteSlice source, ca::u32 offset,
                                           ca::u32 typeCount = 0,
                                           Diagnostics* diagnostics = nullptr);
 
+/// @brief 精确重编码 class_data_item；字段/方法的索引差分由本函数计算。
+///
+/// 各组索引必须严格递增；否则返回 Err(WriteError::Unencodable)。写回顺序
+/// 与模型中的四处列表一致（static/instance fields、direct/virtual methods）。
+Result<std::vector<ca::u8>, WriteError> writeClassData(const ClassData& data);
+
+/// @brief 精确重编码 code_item。
+///
+/// @param item 头部、tries 与 handler 模型；tries 的 handler_off 按
+///             @ref TryBlock::handlerIndex 重新计算，共享的 handler 保持共享。
+/// @param insns 已编码的指令区字节，长度必须是 `insnsSize * 2`。
+/// 若 tries 非空且指令数为奇数，写回按格式补 2 字节对齐。
+Result<std::vector<ca::u8>, WriteError> writeCodeItem(const CodeItem& item, ByteSlice insns);
+
 /// @brief type_list_item 的零拷贝视图（条目为小端 u16 类型索引）。
 struct TypeListSpan
 {
@@ -283,6 +331,11 @@ public:
     std::vector<FieldId> fieldIds;
     std::vector<MethodId> methodIds;
     std::vector<ClassDef> classDefs;
+    std::vector<CallSiteId> callSites;        ///< map_list 中有该 section 时填充
+    std::vector<MethodHandle> methodHandles;  ///< map_list 中有该 section 时填充
+
+    /// @brief 未建模的 map section（如 hiddenapi）；按 map 偏移升序。
+    std::vector<RawSection> rawSections;
 
     // ---- 源字节：lazy 与 copy-through 保真的共同前提 ----
 
@@ -325,6 +378,11 @@ public:
     ca::u32 fieldCount() const noexcept { return static_cast<ca::u32>(fieldIds.size()); }
     ca::u32 methodCount() const noexcept { return static_cast<ca::u32>(methodIds.size()); }
     ca::u32 classCount() const noexcept { return static_cast<ca::u32>(classDefs.size()); }
+    ca::u32 callSiteCount() const noexcept { return static_cast<ca::u32>(callSites.size()); }
+    ca::u32 methodHandleCount() const noexcept
+    {
+        return static_cast<ca::u32>(methodHandles.size());
+    }
 
     /// @brief 按 section 类型查 map_item；不存在返回 nullptr。
     const MapItem* findMapItem(MapType type) const noexcept;
@@ -385,7 +443,55 @@ public:
     /// @brief 已解码的 code_item；未解码返回 nullptr。
     const CodeItem* peekCodeItem(ca::u32 codeOff) const noexcept;
 
+    // ---- lazy 解码：注解与静态初值 ----
+    //
+    // 每个条目的入口都是文件偏移：class_def / annotations_directory /
+    // annotation_set 里的偏移原样保留，调用方可以从任意一层进入，共享的
+    // set/item 按偏移去重。off 为 0 时返回 Ok(nullptr)。
+
+    /// @brief annotations_directory_item（class_def.annotations_off 的落点）。
+    Result<const AnnotationsDirectory*, ReadError> annotationsDirectory(ca::u32 offset);
+
+    /// @brief annotation_set_item。
+    Result<const AnnotationSetItem*, ReadError> annotationSet(ca::u32 offset);
+
+    /// @brief annotation_set_ref_list（参数注解）。
+    Result<const AnnotationSetRefList*, ReadError> annotationSetRefList(ca::u32 offset);
+
+    /// @brief annotation_item（annotation_set 条目的落点）。
+    Result<const AnnotationItem*, ReadError> annotationItem(ca::u32 offset);
+
+    /// @brief encoded_array_item（class_def.static_values_off 的落点）。
+    Result<const EncodedArrayItem*, ReadError> encodedArray(ca::u32 offset);
+
+    /// @brief 类的注解目录；无注解返回 Ok(nullptr)。
+    Result<const AnnotationsDirectory*, ReadError> classAnnotations(ca::u32 classDefIdx);
+
+    /// @brief 类的静态字段初值；无初值返回 Ok(nullptr)。
+    Result<const EncodedArrayItem*, ReadError> staticValues(ca::u32 classDefIdx);
+
+    /// @brief debug_info_item；offset 为 0 时返回 Ok(nullptr)。
+    Result<const DebugInfo*, ReadError> debugInfo(ca::u32 offset);
+
+    /// @brief 第 index 个 call_site 的 encoded_array_item；越界返回 BadIndex。
+    Result<const EncodedArrayItem*, ReadError> callSiteValues(ca::u32 index);
+
 private:
+    template <typename T>
+    struct LazyItem
+    {
+        enum class State : ca::u8 { Untouched, Decoded, Failed };
+
+        State state = State::Untouched;
+        ReadError error = ReadError::Ok;
+        std::unique_ptr<T> item;
+    };
+
+    template <typename T>
+    Result<const T*, ReadError> decodeLazy(std::unordered_map<ca::u32, LazyItem<T>>& cache,
+                                           ca::u32 offset,
+                                           Result<T, ReadError> (*decode)(ByteSlice, ca::u32));
+
     struct LazyString
     {
         enum class State : ca::u8 { Untouched, Decoded, Failed };
@@ -415,6 +521,14 @@ private:
     std::vector<LazyClassData> classDataCache_;
     std::unordered_map<ca::u32, std::unique_ptr<CodeItem>> codeCache_;
     std::unordered_map<ca::u32, ReadError> codeFailures_;
+
+    /// @brief 数据区条目的 offset → 解码结果缓存（同一偏移只解一次）。
+    std::unordered_map<ca::u32, LazyItem<AnnotationsDirectory>> annotationsDirectoryCache_;
+    std::unordered_map<ca::u32, LazyItem<AnnotationSetItem>> annotationSetCache_;
+    std::unordered_map<ca::u32, LazyItem<AnnotationSetRefList>> annotationSetRefCache_;
+    std::unordered_map<ca::u32, LazyItem<AnnotationItem>> annotationItemCache_;
+    std::unordered_map<ca::u32, LazyItem<EncodedArrayItem>> encodedArrayCache_;
+    std::unordered_map<ca::u32, LazyItem<DebugInfo>> debugInfoCache_;
 };
 
 }   // namespace dex::core

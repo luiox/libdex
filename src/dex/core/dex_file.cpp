@@ -26,6 +26,29 @@ Result<ca::u32, ReadError> nextMemberIndex(ca::u32 diff, ca::u32 previous, bool 
     return Ok(previous + diff);
 }
 
+void appendU16(std::vector<ca::u8>& out, ca::u16 value)
+{
+    out.push_back(static_cast<ca::u8>(value & 0xFFu));
+    out.push_back(static_cast<ca::u8>(value >> 8));
+}
+
+void appendU32(std::vector<ca::u8>& out, ca::u32 value)
+{
+    appendU16(out, static_cast<ca::u16>(value & 0xFFFFu));
+    appendU16(out, static_cast<ca::u16>(value >> 16));
+}
+
+template <typename Entry, typename IndexOf>
+bool indicesStrictlyIncreasing(const std::vector<Entry>& entries, IndexOf indexOf) noexcept
+{
+    for (ca::usize i = 1; i < entries.size(); ++i) {
+        if (indexOf(entries[i]) <= indexOf(entries[i - 1])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }   // namespace
 
 void DexFile::adoptSource(ByteSlice bytes)
@@ -50,6 +73,34 @@ const MapItem* DexFile::findMapItem(MapType type) const noexcept
         }
     }
     return nullptr;
+}
+
+bool isModeledMapType(MapType type) noexcept
+{
+    switch (type) {
+        case MapType::HeaderItem:
+        case MapType::StringIdItem:
+        case MapType::TypeIdItem:
+        case MapType::ProtoIdItem:
+        case MapType::FieldIdItem:
+        case MapType::MethodIdItem:
+        case MapType::ClassDefItem:
+        case MapType::CallSiteIdItem:
+        case MapType::MethodHandleItem:
+        case MapType::MapList:
+        case MapType::TypeList:
+        case MapType::AnnotationSetRefList:
+        case MapType::AnnotationSetItem:
+        case MapType::ClassDataItem:
+        case MapType::CodeItem:
+        case MapType::StringDataItem:
+        case MapType::DebugInfoItem:
+        case MapType::AnnotationItem:
+        case MapType::EncodedArrayItem:
+        case MapType::AnnotationsDirectoryItem:
+            return true;
+    }
+    return false;
 }
 
 Result<jstr::MUtf8StringRef, ReadError> DexFile::string(ca::u32 index)
@@ -630,6 +681,220 @@ Result<CodeItem, ReadError> parseCodeItem(ByteSlice source, ca::u32 offset,
     }
 
     return Ok(std::move(item));
+}
+
+template <typename T>
+Result<const T*, ReadError> DexFile::decodeLazy(
+    std::unordered_map<ca::u32, LazyItem<T>>& cache, ca::u32 offset,
+    Result<T, ReadError> (*decode)(ByteSlice, ca::u32))
+{
+    if (offset == 0) {
+        return Ok(static_cast<const T*>(nullptr));
+    }
+
+    const auto found = cache.find(offset);
+    if (found != cache.end()) {
+        if (found->second.state == LazyItem<T>::State::Decoded) {
+            return Ok(static_cast<const T*>(found->second.item.get()));
+        }
+        if (found->second.state == LazyItem<T>::State::Failed) {
+            return Err(found->second.error);
+        }
+    }
+
+    Result<T, ReadError> parsed = decode(source(), offset);
+    LazyItem<T>& slot = cache[offset];
+    if (parsed.is_err()) {
+        slot.state = LazyItem<T>::State::Failed;
+        slot.error = parsed.unwrap_err();
+        return Err(slot.error);
+    }
+    slot.item = std::make_unique<T>(std::move(parsed).unwrap());
+    slot.state = LazyItem<T>::State::Decoded;
+    return Ok(static_cast<const T*>(slot.item.get()));
+}
+
+Result<const AnnotationsDirectory*, ReadError> DexFile::annotationsDirectory(ca::u32 offset)
+{
+    return decodeLazy(annotationsDirectoryCache_, offset, &readAnnotationsDirectory);
+}
+
+Result<const AnnotationSetItem*, ReadError> DexFile::annotationSet(ca::u32 offset)
+{
+    return decodeLazy(annotationSetCache_, offset, &readAnnotationSet);
+}
+
+Result<const AnnotationSetRefList*, ReadError> DexFile::annotationSetRefList(ca::u32 offset)
+{
+    return decodeLazy(annotationSetRefCache_, offset, &readAnnotationSetRefList);
+}
+
+Result<const AnnotationItem*, ReadError> DexFile::annotationItem(ca::u32 offset)
+{
+    return decodeLazy(annotationItemCache_, offset, &readAnnotationItem);
+}
+
+Result<const EncodedArrayItem*, ReadError> DexFile::encodedArray(ca::u32 offset)
+{
+    return decodeLazy(encodedArrayCache_, offset, &readEncodedArrayItem);
+}
+
+Result<const AnnotationsDirectory*, ReadError> DexFile::classAnnotations(ca::u32 classDefIdx)
+{
+    if (classDefIdx >= classDefs.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    return annotationsDirectory(classDefs[classDefIdx].annotationsOff);
+}
+
+Result<const EncodedArrayItem*, ReadError> DexFile::staticValues(ca::u32 classDefIdx)
+{
+    if (classDefIdx >= classDefs.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    return encodedArray(classDefs[classDefIdx].staticValuesOff);
+}
+
+Result<const DebugInfo*, ReadError> DexFile::debugInfo(ca::u32 offset)
+{
+    return decodeLazy(debugInfoCache_, offset, &readDebugInfo);
+}
+
+Result<const EncodedArrayItem*, ReadError> DexFile::callSiteValues(ca::u32 index)
+{
+    if (index >= callSites.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    return encodedArray(callSites[index].callSiteOff);
+}
+
+Result<std::vector<ca::u8>, WriteError> writeClassData(const ClassData& data)
+{
+    if (data.staticFields.size() > 0xFFFFFFFFu ||
+        data.instanceFields.size() > 0xFFFFFFFFu ||
+        data.directMethods.size() > 0xFFFFFFFFu ||
+        data.virtualMethods.size() > 0xFFFFFFFFu) {
+        return Err(WriteError::Unencodable);
+    }
+    if (!indicesStrictlyIncreasing(data.staticFields,
+                                   [](const EncodedField& f) { return f.fieldIndex; }) ||
+        !indicesStrictlyIncreasing(data.instanceFields,
+                                   [](const EncodedField& f) { return f.fieldIndex; }) ||
+        !indicesStrictlyIncreasing(data.directMethods,
+                                   [](const EncodedMethod& m) { return m.methodIndex; }) ||
+        !indicesStrictlyIncreasing(data.virtualMethods,
+                                   [](const EncodedMethod& m) { return m.methodIndex; })) {
+        return Err(WriteError::Unencodable);
+    }
+
+    std::vector<ca::u8> out;
+    writeUleb128(out, static_cast<ca::u32>(data.staticFields.size()));
+    writeUleb128(out, static_cast<ca::u32>(data.instanceFields.size()));
+    writeUleb128(out, static_cast<ca::u32>(data.directMethods.size()));
+    writeUleb128(out, static_cast<ca::u32>(data.virtualMethods.size()));
+
+    const auto writeFields = [&out](const std::vector<EncodedField>& fields) {
+        ca::u32 previous = 0;
+        bool first = true;
+        for (const EncodedField& field : fields) {
+            writeUleb128(out, first ? field.fieldIndex : field.fieldIndex - previous);
+            writeUleb128(out, field.accessFlags);
+            previous = field.fieldIndex;
+            first = false;
+        }
+    };
+    const auto writeMethods = [&out](const std::vector<EncodedMethod>& methods) {
+        ca::u32 previous = 0;
+        bool first = true;
+        for (const EncodedMethod& method : methods) {
+            writeUleb128(out, first ? method.methodIndex : method.methodIndex - previous);
+            writeUleb128(out, method.accessFlags);
+            writeUleb128(out, method.codeOff);
+            previous = method.methodIndex;
+            first = false;
+        }
+    };
+
+    writeFields(data.staticFields);
+    writeFields(data.instanceFields);
+    writeMethods(data.directMethods);
+    writeMethods(data.virtualMethods);
+    return Ok(std::move(out));
+}
+
+Result<std::vector<ca::u8>, WriteError> writeCodeItem(const CodeItem& item, ByteSlice insns)
+{
+    const ca::u64 expectedBytes = static_cast<ca::u64>(item.insnsSize) * 2u;
+    if (insns.size() != expectedBytes ||
+        item.tryBlocks.size() != static_cast<ca::usize>(item.triesSize)) {
+        return Err(WriteError::Unencodable);
+    }
+
+    std::vector<ca::u8> out;
+    appendU16(out, item.registersSize);
+    appendU16(out, item.insSize);
+    appendU16(out, item.outsSize);
+    appendU16(out, item.triesSize);
+    appendU32(out, item.debugInfoOff);
+    appendU32(out, item.insnsSize);
+    if (!insns.empty()) {
+        out.insert(out.end(), insns.data(), insns.data() + insns.size());
+    }
+
+    if (item.triesSize == 0) {
+        if (!item.catchHandlers.empty()) {
+            return Err(WriteError::Unencodable);
+        }
+        return Ok(std::move(out));
+    }
+
+    if ((item.insnsSize & 1u) != 0) {
+        appendU16(out, 0);  // insns 奇数 code unit 时，tries 前补 2 字节
+    }
+
+    std::vector<ca::u8> handlers;
+    if (item.catchHandlers.size() > 0xFFFFFFFFu) {
+        return Err(WriteError::Unencodable);
+    }
+    writeUleb128(handlers, static_cast<ca::u32>(item.catchHandlers.size()));
+    std::vector<ca::u32> handlerOffsets;
+    handlerOffsets.reserve(item.catchHandlers.size());
+    for (const CatchHandler& handler : item.catchHandlers) {
+        if (!handler.hasCatchAll && handler.typed.empty()) {
+            return Err(WriteError::Unencodable);
+        }
+        if (handler.typed.size() > 0x7FFFFFFFu) {
+            return Err(WriteError::Unencodable);
+        }
+        handlerOffsets.push_back(static_cast<ca::u32>(handlers.size()));
+        const ca::i32 signedCount =
+            handler.hasCatchAll ? -static_cast<ca::i32>(handler.typed.size())
+                                : static_cast<ca::i32>(handler.typed.size());
+        writeSleb128(handlers, signedCount);
+        for (const TypedCatch& typed : handler.typed) {
+            writeUleb128(handlers, typed.typeIdx);
+            writeUleb128(handlers, typed.address);
+        }
+        if (handler.hasCatchAll) {
+            writeUleb128(handlers, handler.catchAllAddress);
+        }
+    }
+
+    for (const TryBlock& block : item.tryBlocks) {
+        if (block.handlerIndex >= handlerOffsets.size()) {
+            return Err(WriteError::Unencodable);
+        }
+        const ca::u32 handlerOff = handlerOffsets[block.handlerIndex];
+        if (handlerOff > 0xFFFFu) {
+            return Err(WriteError::Unencodable);
+        }
+        appendU32(out, block.startAddress);
+        appendU16(out, block.insnCount);
+        appendU16(out, static_cast<ca::u16>(handlerOff));
+    }
+
+    out.insert(out.end(), handlers.begin(), handlers.end());
+    return Ok(std::move(out));
 }
 
 }   // namespace dex::core

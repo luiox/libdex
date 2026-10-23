@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: 3.0.9
+          package-cache: true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/cache@v4
+        with:
+          path: .oracle-cache
+          key: oracle-baksmali-2.5.2-${{ runner.os }}
+          restore-keys: |
+            oracle-baksmali-2.5.2-
+
+      - name: configure
+        run: xmake f -y --with_tests=y
+
+      - name: build
+        run: |
+          xmake build libdex_unittest
+          xmake build dexbuild
+
+      - name: unit tests
+        run: xmake run libdex_unittest --gtest_brief=1
+
+      - name: oracle (synthetic fixture)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          dexbuild="$(find build -maxdepth 4 -type f \( -name dexbuild -o -name dexbuild.exe \) | head -n 1)"
+          test -n "$dexbuild"
+          "$dexbuild" fixture "$tmp/hello.dex"
+          sh tools/oracle/check.sh "$tmp/hello.dex" "$dexbuild"

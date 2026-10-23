@@ -2,6 +2,7 @@
 /// @brief       DEX 骨架解析（header → map_list → ID 表 → class_defs）。
 #include "dex/core/reader.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -262,6 +263,42 @@ Result<std::unique_ptr<DexFile>, ReadError> readDex(ByteSlice bytes, const ReadO
         }
     }
 
+    // ---- 未建模 section 的原始区间（未知类型不丢弃） ----
+    {
+        struct Ordered
+        {
+            ca::u32 offset = 0;
+            ca::u32 index = 0;
+        };
+        std::vector<Ordered> ordered;
+        ordered.reserve(file->mapItems.size());
+        for (ca::u32 i = 0; i < file->mapItems.size(); ++i) {
+            ordered.push_back(Ordered{file->mapItems[i].offset, i});
+        }
+        std::sort(ordered.begin(), ordered.end(),
+                  [](const Ordered& a, const Ordered& b) { return a.offset < b.offset; });
+
+        const ca::u32 fileEnd = header.fileSize <= src.len()
+                                    ? header.fileSize
+                                    : static_cast<ca::u32>(src.len());
+        for (ca::usize k = 0; k < ordered.size(); ++k) {
+            const MapItem& item = file->mapItems[ordered[k].index];
+            if (isModeledMapType(item.type) || item.offset > src.len()) {
+                continue;
+            }
+            ca::u32 end = (k + 1 < ordered.size()) ? ordered[k + 1].offset : fileEnd;
+            if (end < item.offset) {
+                end = item.offset;
+            }
+            if (end > src.len()) {
+                end = static_cast<ca::u32>(src.len());
+            }
+            file->rawSections.push_back(RawSection{
+                static_cast<ca::u16>(item.type), item.size,
+                ByteSpan{item.offset, end - item.offset}});
+        }
+    }
+
     // ---- 五张 ID 表 + class_defs（定长条目，eager）----
 
     const ca::u32 stringCount = header.stringIdsSize;
@@ -387,6 +424,47 @@ Result<std::unique_ptr<DexFile>, ReadError> readDex(ByteSlice bytes, const ReadO
         }
     }
 
+    // ---- call_site_id 与 method_handle：没有头部计数，只由 map_list 定位 ----
+    if (const MapItem* item = file->findMapItem(MapType::CallSiteIdItem);
+        item != nullptr && item->size != 0) {
+        const Result<void, ReadError> r = readFixedTable(
+            src, item->size, item->offset, 4,
+            [&file](Reader& c) -> Result<void, ReadError> {
+                const Result<ca::u32, ReadError> off = c.u32();
+                if (off.is_err()) {
+                    return Err(off.unwrap_err());
+                }
+                file->callSites.push_back(CallSiteId{off.unwrap()});
+                return Ok();
+            });
+        if (r.is_err()) {
+            return Err(r.unwrap_err());
+        }
+    }
+
+    if (const MapItem* item = file->findMapItem(MapType::MethodHandleItem);
+        item != nullptr && item->size != 0) {
+        const Result<void, ReadError> r = readFixedTable(
+            src, item->size, item->offset, 8,
+            [&file](Reader& c) -> Result<void, ReadError> {
+                const Result<ca::u16, ReadError> handleType = c.u16();
+                const Result<ca::u16, ReadError> unused1 = c.u16();
+                const Result<ca::u16, ReadError> targetIdx = c.u16();
+                const Result<ca::u16, ReadError> unused2 = c.u16();
+                if (handleType.is_err() || unused1.is_err() || targetIdx.is_err() ||
+                    unused2.is_err()) {
+                    return Err(ReadError::Truncated);
+                }
+                file->methodHandles.push_back(MethodHandle{
+                    handleType.unwrap(), unused1.unwrap(), targetIdx.unwrap(),
+                    unused2.unwrap()});
+                return Ok();
+            });
+        if (r.is_err()) {
+            return Err(r.unwrap_err());
+        }
+    }
+
     // ---- 语义校验：悬垂索引只降级，不拒绝 ----
     const ca::u32 actualStringCount = file->stringCount();
     const ca::u32 actualTypeCount = file->typeCount();
@@ -438,6 +516,29 @@ Result<std::unique_ptr<DexFile>, ReadError> readDex(ByteSlice bytes, const ReadO
                             (def.staticValuesOff != 0 && def.staticValuesOff >= src.len());
         if (badRef) {
             diag.warn(ReadError::BadIndex, offset);
+        }
+    }
+
+    if (const MapItem* item = file->findMapItem(MapType::CallSiteIdItem)) {
+        for (ca::u32 i = 0; i < file->callSiteCount(); ++i) {
+            const ca::u32 off = file->callSites[i].callSiteOff;
+            if (off == 0 || off >= src.len()) {
+                diag.warn(ReadError::BadIndex, item->offset + i * 4u);
+            }
+        }
+    }
+    if (const MapItem* item = file->findMapItem(MapType::MethodHandleItem)) {
+        for (ca::u32 i = 0; i < file->methodHandleCount(); ++i) {
+            const MethodHandle& handle = file->methodHandles[i];
+            bool badRef = handle.handleType > 8;
+            if (!badRef) {
+                badRef = handle.handleType <= 3
+                             ? handle.targetIdx >= file->fieldCount()
+                             : handle.targetIdx >= file->methodCount();
+            }
+            if (badRef) {
+                diag.warn(ReadError::BadIndex, item->offset + i * 8u);
+            }
         }
     }
 

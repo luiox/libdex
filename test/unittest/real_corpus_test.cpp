@@ -6,6 +6,7 @@
 /// libjbc 真实语料政策同型）。
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -89,6 +90,157 @@ TEST(DexRealCorpus, ParseRoundtripSummary)
     }
 }
 
+TEST(DexRealCorpus, DecodeClassValuesAndAnnotations)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has no .dex files";
+    }
+
+    ca::u32 totalArrays = 0;
+    ca::u32 totalValues = 0;
+    ca::u32 totalAnnotationItems = 0;
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        auto parsed = dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+        ASSERT_TRUE(parsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+
+        for (ca::u32 classIdx = 0; classIdx < file->classCount(); ++classIdx) {
+            const auto values = file->staticValues(classIdx);
+            ASSERT_TRUE(values.is_ok())
+                << path.string() << " class " << classIdx << ": "
+                << dex::core::to_string(values.unwrap_err());
+            if (const dex::core::EncodedArrayItem* array = values.unwrap()) {
+                ++totalArrays;
+                totalValues += static_cast<ca::u32>(array->values.size());
+
+                // 解码 → 重编码必须逐字节还原 encoded_array_item 的源区间。
+                const auto encoded = dex::core::writeEncodedArray(array->values);
+                ASSERT_TRUE(encoded.is_ok())
+                    << path.string() << " static_values@" << array->raw.offset << ": "
+                    << dex::core::to_string(encoded.unwrap_err());
+                const dex::core::ByteSlice raw = dex::core::subOrEmpty(
+                    file->source(), array->raw.offset, array->raw.length);
+                ASSERT_EQ(encoded.unwrap().size(), raw.size())
+                    << path.string() << " static_values@" << array->raw.offset;
+                EXPECT_EQ(std::memcmp(encoded.unwrap().data(), raw.data(), raw.size()), 0)
+                    << path.string() << " static_values@" << array->raw.offset;
+            }
+
+            const auto annotations = file->classAnnotations(classIdx);
+            ASSERT_TRUE(annotations.is_ok())
+                << path.string() << " class " << classIdx << ": "
+                << dex::core::to_string(annotations.unwrap_err());
+            const dex::core::AnnotationsDirectory* directory = annotations.unwrap();
+            if (directory == nullptr) {
+                continue;
+            }
+
+            const auto directoryBytes = dex::core::writeAnnotationsDirectory(*directory);
+            ASSERT_TRUE(directoryBytes.is_ok())
+                << path.string() << " annotations_directory@" << directory->raw.offset << ": "
+                << dex::core::to_string(directoryBytes.unwrap_err());
+            const dex::core::ByteSlice directoryRaw = dex::core::subOrEmpty(
+                file->source(), directory->raw.offset, directory->raw.length);
+            ASSERT_EQ(directoryBytes.unwrap().size(), directoryRaw.size());
+            EXPECT_EQ(std::memcmp(directoryBytes.unwrap().data(), directoryRaw.data(),
+                                  directoryRaw.size()),
+                      0)
+                << path.string() << " annotations_directory@" << directory->raw.offset;
+
+            const auto readSet = [&](ca::u32 setOff) {
+                if (setOff == 0) {
+                    return;
+                }
+                const auto set = file->annotationSet(setOff);
+                ASSERT_TRUE(set.is_ok())
+                    << path.string() << " annotation_set@" << setOff << ": "
+                    << dex::core::to_string(set.unwrap_err());
+                if (set.unwrap() == nullptr) {
+                    return;
+                }
+
+                const auto setBytes = dex::core::writeAnnotationSet(*set.unwrap());
+                ASSERT_TRUE(setBytes.is_ok());
+                const dex::core::ByteSlice setRaw = dex::core::subOrEmpty(
+                    file->source(), set.unwrap()->raw.offset, set.unwrap()->raw.length);
+                ASSERT_EQ(setBytes.unwrap().size(), setRaw.size());
+                EXPECT_EQ(std::memcmp(setBytes.unwrap().data(), setRaw.data(), setRaw.size()),
+                          0)
+                    << path.string() << " annotation_set@" << setOff;
+
+                for (ca::u32 itemOff : set.unwrap()->annotationOffs) {
+                    const auto item = file->annotationItem(itemOff);
+                    ASSERT_TRUE(item.is_ok())
+                        << path.string() << " annotation_item@" << itemOff << ": "
+                        << dex::core::to_string(item.unwrap_err());
+                    ASSERT_NE(item.unwrap(), nullptr);
+                    ++totalAnnotationItems;
+
+                    // 注解体解码 → 重编码必须逐字节还原（visibility 字节除外）。
+                    const dex::core::AnnotationItem* annotation = item.unwrap();
+                    const auto encoded =
+                        dex::core::writeEncodedAnnotation(annotation->annotation);
+                    ASSERT_TRUE(encoded.is_ok())
+                        << path.string() << " annotation_item@" << itemOff << ": "
+                        << dex::core::to_string(encoded.unwrap_err());
+                    ASSERT_GE(annotation->raw.length, 1u);
+                    const dex::core::ByteSlice raw = dex::core::subOrEmpty(
+                        file->source(), annotation->raw.offset + 1,
+                        annotation->raw.length - 1);
+                    ASSERT_EQ(encoded.unwrap().size(), raw.size())
+                        << path.string() << " annotation_item@" << itemOff;
+                    EXPECT_EQ(std::memcmp(encoded.unwrap().data(), raw.data(), raw.size()), 0)
+                        << path.string() << " annotation_item@" << itemOff;
+                }
+            };
+
+            readSet(directory->classAnnotationsOff);
+            for (const dex::core::AnnotationsDirectoryEntry& entry :
+                 directory->fieldAnnotations) {
+                readSet(entry.annotationsOff);
+            }
+            for (const dex::core::AnnotationsDirectoryEntry& entry :
+                 directory->methodAnnotations) {
+                readSet(entry.annotationsOff);
+            }
+            for (const dex::core::AnnotationsDirectoryEntry& entry :
+                 directory->parameterAnnotations) {
+                const auto refs = file->annotationSetRefList(entry.annotationsOff);
+                ASSERT_TRUE(refs.is_ok())
+                    << path.string() << " annotation_set_ref_list@" << entry.annotationsOff
+                    << ": " << dex::core::to_string(refs.unwrap_err());
+                if (refs.unwrap() == nullptr) {
+                    continue;
+                }
+
+                const auto refsBytes = dex::core::writeAnnotationSetRefList(*refs.unwrap());
+                ASSERT_TRUE(refsBytes.is_ok());
+                const dex::core::ByteSlice refsRaw = dex::core::subOrEmpty(
+                    file->source(), refs.unwrap()->raw.offset, refs.unwrap()->raw.length);
+                ASSERT_EQ(refsBytes.unwrap().size(), refsRaw.size());
+                EXPECT_EQ(std::memcmp(refsBytes.unwrap().data(), refsRaw.data(),
+                                      refsRaw.size()),
+                          0)
+                    << path.string() << " annotation_set_ref_list@" << entry.annotationsOff;
+
+                for (ca::u32 setOff : refs.unwrap()->annotationSetOffs) {
+                    readSet(setOff);
+                }
+            }
+        }
+    }
+
+    EXPECT_GT(totalArrays, 0u);
+    EXPECT_GT(totalValues, 0u);
+    EXPECT_GT(totalAnnotationItems, 0u);
+}
+
 TEST(DexRealCorpus, DecodeAllMethodInsns)
 {
     const std::vector<std::filesystem::path> files = corpusFiles();
@@ -105,6 +257,13 @@ TEST(DexRealCorpus, DecodeAllMethodInsns)
             << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
         std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
 
+        for (ca::u32 i = 0; i < file->callSiteCount(); ++i) {
+            const auto values = file->callSiteValues(i);
+            ASSERT_TRUE(values.is_ok())
+                << path.string() << " call_site " << i << ": "
+                << dex::core::to_string(values.unwrap_err());
+        }
+
         for (ca::u32 classIdx = 0; classIdx < file->classCount(); ++classIdx) {
             const auto dataResult = file->classData(classIdx);
             ASSERT_TRUE(dataResult.is_ok())
@@ -114,6 +273,16 @@ TEST(DexRealCorpus, DecodeAllMethodInsns)
             if (data == nullptr) {
                 continue;
             }
+
+            const auto dataBytes = dex::core::writeClassData(*data);
+            ASSERT_TRUE(dataBytes.is_ok())
+                << path.string() << " class_data@" << data->raw.offset << ": "
+                << dex::core::to_string(dataBytes.unwrap_err());
+            const dex::core::ByteSlice dataRaw = dex::core::subOrEmpty(
+                file->source(), data->raw.offset, data->raw.length);
+            ASSERT_EQ(dataBytes.unwrap().size(), dataRaw.size());
+            EXPECT_EQ(std::memcmp(dataBytes.unwrap().data(), dataRaw.data(), dataRaw.size()), 0)
+                << path.string() << " class_data@" << data->raw.offset;
 
             const std::vector<dex::core::EncodedMethod>* methodLists[2] = {
                 &data->directMethods,
@@ -132,6 +301,28 @@ TEST(DexRealCorpus, DecodeAllMethodInsns)
                     const dex::core::CodeItem* code = codeResult.unwrap();
                     ASSERT_NE(code, nullptr);
 
+                    if (code->debugInfoOff != 0) {
+                        const auto info = file->debugInfo(code->debugInfoOff);
+                        ASSERT_TRUE(info.is_ok())
+                            << path.string() << " debug_info@" << code->debugInfoOff << ": "
+                            << dex::core::to_string(info.unwrap_err());
+                        ASSERT_NE(info.unwrap(), nullptr);
+
+                        const auto encoded = dex::core::writeDebugInfo(*info.unwrap());
+                        ASSERT_TRUE(encoded.is_ok())
+                            << path.string() << " debug_info@" << code->debugInfoOff << ": "
+                            << dex::core::to_string(encoded.unwrap_err());
+                        const dex::core::ByteSlice raw = dex::core::subOrEmpty(
+                            file->source(), info.unwrap()->raw.offset,
+                            info.unwrap()->raw.length);
+                        ASSERT_EQ(encoded.unwrap().size(), raw.size())
+                            << path.string() << " debug_info@" << code->debugInfoOff;
+                        EXPECT_EQ(std::memcmp(encoded.unwrap().data(), raw.data(),
+                                              raw.size()),
+                                  0)
+                            << path.string() << " debug_info@" << code->debugInfoOff;
+                    }
+
                     const dex::core::ByteSlice insnsBytes = dex::core::subOrEmpty(
                         file->source(), code->insns.offset, code->insns.length);
                     ASSERT_EQ(insnsBytes.size(), static_cast<ca::usize>(code->insnsSize) * 2u);
@@ -142,14 +333,37 @@ TEST(DexRealCorpus, DecodeAllMethodInsns)
                         << dex::core::to_string(decodedResult.unwrap_err());
                     const std::vector<dex::core::Insn>& insns = decodedResult.unwrap();
 
-                    auto domResult = dex::ir::buildCodeDom(*file, method.codeOff);
-                    ASSERT_TRUE(domResult.is_ok())
+                    // 低层编码器必须逐字节还原源指令流：不合并 const 形态，
+                    // 不重排 payload，nop 变体的未用高位也原样保留。
+                    const auto encodedResult = dex::core::encodeInsns(insns);
+                    ASSERT_TRUE(encodedResult.is_ok())
                         << path.string() << " code_item@" << code->offset << ": "
-                        << dex::ir::to_string(domResult.unwrap_err());
-                    const dex::ir::CodeDom& dom = std::move(domResult).unwrap();
-                    EXPECT_TRUE(dom.issues().empty())
-                        << path.string() << " code_item@" << code->offset << " issues="
-                        << dom.issues().size();
+                        << dex::core::to_string(encodedResult.unwrap_err());
+                    const std::vector<ca::u8>& encoded = encodedResult.unwrap();
+                    ASSERT_EQ(encoded.size(), insnsBytes.size())
+                        << path.string() << " code_item@" << code->offset;
+                    EXPECT_EQ(std::memcmp(encoded.data(), insnsBytes.data(),
+                                          insnsBytes.size()),
+                              0)
+                        << path.string() << " code_item@" << code->offset;
+
+                    const auto itemBytes = dex::core::writeCodeItem(
+                        *code, dex::core::ByteSlice{encoded.data(), encoded.size()});
+                    ASSERT_TRUE(itemBytes.is_ok())
+                        << path.string() << " code_item@" << code->offset << ": "
+                        << dex::core::to_string(itemBytes.unwrap_err());
+                    const ca::u32 itemEnd =
+                        code->handlersOff != 0
+                            ? code->handlers.offset + code->handlers.length
+                            : code->raw.offset + code->raw.length;
+                    const dex::core::ByteSlice itemRaw = dex::core::subOrEmpty(
+                        file->source(), code->offset, itemEnd - code->offset);
+                    ASSERT_EQ(itemBytes.unwrap().size(), itemRaw.size())
+                        << path.string() << " code_item@" << code->offset;
+                    EXPECT_EQ(std::memcmp(itemBytes.unwrap().data(), itemRaw.data(),
+                                          itemRaw.size()),
+                              0)
+                        << path.string() << " code_item@" << code->offset;
 
                     std::unordered_map<ca::u32, ca::usize> indexByAddress;
                     indexByAddress.reserve(insns.size());
@@ -212,5 +426,183 @@ TEST(DexRealCorpus, DecodeAllMethodInsns)
                 }
             }
         }
+    }
+
+}
+
+TEST(DexRealCorpus, RebuildsCanonical)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has no .dex files";
+    }
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        auto parsed = dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+        ASSERT_TRUE(parsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+
+        auto built = dex::core::buildDex(*file);
+        ASSERT_TRUE(built.is_ok())
+            << path.string() << ": " << dex::core::to_string(built.unwrap_err());
+        const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+        auto reparsed = dex::core::readDex(
+            dex::core::ByteSlice{rebuilt.data(), rebuilt.size()});
+        ASSERT_TRUE(reparsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(reparsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> second = std::move(reparsed).unwrap();
+
+        ASSERT_EQ(second->state(), dex::core::ParseState::Validated) << path.string();
+        const dex::core::Integrity integrity = dex::core::verifyIntegrity(
+            second->source(), second->header.checksum, second->header.signature);
+        EXPECT_TRUE(integrity.checksumOk) << path.string();
+        EXPECT_TRUE(integrity.signatureOk) << path.string();
+
+        EXPECT_EQ(second->stringCount(), file->stringCount()) << path.string();
+        EXPECT_EQ(second->typeCount(), file->typeCount()) << path.string();
+        EXPECT_EQ(second->protoCount(), file->protoCount()) << path.string();
+        EXPECT_EQ(second->fieldCount(), file->fieldCount()) << path.string();
+        EXPECT_EQ(second->methodCount(), file->methodCount()) << path.string();
+        EXPECT_EQ(second->classCount(), file->classCount()) << path.string();
+
+        for (ca::u32 classIdx = 0; classIdx < file->classCount(); ++classIdx) {
+            const auto firstData = file->classData(classIdx);
+            const auto secondData = second->classData(classIdx);
+            ASSERT_TRUE(firstData.is_ok()) << path.string() << " class " << classIdx;
+            ASSERT_TRUE(secondData.is_ok()) << path.string() << " class " << classIdx;
+            if (firstData.unwrap() == nullptr) {
+                EXPECT_EQ(secondData.unwrap(), nullptr)
+                    << path.string() << " class " << classIdx;
+                continue;
+            }
+            ASSERT_NE(secondData.unwrap(), nullptr) << path.string() << " class " << classIdx;
+
+            const std::vector<dex::core::EncodedMethod>* firstLists[2] = {
+                &firstData.unwrap()->directMethods,
+                &firstData.unwrap()->virtualMethods,
+            };
+            const std::vector<dex::core::EncodedMethod>* secondLists[2] = {
+                &secondData.unwrap()->directMethods,
+                &secondData.unwrap()->virtualMethods,
+            };
+            for (ca::u32 listIdx = 0; listIdx < 2; ++listIdx) {
+                ASSERT_EQ(secondLists[listIdx]->size(), firstLists[listIdx]->size())
+                    << path.string() << " class " << classIdx;
+                for (ca::usize i = 0; i < firstLists[listIdx]->size(); ++i) {
+                    const dex::core::EncodedMethod& firstMethod = (*firstLists[listIdx])[i];
+                    const dex::core::EncodedMethod& secondMethod = (*secondLists[listIdx])[i];
+                    EXPECT_EQ(secondMethod.methodIndex, firstMethod.methodIndex);
+                    EXPECT_EQ(secondMethod.accessFlags, firstMethod.accessFlags);
+                    EXPECT_EQ(secondMethod.codeOff == 0, firstMethod.codeOff == 0);
+                    if (firstMethod.codeOff == 0) {
+                        continue;
+                    }
+
+                    const auto firstCode = file->codeItem(firstMethod.codeOff);
+                    const auto secondCode = second->codeItem(secondMethod.codeOff);
+                    ASSERT_TRUE(firstCode.is_ok());
+                    ASSERT_TRUE(secondCode.is_ok());
+                    ASSERT_NE(firstCode.unwrap(), nullptr);
+                    ASSERT_NE(secondCode.unwrap(), nullptr);
+
+                    const dex::core::ByteSlice firstInsns = dex::core::subOrEmpty(
+                        file->source(), firstCode.unwrap()->insns.offset,
+                        firstCode.unwrap()->insns.length);
+                    const dex::core::ByteSlice secondInsns = dex::core::subOrEmpty(
+                        second->source(), secondCode.unwrap()->insns.offset,
+                        secondCode.unwrap()->insns.length);
+                    ASSERT_EQ(secondInsns.size(), firstInsns.size())
+                        << path.string() << " method " << firstMethod.methodIndex;
+                    EXPECT_EQ(std::memcmp(secondInsns.data(), firstInsns.data(),
+                                          firstInsns.size()),
+                              0)
+                        << path.string() << " method " << firstMethod.methodIndex;
+                    EXPECT_EQ(secondCode.unwrap()->registersSize,
+                              firstCode.unwrap()->registersSize);
+                    EXPECT_EQ(secondCode.unwrap()->insSize, firstCode.unwrap()->insSize);
+                    EXPECT_EQ(secondCode.unwrap()->outsSize, firstCode.unwrap()->outsSize);
+                    EXPECT_EQ(secondCode.unwrap()->triesSize,
+                              firstCode.unwrap()->triesSize);
+                    EXPECT_EQ(secondCode.unwrap()->debugInfoOff == 0,
+                              firstCode.unwrap()->debugInfoOff == 0);
+                }
+            }
+        }
+
+        // 注解族与静态初值的偏移在新布局中必须仍然可解。
+        for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+            const auto values = second->staticValues(classIdx);
+            ASSERT_TRUE(values.is_ok()) << path.string() << " class " << classIdx;
+            const auto annotations = second->classAnnotations(classIdx);
+            ASSERT_TRUE(annotations.is_ok()) << path.string() << " class " << classIdx;
+            const dex::core::AnnotationsDirectory* directory = annotations.unwrap();
+            if (directory == nullptr) {
+                continue;
+            }
+
+            const auto checkSet = [&](ca::u32 setOff) {
+                if (setOff == 0) {
+                    return;
+                }
+                const auto set = second->annotationSet(setOff);
+                ASSERT_TRUE(set.is_ok())
+                    << path.string() << " annotation_set@" << setOff << ": "
+                    << dex::core::to_string(set.unwrap_err());
+                ASSERT_NE(set.unwrap(), nullptr) << path.string() << " annotation_set@" << setOff;
+                for (ca::u32 itemOff : set.unwrap()->annotationOffs) {
+                    const auto item = second->annotationItem(itemOff);
+                    ASSERT_TRUE(item.is_ok())
+                        << path.string() << " annotation_item@" << itemOff << ": "
+                        << dex::core::to_string(item.unwrap_err());
+                    ASSERT_NE(item.unwrap(), nullptr)
+                        << path.string() << " annotation_item@" << itemOff;
+                }
+            };
+
+            checkSet(directory->classAnnotationsOff);
+            for (const dex::core::AnnotationsDirectoryEntry& entry :
+                 directory->fieldAnnotations) {
+                checkSet(entry.annotationsOff);
+            }
+            for (const dex::core::AnnotationsDirectoryEntry& entry :
+                 directory->methodAnnotations) {
+                checkSet(entry.annotationsOff);
+            }
+            for (const dex::core::AnnotationsDirectoryEntry& entry :
+                 directory->parameterAnnotations) {
+                if (entry.annotationsOff == 0) {
+                    continue;
+                }
+                const auto refs = second->annotationSetRefList(entry.annotationsOff);
+                ASSERT_TRUE(refs.is_ok())
+                    << path.string() << " annotation_set_ref_list@" << entry.annotationsOff
+                    << ": " << dex::core::to_string(refs.unwrap_err());
+                ASSERT_NE(refs.unwrap(), nullptr);
+                for (ca::u32 setOff : refs.unwrap()->annotationSetOffs) {
+                    checkSet(setOff);
+                }
+            }
+        }
+        for (ca::u32 i = 0; i < second->callSiteCount(); ++i) {
+            const auto values = second->callSiteValues(i);
+            ASSERT_TRUE(values.is_ok()) << path.string() << " call_site " << i;
+        }
+        for (ca::u32 i = 0; i < second->methodHandleCount(); ++i) {
+            const dex::core::MethodHandle& handle = second->methodHandles[i];
+            ASSERT_LE(handle.handleType, 8u);
+            const ca::u32 limit =
+                handle.handleType <= 3 ? second->fieldCount() : second->methodCount();
+            EXPECT_LT(handle.targetIdx, limit);
+        }
+
+        auto builtAgain = dex::core::buildDex(*second);
+        ASSERT_TRUE(builtAgain.is_ok())
+            << path.string() << ": " << dex::core::to_string(builtAgain.unwrap_err());
+        EXPECT_EQ(builtAgain.unwrap(), rebuilt) << path.string();
     }
 }

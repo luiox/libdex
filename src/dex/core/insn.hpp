@@ -29,6 +29,22 @@ enum class InsnError {
 /// @brief 错误码的可读文本。
 const char* to_string(InsnError e) noexcept;
 
+/// @brief 指令编码失败原因。
+///
+/// 编码只做「按该 opcode 的定长格式逐位写入」，不做形态提升或合并：
+/// `const/4` 不会自动改成 `const/16`，`const-string` 不会自动改成 jumbo。
+/// 形态选择是调用方（adapter）的职责。
+enum class InsnEncodeError {
+    Ok = 0,
+    BadFormat,          ///< 未定义操作码，或 format 字段与 opcode 的格式不符
+    OperandOverflow,    ///< 寄存器、索引、立即数或分支偏移超出该格式的域宽
+    BadPayload,         ///< payload 的计数与载荷数据长度不一致
+    MisalignedPayload,  ///< payload 落在奇 code unit 地址
+};
+
+/// @brief 错误码的可读文本。
+const char* to_string(InsnEncodeError e) noexcept;
+
 /// @brief payload 伪指令种类。
 enum class PayloadKind : ca::u8 {
     None = 0,
@@ -71,6 +87,12 @@ struct Insn
     ca::u16 payloadElementWidth = 0; ///< 仅 fill-array-data
     ByteSlice payloadData{};         ///< packed/sparse 的条目区；fill 的原始数据
 
+    /// @brief 本条指令的原始 code unit 字节（width*2），借用入参。
+    ///
+    /// 保留原字节而不是只留语义字段：ART 接受高字节非零的 nop 变体，
+    /// 只按语义重编码会丢掉这些字节；后续编码器据此判断可否原样写回。
+    ByteSlice raw{};
+
     bool isPayload() const noexcept { return format == InsnFormat::Payload; }
 
     /// @brief 是否为带分支偏移的指令（含 31t 的三类）。
@@ -105,5 +127,21 @@ struct Insn
 /// 0x0100/0x0200/0x0300 开头的偶数地址 code unit 识别为 payload；低字节为 0、
 /// 高字节非 payload 标识的 code unit 按 ART 的宽容度当作 nop（宽度 1）。
 Result<std::vector<Insn>, InsnError> decodeInsns(ByteSlice insns);
+
+/// @brief 按 opcode 的定长格式精确编码一条指令，追加到 @p out。
+///
+/// 只写该操作码对应的格式，不做形态选择。10x/20t/30t/32x 的未用高位在
+/// @ref Insn::raw 与当前 opcode 一致时原样沿用，保证 nop 变体等源字节可还原；
+/// payload 由 @ref Insn::payloadData 与计数字段重写。
+///
+/// @warning 单条编码不知道流位置，payload 的偶数地址约束由
+///          @ref encodeInsns 检查；直接调用本函数时由调用方保证。
+Result<void, InsnEncodeError> encodeInsn(const Insn& insn, std::vector<ca::u8>& out);
+
+/// @brief 按给定顺序精确编码整条指令流（含 payload）。
+///
+/// payload 必须落在偶数 code unit 地址（@p out 的字节偏移为 4 的倍数），
+/// 否则返回 Err(MisalignedPayload)，不自动插入 nop 填充。
+Result<std::vector<ca::u8>, InsnEncodeError> encodeInsns(const std::vector<Insn>& insns);
 
 }   // namespace dex::core

@@ -75,12 +75,30 @@ target("libdex")
 
     add_deps("libca_core", "libca_str", "libca_crypto")
     add_packages("libjstr", {public = true})
-    add_files("src/dex/core/*.cpp", "src/dex/type/*.cpp", "src/dex/ir/*.cpp")
+    add_files("src/dex/core/*.cpp", "src/dex/type/*.cpp")
     add_headerfiles("src/(dex/**.hpp)")
     add_includedirs("src", {public = true})
 
     set_languages("cxx17")
 
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
+-- 对拍与人工排查用 CLI：与单测共享合成 fixture，不默认构建。
+target("dexbuild")
+    set_kind("binary")
+    set_group("tools")
+    set_default(false)
+
+    add_deps("libdex")
+    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core", "zlib")
+    add_files("tools/dexbuild/*.cpp", "test/unittest/dex_fixture.cpp")
+    add_includedirs("src", "test/unittest")
+
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
     if is_plat("windows") then
         add_cxflags("/utf-8", {tools = "cl"})
     end

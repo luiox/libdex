@@ -75,9 +75,9 @@ TEST(DexInsn, DecodesOperandFormats)
         0x0038, 0xfffa,                          // 10: if-eqz v0, -6
         0x21d0, 0xfffe,                          // 12: add-int/lit16 v1, v2, #-2
         0x01d8, 0xff02,                          // 14: add-int/lit8 v1, v2, #-1
-        0x026e, 0x0005, 0x0021,                  // 16: invoke-virtual {v1, v2}, method@5
+        0x206e, 0x0005, 0x0021,                  // 16: invoke-virtual {v1, v2}, method@5
         0x0374, 0x0006, 0x0003,                  // 19: invoke-virtual/range {v3..v5}, method@6
-        0x01fa, 0x0007, 0x0000, 0x0008,          // 22: invoke-polymorphic {v0}, method@7, proto@8
+        0x11fa, 0x0007, 0x0000, 0x0008,          // 22: invoke-polymorphic {v0}, method@7, proto@8
         0x0015, 0x1234,                          // 26: const/high16 v0, #0x1234
         0x0019, 0x1234,                          // 28: const-wide/high16 v0, #0x1234
         0x0018, 0x7788, 0x5566, 0x3344, 0x1122,  // 30: const-wide v0, #0x1122334455667788
@@ -181,6 +181,10 @@ TEST(DexInsn, DecodesOperandFormats)
 
     EXPECT_EQ(insns[18].format, InsnFormat::F31c);
     EXPECT_EQ(insns[18].index, 0x00012345u);
+
+    const auto encoded = encodeInsns(insns);
+    ASSERT_TRUE(encoded.is_ok()) << to_string(encoded.unwrap_err());
+    EXPECT_EQ(encoded.unwrap(), bytes);
 }
 
 TEST(DexInsn, SignExtendsImmediates)
@@ -231,6 +235,10 @@ TEST(DexInsn, DecodesPackedSwitchPayload)
     EXPECT_EQ(payload.payloadFirstKey, 10);
     EXPECT_EQ(payload.packedSwitchTarget(0), -2);
     EXPECT_EQ(payload.packedSwitchTarget(1), 3);
+
+    const auto encoded = encodeInsns(insns);
+    ASSERT_TRUE(encoded.is_ok()) << to_string(encoded.unwrap_err());
+    EXPECT_EQ(encoded.unwrap(), bytes);
 }
 
 TEST(DexInsn, DecodesSparseSwitchPayload)
@@ -259,6 +267,10 @@ TEST(DexInsn, DecodesSparseSwitchPayload)
     EXPECT_EQ(payload.sparseSwitchKey(1), 9);
     EXPECT_EQ(payload.sparseSwitchTarget(0), -2);
     EXPECT_EQ(payload.sparseSwitchTarget(1), 4);
+
+    const auto encoded = encodeInsns(insns);
+    ASSERT_TRUE(encoded.is_ok()) << to_string(encoded.unwrap_err());
+    EXPECT_EQ(encoded.unwrap(), bytes);
 }
 
 TEST(DexInsn, DecodesFillArrayDataPayload)
@@ -285,6 +297,10 @@ TEST(DexInsn, DecodesFillArrayDataPayload)
     ASSERT_EQ(payload.payloadData.size(), 6u);
     EXPECT_EQ(payload.payloadData.data()[0], 0x22u);
     EXPECT_EQ(payload.payloadData.data()[5], 0x55u);
+
+    const auto encoded = encodeInsns(insns);
+    ASSERT_TRUE(encoded.is_ok()) << to_string(encoded.unwrap_err());
+    EXPECT_EQ(encoded.unwrap(), bytes);
 }
 
 TEST(DexInsn, RejectsUnknownOpcode)
@@ -344,6 +360,81 @@ TEST(DexInsn, EmptyStreamDecodesToNothing)
     const auto result = decodeInsns(ByteSlice{});
     ASSERT_TRUE(result.is_ok());
     EXPECT_TRUE(result.unwrap().empty());
+}
+
+TEST(DexInsn, PreservesRawCodeUnits)
+{
+    // 第二个 unit 是高字节非零的 nop 变体：语义上仍是 nop，原始字节必须保留。
+    const std::vector<ca::u8> bytes = codeUnits({0x0000, 0xAB00, 0x000E});
+    const auto decoded = decodeInsns(viewOf(bytes));
+    ASSERT_TRUE(decoded.is_ok());
+    ASSERT_EQ(decoded.unwrap().size(), 3u);
+
+    EXPECT_EQ(decoded.unwrap()[0].raw.size(), 2u);
+    EXPECT_EQ(decoded.unwrap()[0].raw[1], 0x00);
+    EXPECT_EQ(decoded.unwrap()[1].raw.size(), 2u);
+    EXPECT_EQ(decoded.unwrap()[1].raw[0], 0x00);
+    EXPECT_EQ(decoded.unwrap()[1].raw[1], 0xAB);
+    EXPECT_EQ(decoded.unwrap()[2].raw.size(), 2u);
+    EXPECT_EQ(decoded.unwrap()[2].raw[0], 0x0E);
+}
+
+TEST(DexInsn, RejectsUnencodableInsns)
+{
+    std::vector<ca::u8> out;
+
+    Insn regOverflow;
+    regOverflow.opcode = 0x01;  // move (12x)
+    regOverflow.format = InsnFormat::F12x;
+    regOverflow.registers[0] = 16;
+    EXPECT_EQ(encodeInsn(regOverflow, out).unwrap_err(),
+              InsnEncodeError::OperandOverflow);
+    EXPECT_TRUE(out.empty());
+
+    Insn indexOverflow;
+    indexOverflow.opcode = 0x1a;  // const-string
+    indexOverflow.format = InsnFormat::F21c;
+    indexOverflow.index = 0x10000;
+    out.clear();
+    EXPECT_EQ(encodeInsn(indexOverflow, out).unwrap_err(),
+              InsnEncodeError::OperandOverflow);
+    EXPECT_TRUE(out.empty());
+
+    Insn high16;
+    high16.opcode = 0x15;  // const/high16
+    high16.format = InsnFormat::F21h;
+    high16.literal = 1;
+    out.clear();
+    EXPECT_EQ(encodeInsn(high16, out).unwrap_err(), InsnEncodeError::OperandOverflow);
+
+    Insn callCount;
+    callCount.opcode = 0x6e;  // invoke-virtual
+    callCount.format = InsnFormat::F35c;
+    callCount.registerCount = 16;
+    out.clear();
+    EXPECT_EQ(encodeInsn(callCount, out).unwrap_err(), InsnEncodeError::OperandOverflow);
+
+    Insn badFormat;
+    badFormat.opcode = 0x12;
+    badFormat.format = InsnFormat::F10x;
+    out.clear();
+    EXPECT_EQ(encodeInsn(badFormat, out).unwrap_err(), InsnEncodeError::BadFormat);
+
+    Insn unknownOpcode;
+    unknownOpcode.opcode = 0x3e;
+    unknownOpcode.format = InsnFormat::F10x;
+    out.clear();
+    EXPECT_EQ(encodeInsn(unknownOpcode, out).unwrap_err(), InsnEncodeError::BadFormat);
+
+    Insn returnVoid;
+    returnVoid.opcode = 0x0e;
+    returnVoid.format = InsnFormat::F10x;
+    Insn payload;
+    payload.format = InsnFormat::Payload;
+    payload.payloadKind = PayloadKind::PackedSwitch;
+    const auto misaligned = encodeInsns({returnVoid, payload});
+    ASSERT_TRUE(misaligned.is_err());
+    EXPECT_EQ(misaligned.unwrap_err(), InsnEncodeError::MisalignedPayload);
 }
 
 TEST(DexInsn, DecodesFixtureCodeItem)

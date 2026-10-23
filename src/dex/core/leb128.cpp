@@ -64,4 +64,31 @@ Result<ca::i32, ReadError> readSleb128(Reader& cur) noexcept
     return Err(ReadError::BadLeb128);
 }
 
+void writeUleb128(std::vector<ca::u8>& out, ca::u32 value)
+{
+    do {
+        ca::u8 byte = static_cast<ca::u8>(value & 0x7Fu);
+        value >>= 7;
+        if (value != 0) {
+            byte = static_cast<ca::u8>(byte | 0x80u);
+        }
+        out.push_back(byte);
+    } while (value != 0);
+}
+
+void writeSleb128(std::vector<ca::u8>& out, ca::i32 value)
+{
+    bool more = true;
+    while (more) {
+        ca::u8 byte = static_cast<ca::u8>(value & 0x7F);
+        value >>= 7;  // 算术右移
+        const bool signSet = (byte & 0x40u) != 0;
+        more = !((value == 0 && !signSet) || (value == -1 && signSet));
+        if (more) {
+            byte = static_cast<ca::u8>(byte | 0x80u);
+        }
+        out.push_back(byte);
+    }
+}
+
 }   // namespace dex::core

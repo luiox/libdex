@@ -31,18 +31,20 @@ enum class ReadError {
     BadLeb128,             ///< LEB128 编码超过 32 位或字节数超限
     BadClassData,          ///< class_data_item 的计数/差分/索引非法
     BadCodeItem,           ///< code_item 头部、指令区或 tries 区越界/自相矛盾
+    BadEncodedValue,       ///< encoded_value 的类型、value_arg 或嵌套深度非法
     BadIndex,              ///< 索引悬垂或指向错误类型的条目（诊断）
     BadChecksum,           ///< adler32 校验和不符（诊断）
     BadSignature,          ///< SHA-1 签名不符（诊断）
 };
 
 /// @brief 写出失败原因。
-///
-/// 只读核阶段只有未修改透传路径；重编码错误面（Unencodable/NotModeled）随
-/// 编辑写回阶段落地。
 enum class WriteError {
     Ok = 0,
-    MissingSource,  ///< 需要源字节但模型未保留
+    MissingSource,     ///< 需要源字节但模型未保留
+    Unencodable,       ///< 模型内容超出其编码域宽或自相矛盾，拒绝产出截断字节
+    NotModeled,        ///< 版本或结构没有冻结语义（041 container、非空 link 区）
+    SourceUnreadable,  ///< 重建需要再次解码源条目，但源字节不可读
+    InvalidModel,      ///< 模型引用缺失或替换项指向不存在/无方法体的方法
 };
 
 /// @brief 模型的解析状态：描述能力，而非合法性。

@@ -78,6 +78,7 @@ Result<Insn, InsnError> decodePayload(const CodeUnits& code, ca::u32 address)
         ins.payloadFirstKey = signExtend(code.u32At(address + 2), 32);
         ins.payloadData = code.bytesAt(address + 4, static_cast<ca::usize>(size) * 4u);
         ins.width = width;
+        ins.raw = code.bytesAt(address, static_cast<ca::usize>(width) * 2u);
         return Ok(ins);
     }
 
@@ -94,6 +95,7 @@ Result<Insn, InsnError> decodePayload(const CodeUnits& code, ca::u32 address)
         ins.payloadCount = size;
         ins.payloadData = code.bytesAt(address + 2, static_cast<ca::usize>(size) * 8u);
         ins.width = width;
+        ins.raw = code.bytesAt(address, static_cast<ca::usize>(width) * 2u);
         return Ok(ins);
     }
 
@@ -116,6 +118,7 @@ Result<Insn, InsnError> decodePayload(const CodeUnits& code, ca::u32 address)
     ins.payloadElementWidth = elementWidth;
     ins.payloadData = code.bytesAt(address + 4, static_cast<ca::usize>(dataBytes));
     ins.width = static_cast<ca::u32>(width);
+    ins.raw = code.bytesAt(address, static_cast<ca::usize>(width) * 2u);
     return Ok(ins);
 }
 
@@ -230,12 +233,13 @@ void decodeOperands(const CodeUnits& code, Insn& ins) noexcept
         ins.index = code.u32At(address + 1);
         break;
     case InsnFormat::F35c:
-        ins.registerCount = (u0 >> 8) & 0x0Fu;
+        // unit0 = A|G|op：A 是高 nibble（参数个数），G 是 bits 11..8（第五个寄存器）。
+        ins.registerCount = u0 >> 12;
         ins.registers[0] = u2 & 0x0Fu;
         ins.registers[1] = (u2 >> 4) & 0x0Fu;
         ins.registers[2] = (u2 >> 8) & 0x0Fu;
         ins.registers[3] = (u2 >> 12) & 0x0Fu;
-        ins.registers[4] = u0 >> 12;
+        ins.registers[4] = (u0 >> 8) & 0x0Fu;
         ins.index = u1;
         break;
     case InsnFormat::F3rc:
@@ -244,12 +248,13 @@ void decodeOperands(const CodeUnits& code, Insn& ins) noexcept
         ins.index = u1;
         break;
     case InsnFormat::F45cc:
-        ins.registerCount = (u0 >> 8) & 0x0Fu;
+        // 同 35c：A 在高 nibble，G 在 bits 11..8。
+        ins.registerCount = u0 >> 12;
         ins.registers[0] = u2 & 0x0Fu;
         ins.registers[1] = (u2 >> 4) & 0x0Fu;
         ins.registers[2] = (u2 >> 8) & 0x0Fu;
         ins.registers[3] = (u2 >> 12) & 0x0Fu;
-        ins.registers[4] = u0 >> 12;
+        ins.registers[4] = (u0 >> 8) & 0x0Fu;
         ins.index = u1;
         ins.protoIndex = code.at(address + 3);
         ins.hasProtoIndex = true;
@@ -308,6 +313,7 @@ Result<std::vector<Insn>, InsnError> decodeInsns(ByteSlice insns)
             ins.width = 1;
             ins.opcode = 0;
             ins.format = InsnFormat::F10x;
+            ins.raw = code.bytesAt(address, 2);
             decoded.push_back(ins);
             ++address;
             continue;
@@ -329,11 +335,366 @@ Result<std::vector<Insn>, InsnError> decodeInsns(ByteSlice insns)
         ins.format = info.format;
         ins.indexKind = info.indexKind;
         decodeOperands(code, ins);
+        ins.raw = code.bytesAt(address, static_cast<ca::usize>(width) * 2u);
         address += width;
         decoded.push_back(ins);
     }
 
     return Ok(std::move(decoded));
+}
+
+namespace {
+
+void appendU16(std::vector<ca::u8>& out, ca::u16 value)
+{
+    out.push_back(static_cast<ca::u8>(value & 0xFFu));
+    out.push_back(static_cast<ca::u8>(value >> 8));
+}
+
+void appendU32(std::vector<ca::u8>& out, ca::u32 value)
+{
+    appendU16(out, static_cast<ca::u16>(value & 0xFFFFu));
+    appendU16(out, static_cast<ca::u16>(value >> 16));
+}
+
+void appendU64(std::vector<ca::u8>& out, ca::u64 value)
+{
+    appendU32(out, static_cast<ca::u32>(value & 0xFFFFFFFFu));
+    appendU32(out, static_cast<ca::u32>(value >> 32));
+}
+
+void appendSlice(std::vector<ca::u8>& out, ByteSlice bytes)
+{
+    if (bytes.empty()) {
+        return;
+    }
+    out.insert(out.end(), bytes.data(), bytes.data() + bytes.size());
+}
+
+bool fitsU4(ca::u64 value) noexcept { return value <= 0xFu; }
+bool fitsU8(ca::u64 value) noexcept { return value <= 0xFFu; }
+bool fitsU16(ca::u64 value) noexcept { return value <= 0xFFFFu; }
+bool fitsU32(ca::u64 value) noexcept { return value <= 0xFFFFFFFFu; }
+bool fitsI4(ca::i64 value) noexcept { return value >= -8 && value <= 7; }
+bool fitsI8(ca::i64 value) noexcept { return value >= -128 && value <= 127; }
+bool fitsI16(ca::i64 value) noexcept { return value >= -32768 && value <= 32767; }
+bool fitsI32(ca::i64 value) noexcept
+{
+    return value >= -2147483647LL - 1 && value <= 2147483647LL;
+}
+
+/// @brief 10x/20t/30t/32x 的 unit0 高位不承载语义；源字节仍是同一 opcode 时沿用。
+ca::u16 unusedHighByte(const Insn& insn) noexcept
+{
+    if (insn.raw.size() >= 2 && insn.raw[0] == insn.opcode) {
+        return insn.raw[1];
+    }
+    return 0;
+}
+
+Result<void, InsnEncodeError> encodePayload(const Insn& insn, std::vector<ca::u8>& out)
+{
+    switch (insn.payloadKind) {
+    case PayloadKind::PackedSwitch: {
+        const ca::u64 dataBytes = static_cast<ca::u64>(insn.payloadCount) * 4u;
+        if (insn.payloadCount > 0xFFFFu || insn.payloadData.size() != dataBytes) {
+            return Err(InsnEncodeError::BadPayload);
+        }
+        appendU16(out, 0x0100);
+        appendU16(out, static_cast<ca::u16>(insn.payloadCount));
+        appendU32(out, static_cast<ca::u32>(insn.payloadFirstKey));
+        appendSlice(out, insn.payloadData);
+        return Ok();
+    }
+    case PayloadKind::SparseSwitch: {
+        const ca::u64 dataBytes = static_cast<ca::u64>(insn.payloadCount) * 8u;
+        if (insn.payloadCount > 0xFFFFu || insn.payloadData.size() != dataBytes) {
+            return Err(InsnEncodeError::BadPayload);
+        }
+        appendU16(out, 0x0200);
+        appendU16(out, static_cast<ca::u16>(insn.payloadCount));
+        appendSlice(out, insn.payloadData);
+        return Ok();
+    }
+    case PayloadKind::FillArrayData: {
+        if (insn.payloadElementWidth == 0 && insn.payloadCount != 0) {
+            return Err(InsnEncodeError::BadPayload);
+        }
+        const ca::u64 dataBytes =
+            static_cast<ca::u64>(insn.payloadCount) * insn.payloadElementWidth;
+        if (insn.payloadData.size() != dataBytes) {
+            return Err(InsnEncodeError::BadPayload);
+        }
+        appendU16(out, 0x0300);
+        appendU16(out, insn.payloadElementWidth);
+        appendU32(out, insn.payloadCount);
+        appendSlice(out, insn.payloadData);
+        if ((dataBytes & 1u) != 0) {
+            // 数据区补齐字节不属于载荷内容；源字节存在时原样沿用。
+            ca::u8 pad = 0;
+            const ca::usize padAt = 8u + static_cast<ca::usize>(dataBytes);
+            if (insn.raw.size() > padAt && insn.raw[0] == 0x00 && insn.raw[1] == 0x03) {
+                pad = insn.raw[padAt];
+            }
+            out.push_back(pad);
+        }
+        return Ok();
+    }
+    case PayloadKind::None:
+        break;
+    }
+    return Err(InsnEncodeError::BadPayload);
+}
+
+}   // namespace
+
+Result<void, InsnEncodeError> encodeInsn(const Insn& insn, std::vector<ca::u8>& out)
+{
+    if (insn.format == InsnFormat::Payload) {
+        return encodePayload(insn, out);
+    }
+
+    const OpcodeInfo& info = opcodeInfo(insn.opcode);
+    if (!info.isDefined() || info.format != insn.format) {
+        return Err(InsnEncodeError::BadFormat);
+    }
+
+    const ca::u16 op = insn.opcode;
+    const ca::u16 hi = unusedHighByte(insn);
+    const ca::u16 a = insn.registers[0];
+
+    switch (insn.format) {
+    case InsnFormat::F10x:
+        appendU16(out, static_cast<ca::u16>(op | (hi << 8)));
+        return Ok();
+    case InsnFormat::F12x:
+        if (!fitsU4(a) || !fitsU4(insn.registers[1])) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8) | (insn.registers[1] << 12)));
+        return Ok();
+    case InsnFormat::F11n:
+        if (!fitsU4(a) || !fitsI4(insn.literal)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8) |
+                                           ((static_cast<ca::u16>(insn.literal) & 0xFu) << 12)));
+        return Ok();
+    case InsnFormat::F11x:
+        if (!fitsU8(a)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        return Ok();
+    case InsnFormat::F10t:
+        if (!fitsI8(insn.branchOffset)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(
+                          op | ((static_cast<ca::u16>(insn.branchOffset) & 0xFFu) << 8)));
+        return Ok();
+    case InsnFormat::F20t:
+        if (!fitsI16(insn.branchOffset)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (hi << 8)));
+        appendU16(out, static_cast<ca::u16>(insn.branchOffset));
+        return Ok();
+    case InsnFormat::F22x:
+        if (!fitsU8(a) || !fitsU16(insn.registers[1])) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU16(out, insn.registers[1]);
+        return Ok();
+    case InsnFormat::F21t:
+        if (!fitsU8(a) || !fitsI16(insn.branchOffset)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU16(out, static_cast<ca::u16>(insn.branchOffset));
+        return Ok();
+    case InsnFormat::F21s:
+        if (!fitsU8(a) || !fitsI16(insn.literal)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU16(out, static_cast<ca::u16>(insn.literal));
+        return Ok();
+    case InsnFormat::F21h: {
+        if (!fitsU8(a)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        const ca::i64 unit = insn.opcode == 0x19 ? 0x0001000000000000LL : 0x10000LL;
+        if (insn.literal % unit != 0 || !fitsI16(insn.literal / unit)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU16(out, static_cast<ca::u16>(insn.literal / unit));
+        return Ok();
+    }
+    case InsnFormat::F21c:
+        if (!fitsU8(a) || !fitsU16(insn.index)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU16(out, static_cast<ca::u16>(insn.index));
+        return Ok();
+    case InsnFormat::F23x:
+        if (!fitsU8(a) || !fitsU8(insn.registers[1]) || !fitsU8(insn.registers[2])) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU16(out, static_cast<ca::u16>(insn.registers[1] |
+                                            (insn.registers[2] << 8)));
+        return Ok();
+    case InsnFormat::F22b:
+        if (!fitsU8(a) || !fitsU8(insn.registers[1]) || !fitsI8(insn.literal)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU16(out, static_cast<ca::u16>(
+                          insn.registers[1] |
+                          ((static_cast<ca::u16>(insn.literal) & 0xFFu) << 8)));
+        return Ok();
+    case InsnFormat::F22t:
+        if (!fitsU4(a) || !fitsU4(insn.registers[1]) || !fitsI16(insn.branchOffset)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8) | (insn.registers[1] << 12)));
+        appendU16(out, static_cast<ca::u16>(insn.branchOffset));
+        return Ok();
+    case InsnFormat::F22s:
+        if (!fitsU4(a) || !fitsU4(insn.registers[1]) || !fitsI16(insn.literal)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8) | (insn.registers[1] << 12)));
+        appendU16(out, static_cast<ca::u16>(insn.literal));
+        return Ok();
+    case InsnFormat::F22c:
+        if (!fitsU4(a) || !fitsU4(insn.registers[1]) || !fitsU16(insn.index)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8) | (insn.registers[1] << 12)));
+        appendU16(out, static_cast<ca::u16>(insn.index));
+        return Ok();
+    case InsnFormat::F30t:
+        if (!fitsI32(insn.branchOffset)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (hi << 8)));
+        appendU32(out, static_cast<ca::u32>(insn.branchOffset));
+        return Ok();
+    case InsnFormat::F32x:
+        if (!fitsU16(a) || !fitsU16(insn.registers[1])) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (hi << 8)));
+        appendU16(out, a);
+        appendU16(out, insn.registers[1]);
+        return Ok();
+    case InsnFormat::F31i:
+        if (!fitsU8(a) || !fitsI32(insn.literal)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU32(out, static_cast<ca::u32>(insn.literal));
+        return Ok();
+    case InsnFormat::F31t:
+        if (!fitsU8(a) || !fitsI32(insn.branchOffset)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU32(out, static_cast<ca::u32>(insn.branchOffset));
+        return Ok();
+    case InsnFormat::F31c:
+        if (!fitsU8(a) || !fitsU32(insn.index)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU32(out, insn.index);
+        return Ok();
+    case InsnFormat::F35c: {
+        if (insn.registerCount > 15 || !fitsU16(insn.index)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        for (ca::u32 i = 0; i < 5; ++i) {
+            if (!fitsU4(insn.registers[i])) {
+                return Err(InsnEncodeError::OperandOverflow);
+            }
+        }
+        appendU16(out, static_cast<ca::u16>(op | (insn.registers[4] << 8) |
+                                            (insn.registerCount << 12)));
+        appendU16(out, static_cast<ca::u16>(insn.index));
+        appendU16(out, static_cast<ca::u16>(
+                          insn.registers[0] | (insn.registers[1] << 4) |
+                          (insn.registers[2] << 8) | (insn.registers[3] << 12)));
+        return Ok();
+    }
+    case InsnFormat::F3rc: {
+        if (!fitsU16(insn.index)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (insn.registerCount << 8)));
+        appendU16(out, static_cast<ca::u16>(insn.index));
+        appendU16(out, insn.startRegister);
+        return Ok();
+    }
+    case InsnFormat::F45cc: {
+        if (insn.registerCount > 15 || !fitsU16(insn.index) || !fitsU16(insn.protoIndex)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        for (ca::u32 i = 0; i < 5; ++i) {
+            if (!fitsU4(insn.registers[i])) {
+                return Err(InsnEncodeError::OperandOverflow);
+            }
+        }
+        appendU16(out, static_cast<ca::u16>(op | (insn.registers[4] << 8) |
+                                            (insn.registerCount << 12)));
+        appendU16(out, static_cast<ca::u16>(insn.index));
+        appendU16(out, static_cast<ca::u16>(
+                          insn.registers[0] | (insn.registers[1] << 4) |
+                          (insn.registers[2] << 8) | (insn.registers[3] << 12)));
+        appendU16(out, static_cast<ca::u16>(insn.protoIndex));
+        return Ok();
+    }
+    case InsnFormat::F4rcc: {
+        if (!fitsU16(insn.index) || !fitsU16(insn.protoIndex)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (insn.registerCount << 8)));
+        appendU16(out, static_cast<ca::u16>(insn.index));
+        appendU16(out, insn.startRegister);
+        appendU16(out, static_cast<ca::u16>(insn.protoIndex));
+        return Ok();
+    }
+    case InsnFormat::F51l:
+        if (!fitsU8(a)) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        appendU16(out, static_cast<ca::u16>(op | (a << 8)));
+        appendU64(out, static_cast<ca::u64>(insn.literal));
+        return Ok();
+    case InsnFormat::Payload:
+    case InsnFormat::Unknown:
+        break;
+    }
+    return Err(InsnEncodeError::BadFormat);
+}
+
+Result<std::vector<ca::u8>, InsnEncodeError> encodeInsns(const std::vector<Insn>& insns)
+{
+    std::vector<ca::u8> out;
+    for (const Insn& insn : insns) {
+        if (insn.format == InsnFormat::Payload && (out.size() % 4u) != 0) {
+            return Err(InsnEncodeError::MisalignedPayload);
+        }
+        const Result<void, InsnEncodeError> written = encodeInsn(insn, out);
+        if (written.is_err()) {
+            return Err(written.unwrap_err());
+        }
+    }
+    return Ok(std::move(out));
 }
 
 ca::i32 Insn::packedSwitchTarget(ca::u32 i) const noexcept
@@ -363,6 +724,23 @@ const char* to_string(InsnError e) noexcept
         return "UnknownOpcode";
     case InsnError::BadPayload:
         return "BadPayload";
+    }
+    return "Unknown";
+}
+
+const char* to_string(InsnEncodeError e) noexcept
+{
+    switch (e) {
+    case InsnEncodeError::Ok:
+        return "Ok";
+    case InsnEncodeError::BadFormat:
+        return "BadFormat";
+    case InsnEncodeError::OperandOverflow:
+        return "OperandOverflow";
+    case InsnEncodeError::BadPayload:
+        return "BadPayload";
+    case InsnEncodeError::MisalignedPayload:
+        return "MisalignedPayload";
     }
     return "Unknown";
 }

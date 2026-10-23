@@ -160,3 +160,51 @@ TEST(DexCodeItem, RejectsMalformedHandlerTables)
         EXPECT_EQ(parsed.unwrap_err(), ReadError::BadCodeItem);
     }
 }
+
+TEST(DexCodeItem, ReencodesWithHandlersExactly)
+{
+    const std::vector<std::vector<ca::u8>> handlerLists = {
+        handlerWithCatchAll(),
+        handlerWithoutCatchAll(),
+    };
+    for (const std::vector<ca::u8>& handlers : handlerLists) {
+        const std::vector<ca::u8> bytes = makeTryCodeItem(0, 2, 1, handlers);
+        const auto parsed = parseCodeItem(viewOf(bytes), 0, 2, nullptr);
+        ASSERT_TRUE(parsed.is_ok());
+        const CodeItem& item = parsed.unwrap();
+
+        const ByteSlice insns =
+            subOrEmpty(viewOf(bytes), item.insns.offset, item.insns.length);
+        const auto encoded = writeCodeItem(item, insns);
+        ASSERT_TRUE(encoded.is_ok()) << to_string(encoded.unwrap_err());
+        EXPECT_EQ(encoded.unwrap(), bytes);
+    }
+}
+
+TEST(DexCodeItem, WritesAlignmentBeforeTries)
+{
+    std::vector<ca::u8> bytes;
+    putU16(bytes, 1);          // registers_size
+    putU16(bytes, 0);          // ins_size
+    putU16(bytes, 0);          // outs_size
+    putU16(bytes, 1);          // tries_size
+    putU32(bytes, 0);          // debug_info_off
+    putU32(bytes, 1);          // insns_size（奇数，tries 前需补 2 字节）
+    putU16(bytes, 0x000e);     // return-void
+    putU16(bytes, 0x0000);     // padding
+    putU32(bytes, 0);          // try start
+    putU16(bytes, 1);          // try insn count
+    putU16(bytes, 1);          // handler_off
+    const std::vector<ca::u8> handlers = {0x01, 0x01, 0x00, 0x00};
+    bytes.insert(bytes.end(), handlers.begin(), handlers.end());
+
+    const auto parsed = parseCodeItem(viewOf(bytes), 0, 2, nullptr);
+    ASSERT_TRUE(parsed.is_ok());
+    const CodeItem& item = parsed.unwrap();
+    const ByteSlice insns =
+        subOrEmpty(viewOf(bytes), item.insns.offset, item.insns.length);
+
+    const auto encoded = writeCodeItem(item, insns);
+    ASSERT_TRUE(encoded.is_ok()) << to_string(encoded.unwrap_err());
+    EXPECT_EQ(encoded.unwrap(), bytes);
+}

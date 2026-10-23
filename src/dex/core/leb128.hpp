@@ -7,6 +7,8 @@
 /// 接受非最小编码，避免混淆产物被误拒。写入端用 libca 的 `put_var_u32`。
 #pragma once
 
+#include <vector>
+
 #include "libca/core/datatype.hpp"
 #include "libca/core/result.hpp"
 
@@ -27,5 +29,11 @@ Result<ca::u32, ReadError> readUleb128(Reader& cur) noexcept;
 /// 第 5 字节仍带继续位返回 Err(ReadError::BadLeb128)，字节不足返回
 /// Err(ReadError::Truncated)。
 Result<ca::i32, ReadError> readSleb128(Reader& cur) noexcept;
+
+/// @brief 写出最小编码的 ULEB128（32 位域）。
+void writeUleb128(std::vector<ca::u8>& out, ca::u32 value);
+
+/// @brief 写出最小编码的 SLEB128（32 位域）。
+void writeSleb128(std::vector<ca::u8>& out, ca::i32 value);
 
 }   // namespace dex::core
