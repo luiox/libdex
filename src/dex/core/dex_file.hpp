@@ -6,7 +6,7 @@
 /// class_data / code_item。它不持有 APK、不持有多 dex 集合、不持有全局索引——
 /// 那些是容器层与 mbase 的事。
 ///
-/// eager/lazy 划线（design.md §2.2）：
+/// eager/lazy 划线：
 ///   - eager：header、map_list、五张 ID 表的定长条目、class_defs；
 ///   - lazy：string_data_item（MUTF-8 字节视图）、class_data_item、code_item、
 ///     type_list，以及后续的 debug_info / annotations / encoded_array。

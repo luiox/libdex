@@ -1,6 +1,6 @@
 # Contributing
 
-libdex 处于施工中（Under Construction）：API、文件布局与错误码会变，提交前先跑完整门禁。改动应保持一条边界：库只提供保真 DOM 与逐条目 codec，不引入方法体 AST、label、CFG 或 try 展平。
+libdex 处于施工中（Under Construction）：API、文件布局与错误码会变，提交前先跑完整门禁。改动应保持一条边界：库只提供保真 DOM 与逐条目 codec，不引入方法体 AST、label、CFG 或 try 展平，细节见 [doc/design.md](doc/design.md)。
 
 ## 构建与测试
 
