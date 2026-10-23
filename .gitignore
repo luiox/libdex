@@ -1,0 +1,36 @@
+### IDE ###
+.idea/
+.vscode/
+.zcode/
+*.iws
+*.iml
+*.ipr
+
+### OS ###
+.DS_Store
+
+### Build ###
+build/
+build_*/
+out/
+bin/
+output/
+/.xmake
+/.cache
+compile_commands.json
+
+### Test output ###
+/test/*
+!/test/unittest/
+!/test/**/.gitkeep
+
+### Local corpus (env-injected or local dirs; never committed) ###
+/local_dex_corpus/
+/private-corpus-src/
+/dev/
+
+### Binaries / debug artifacts ###
+*.exe
+*.pdb
+*.dump
+*.log
