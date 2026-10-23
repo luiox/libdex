@@ -144,4 +144,40 @@ Result<void, InsnEncodeError> encodeInsn(const Insn& insn, std::vector<ca::u8>& 
 /// 否则返回 Err(MisalignedPayload)，不自动插入 nop 填充。
 Result<std::vector<ca::u8>, InsnEncodeError> encodeInsns(const std::vector<Insn>& insns);
 
+/// @brief const 系列指令的编码形态。
+enum class ConstForm : ca::u8 {
+    Const4,
+    Const16,
+    Const,
+    ConstHigh16,
+    ConstWide16,
+    ConstWide32,
+    ConstWideHigh16,
+    ConstWide,
+};
+
+/// @brief 有符号立即数能否用该形态精确表示。
+///
+/// 32 位形态按 `ca::i32` 解释；浮点常量先把位模式重解释为同宽有符号数再传入。
+bool constFormFits(ConstForm form, ca::i64 value) noexcept;
+
+/// @brief 该格式索引操作数的最大值；没有索引返回 0。
+ca::u32 insnIndexLimit(InsnFormat format) noexcept;
+
+/// @brief 分支目标地址（code unit）：`address + branchOffset`。
+ca::i64 insnBranchTarget(const Insn& insn) noexcept;
+
+/// @brief 让分支指令指向 @p target，按格式检查偏移域宽。
+///
+/// 非分支格式返回 BadFormat；target 与当前 address 的差超出该格式范围返回
+/// OperandOverflow。31t 的 payload 对齐不在此检查。
+Result<void, InsnEncodeError> setInsnBranchTarget(Insn& insn, ca::i64 target) noexcept;
+
+/// @brief 按指令顺序重算 address。
+///
+/// 非 payload 的 width 按 opcode 的定长格式重设，payload 保留调用方给的 width。
+/// 不修改 branchOffset：编辑指令后先记录目标下标，重算地址，再用
+/// @ref setInsnBranchTarget 逐条恢复。总长度超出 u32 返回 OperandOverflow。
+Result<void, InsnEncodeError> recomputeInsnAddresses(std::vector<Insn>& insns);
+
 }   // namespace dex::core

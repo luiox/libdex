@@ -697,6 +697,113 @@ Result<std::vector<ca::u8>, InsnEncodeError> encodeInsns(const std::vector<Insn>
     return Ok(std::move(out));
 }
 
+bool constFormFits(ConstForm form, ca::i64 value) noexcept
+{
+    switch (form) {
+        case ConstForm::Const4:
+            return fitsI4(value);
+        case ConstForm::Const16:
+            return fitsI16(value);
+        case ConstForm::Const:
+            return fitsI32(value);
+        case ConstForm::ConstHigh16:
+            return fitsI32(value) && (static_cast<ca::u64>(value) & 0xFFFFu) == 0;
+        case ConstForm::ConstWide16:
+            return fitsI16(value);
+        case ConstForm::ConstWide32:
+            return fitsI32(value);
+        case ConstForm::ConstWideHigh16:
+            return (static_cast<ca::u64>(value) & 0xFFFFFFFFFFFFull) == 0;
+        case ConstForm::ConstWide:
+            return true;
+    }
+    return false;
+}
+
+ca::u32 insnIndexLimit(InsnFormat format) noexcept
+{
+    switch (format) {
+        case InsnFormat::F21c:
+        case InsnFormat::F22c:
+        case InsnFormat::F35c:
+        case InsnFormat::F3rc:
+        case InsnFormat::F45cc:
+        case InsnFormat::F4rcc:
+            return 0xFFFFu;
+        case InsnFormat::F31c:
+            return 0xFFFFFFFFu;
+        default:
+            return 0;
+    }
+}
+
+ca::i64 insnBranchTarget(const Insn& insn) noexcept
+{
+    return static_cast<ca::i64>(insn.address) + static_cast<ca::i64>(insn.branchOffset);
+}
+
+Result<void, InsnEncodeError> setInsnBranchTarget(Insn& insn, ca::i64 target) noexcept
+{
+    if (!insn.isBranch()) {
+        return Err(InsnEncodeError::BadFormat);
+    }
+
+    const ca::i64 offset = target - static_cast<ca::i64>(insn.address);
+    bool fits = false;
+    switch (insn.format) {
+        case InsnFormat::F10t:
+            fits = fitsI8(offset);
+            break;
+        case InsnFormat::F20t:
+        case InsnFormat::F21t:
+        case InsnFormat::F22t:
+            fits = fitsI16(offset);
+            break;
+        case InsnFormat::F30t:
+        case InsnFormat::F31t:
+            fits = fitsI32(offset);
+            break;
+        default:
+            return Err(InsnEncodeError::BadFormat);
+    }
+    if (!fits) {
+        return Err(InsnEncodeError::OperandOverflow);
+    }
+    insn.branchOffset = static_cast<ca::i32>(offset);
+    return Ok();
+}
+
+Result<void, InsnEncodeError> recomputeInsnAddresses(std::vector<Insn>& insns)
+{
+    ca::u64 next = 0;
+    for (Insn& insn : insns) {
+        if (next > 0xFFFFFFFFu) {
+            return Err(InsnEncodeError::OperandOverflow);
+        }
+        insn.address = static_cast<ca::u32>(next);
+
+        ca::u32 width = 0;
+        if (insn.format == InsnFormat::Payload) {
+            width = insn.width;
+            if (width == 0) {
+                return Err(InsnEncodeError::BadPayload);
+            }
+        } else {
+            const OpcodeInfo& info = opcodeInfo(insn.opcode);
+            if (!info.isDefined() || info.format != insn.format) {
+                return Err(InsnEncodeError::BadFormat);
+            }
+            width = insnWidth(insn.format);
+            insn.width = width;
+        }
+        next += width;
+    }
+    if (next > 0xFFFFFFFFu) {
+        return Err(InsnEncodeError::OperandOverflow);
+    }
+    return Ok();
+}
+
 ca::i32 Insn::packedSwitchTarget(ca::u32 i) const noexcept
 {
     return static_cast<ca::i32>(readU32(payloadData.data() + static_cast<ca::usize>(i) * 4u));

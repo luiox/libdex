@@ -464,3 +464,157 @@ TEST(DexInsn, DecodesFixtureCodeItem)
     EXPECT_EQ(insns[0].format, InsnFormat::F10x);
     EXPECT_EQ(insns[0].width, code->insnsSize);
 }
+
+TEST(DexInsn, ConstFormRanges)
+{
+    EXPECT_TRUE(constFormFits(ConstForm::Const4, -8));
+    EXPECT_TRUE(constFormFits(ConstForm::Const4, 7));
+    EXPECT_FALSE(constFormFits(ConstForm::Const4, -9));
+    EXPECT_FALSE(constFormFits(ConstForm::Const4, 8));
+
+    EXPECT_TRUE(constFormFits(ConstForm::Const16, -32768));
+    EXPECT_TRUE(constFormFits(ConstForm::Const16, 32767));
+    EXPECT_FALSE(constFormFits(ConstForm::Const16, 32768));
+
+    EXPECT_TRUE(constFormFits(ConstForm::Const, 2147483647LL));
+    EXPECT_TRUE(constFormFits(ConstForm::Const, -2147483647LL - 1));
+    EXPECT_FALSE(constFormFits(ConstForm::Const, 2147483648LL));
+
+    EXPECT_TRUE(constFormFits(ConstForm::ConstHigh16, 0x12340000LL));
+    EXPECT_TRUE(constFormFits(ConstForm::ConstHigh16, -65536));
+    EXPECT_FALSE(constFormFits(ConstForm::ConstHigh16, 0x12340001LL));
+    EXPECT_FALSE(constFormFits(ConstForm::ConstHigh16, 0x100000000LL));
+
+    EXPECT_TRUE(constFormFits(ConstForm::ConstWide16, -32768));
+    EXPECT_FALSE(constFormFits(ConstForm::ConstWide16, 32768));
+    EXPECT_TRUE(constFormFits(ConstForm::ConstWide32, -2147483647LL - 1));
+    EXPECT_FALSE(constFormFits(ConstForm::ConstWide32, 2147483648LL));
+
+    EXPECT_TRUE(constFormFits(ConstForm::ConstWideHigh16, 0x1234000000000000LL));
+    EXPECT_TRUE(constFormFits(ConstForm::ConstWideHigh16, -281474976710656LL));
+    EXPECT_FALSE(constFormFits(ConstForm::ConstWideHigh16, 1));
+    EXPECT_TRUE(constFormFits(ConstForm::ConstWide, -9223372036854775807LL - 1));
+}
+
+TEST(DexInsn, IndexAndBranchPrimitives)
+{
+    EXPECT_EQ(insnIndexLimit(InsnFormat::F21c), 0xFFFFu);
+    EXPECT_EQ(insnIndexLimit(InsnFormat::F22c), 0xFFFFu);
+    EXPECT_EQ(insnIndexLimit(InsnFormat::F35c), 0xFFFFu);
+    EXPECT_EQ(insnIndexLimit(InsnFormat::F3rc), 0xFFFFu);
+    EXPECT_EQ(insnIndexLimit(InsnFormat::F45cc), 0xFFFFu);
+    EXPECT_EQ(insnIndexLimit(InsnFormat::F4rcc), 0xFFFFu);
+    EXPECT_EQ(insnIndexLimit(InsnFormat::F31c), 0xFFFFFFFFu);
+    EXPECT_EQ(insnIndexLimit(InsnFormat::F10x), 0u);
+
+    Insn branch;
+    branch.opcode = 0x28;  // goto
+    branch.format = InsnFormat::F10t;
+    branch.address = 100;
+    ASSERT_TRUE(setInsnBranchTarget(branch, 90).is_ok());
+    EXPECT_EQ(branch.branchOffset, -10);
+    EXPECT_EQ(insnBranchTarget(branch), 90);
+    ASSERT_TRUE(setInsnBranchTarget(branch, 227).is_ok());
+    EXPECT_EQ(branch.branchOffset, 127);
+    EXPECT_EQ(setInsnBranchTarget(branch, 228).unwrap_err(),
+              InsnEncodeError::OperandOverflow);
+
+    Insn wide;
+    wide.opcode = 0x29;  // goto/16
+    wide.format = InsnFormat::F20t;
+    wide.address = 1000;
+    ASSERT_TRUE(setInsnBranchTarget(wide, 1000 + 32767).is_ok());
+    EXPECT_EQ(wide.branchOffset, 32767);
+    EXPECT_EQ(setInsnBranchTarget(wide, 1000 + 32768).unwrap_err(),
+              InsnEncodeError::OperandOverflow);
+
+    Insn far;
+    far.opcode = 0x2a;  // goto/32
+    far.format = InsnFormat::F30t;
+    far.address = 1000;
+    ASSERT_TRUE(setInsnBranchTarget(far, 1000 + 2147483647LL).is_ok());
+    EXPECT_EQ(far.branchOffset, 2147483647);
+    EXPECT_EQ(setInsnBranchTarget(far, 1000 + 2147483648LL).unwrap_err(),
+              InsnEncodeError::OperandOverflow);
+
+    Insn notBranch;
+    notBranch.opcode = 0x0e;
+    notBranch.format = InsnFormat::F10x;
+    EXPECT_EQ(setInsnBranchTarget(notBranch, 0).unwrap_err(),
+              InsnEncodeError::BadFormat);
+}
+
+TEST(DexInsn, RecomputeAddressesAfterEdit)
+{
+    Insn first;
+    first.opcode = 0x00;
+    first.format = InsnFormat::F10x;
+
+    Insn branch;
+    branch.opcode = 0x28;  // goto
+    branch.format = InsnFormat::F10t;
+    branch.address = 1;
+    branch.branchOffset = 1;  // 目标：旧地址 2 的 return-void
+
+    Insn last;
+    last.opcode = 0x0e;  // return-void
+    last.format = InsnFormat::F10x;
+    last.address = 2;
+
+    std::vector<Insn> insns{first, branch, last};
+    Insn inserted;
+    inserted.opcode = 0x00;
+    inserted.format = InsnFormat::F10x;
+    insns.insert(insns.begin() + 1, inserted);
+
+    const auto recomputed = recomputeInsnAddresses(insns);
+    ASSERT_TRUE(recomputed.is_ok());
+    ASSERT_EQ(insns.size(), 4u);
+    EXPECT_EQ(insns[0].address, 0u);
+    EXPECT_EQ(insns[1].address, 1u);
+    EXPECT_EQ(insns[2].address, 2u);
+    EXPECT_EQ(insns[3].address, 3u);
+    EXPECT_EQ(insns[0].width, 1u);
+    EXPECT_EQ(insns[3].width, 1u);
+
+    // return-void 现在在地址 3；分支仍在地址 2。
+    ASSERT_TRUE(setInsnBranchTarget(insns[2], insns[3].address).is_ok());
+    EXPECT_EQ(insns[2].branchOffset, 1);
+
+    const auto encoded = encodeInsns(insns);
+    ASSERT_TRUE(encoded.is_ok());
+    ASSERT_EQ(encoded.unwrap().size(), 8u);
+
+    const auto decoded = decodeInsns(ByteSlice{encoded.unwrap().data(), encoded.unwrap().size()});
+    ASSERT_TRUE(decoded.is_ok());
+    ASSERT_EQ(decoded.unwrap().size(), 4u);
+    EXPECT_EQ(decoded.unwrap()[2].address, 2u);
+    EXPECT_EQ(insnBranchTarget(decoded.unwrap()[2]), 3);
+}
+
+TEST(DexInsn, RecomputeRejectsBadWidths)
+{
+    Insn unknown;
+    unknown.format = InsnFormat::Unknown;
+    std::vector<Insn> bad{unknown};
+    EXPECT_EQ(recomputeInsnAddresses(bad).unwrap_err(), InsnEncodeError::BadFormat);
+
+    Insn payload;
+    payload.format = InsnFormat::Payload;
+    payload.payloadKind = PayloadKind::PackedSwitch;
+    payload.width = 0;
+    std::vector<Insn> noWidth{payload};
+    EXPECT_EQ(recomputeInsnAddresses(noWidth).unwrap_err(), InsnEncodeError::BadPayload);
+
+    Insn huge;
+    huge.format = InsnFormat::Payload;
+    huge.payloadKind = PayloadKind::PackedSwitch;
+    huge.width = 0xFFFFFFFFu;
+    Insn overflow;
+    overflow.format = InsnFormat::Payload;
+    overflow.payloadKind = PayloadKind::PackedSwitch;
+    overflow.width = 1;
+    std::vector<Insn> overflowInsns{huge, overflow};
+    EXPECT_EQ(recomputeInsnAddresses(overflowInsns).unwrap_err(),
+              InsnEncodeError::OperandOverflow);
+}

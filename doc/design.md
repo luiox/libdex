@@ -38,7 +38,9 @@ lazy：string_data、class_data、code_item、type_list、注解族、encoded_ar
 
 ## ID 表
 
-五张 ID 表只追加、不重编号，索引稳定是注解、debug_info 与 encoded_value 保真的前提。class_defs 可删除与重排；删类不回收 ID 表条目。容量上限：type/proto/field/method 各 65536，string 是 u32；超出后 const-string 的 jumbo 选择由 adapter 负责。
+DEX 要求 string_ids 按 UTF-16 排序，type/proto/field/method 按各自键排序。新增条目不能只追加：必须重排序并重写所有内嵌索引。当前库不做重编号，读取、方法体替换与 canonical 重建都保持既有索引；追加与重命名留给后续的 linker 切片。
+
+class_defs 可以删除与重排；删类不回收 ID 表条目。容量：type/proto/field/method 各 65536，string 是 u32；`buildDex` 在入口检查容量与表内索引，越界返回 `InvalidModel`。const-string 的 jumbo 选择由 adapter 负责。
 
 ## 错误
 
@@ -51,6 +53,8 @@ lazy：string_data、class_data、code_item、type_list、注解族、encoded_ar
 `decodeInsns` 覆盖 26 种定长格式与三类 payload，给出地址、宽度、寄存器、索引、立即数与分支偏移；未定义操作码返回错误。
 
 `encodeInsn`/`encodeInsns` 按 opcode 的定长格式写回，域宽溢出返回 `OperandOverflow`，payload 错位返回 `MisalignedPayload`。不自动插 nop、不改变形态。
+
+库还给 adapter 提供编辑原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`。label、CFG 与 const 形态选择仍归 adapter。
 
 payload 不展开成 target 数组，保留源字节视图；switch target 相对 switch 指令地址。
 

@@ -281,3 +281,42 @@ TEST(DexBuilder, RejectsUnfrozenStructures)
     ASSERT_TRUE(builtLink.is_err());
     EXPECT_EQ(builtLink.unwrap_err(), WriteError::NotModeled);
 }
+
+TEST(DexBuilder, RejectsDanglingIdTables)
+{
+    const auto expectInvalid = [](auto&& mutate) {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        mutate(*file);
+        const auto built = buildDex(*file);
+        ASSERT_TRUE(built.is_err());
+        EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
+    };
+
+    expectInvalid([](DexFile& file) {
+        file.typeIds[0].descriptorIdx = file.stringCount();
+    });
+    expectInvalid([](DexFile& file) {
+        file.protoIds[0].returnTypeIdx = file.typeCount();
+    });
+    expectInvalid([](DexFile& file) {
+        file.fieldIds[0].classIdx = static_cast<ca::u16>(file.typeCount());
+    });
+    expectInvalid([](DexFile& file) {
+        file.methodIds[0].protoIdx = static_cast<ca::u16>(file.protoCount());
+    });
+    expectInvalid([](DexFile& file) {
+        file.classDefs[0].superclassIdx = file.typeCount();
+    });
+    expectInvalid([](DexFile& file) {
+        file.classDefs[0].sourceFileIdx = file.stringCount();
+    });
+    expectInvalid([](DexFile& file) {
+        file.methodHandles[0].handleType = 9;
+    });
+    expectInvalid([](DexFile& file) {
+        file.callSites[0].callSiteOff = 0;
+    });
+    expectInvalid([](DexFile& file) {
+        file.typeIds.resize(0x10001);
+    });
+}

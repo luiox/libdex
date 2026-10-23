@@ -12,6 +12,7 @@ DEX（Android 字节码）读写库。保真 DOM 加逐条目 codec，返回值�
 - 未修改写回原字节透传；`buildDex` 重新排布为 canonical 布局，回填偏移并重算 checksum/SHA-1。
 - 按 method_idx 替换方法体，供反混淆、审计与重写使用。
 - 指令与 encoded_value 精确编码：保留原始宽度与指令形态，不合并 `const` 变体。
+- 给 adapter 提供 const 取值域、索引上限、分支目标与地址重算原语。
 - 未建模 map section 按原字节保留，可选择在重建时丢弃。
 
 041 的 container 字段只解析不重建；非空 link 区、APK 容器与 smali 文本层不在当前范围。

@@ -116,6 +116,74 @@ struct PendingCode
     ca::u32 newOffset = 0;
 };
 
+constexpr ca::u32 kMaxIdCount = 0x10000u;
+
+/// @brief 重建前的 ID 表护栏：容量与表内索引。
+///
+/// DEX 的 type/proto/field/method 索引是 16 位；string 索引是 32 位。
+/// 这里只检查模型自洽，不检查排序（排序是 DEX 规范要求，reader 只做诊断）。
+bool validIdTables(const DexFile& dex) noexcept
+{
+    if (dex.stringIds.size() > 0xFFFFFFFFu ||
+        dex.typeIds.size() > kMaxIdCount ||
+        dex.protoIds.size() > kMaxIdCount ||
+        dex.fieldIds.size() > kMaxIdCount ||
+        dex.methodIds.size() > kMaxIdCount) {
+        return false;
+    }
+
+    const ca::u32 stringCount = dex.stringCount();
+    const ca::u32 typeCount = dex.typeCount();
+    const ca::u32 protoCount = dex.protoCount();
+    const ca::u32 fieldCount = dex.fieldCount();
+    const ca::u32 methodCount = dex.methodCount();
+
+    for (const TypeId& type : dex.typeIds) {
+        if (type.descriptorIdx >= stringCount) {
+            return false;
+        }
+    }
+    for (const ProtoId& proto : dex.protoIds) {
+        if (proto.shortyIdx >= stringCount || proto.returnTypeIdx >= typeCount) {
+            return false;
+        }
+    }
+    for (const FieldId& field : dex.fieldIds) {
+        if (field.classIdx >= typeCount || field.typeIdx >= typeCount ||
+            field.nameIdx >= stringCount) {
+            return false;
+        }
+    }
+    for (const MethodId& method : dex.methodIds) {
+        if (method.classIdx >= typeCount || method.protoIdx >= protoCount ||
+            method.nameIdx >= stringCount) {
+            return false;
+        }
+    }
+    for (const ClassDef& def : dex.classDefs) {
+        if (def.classIdx >= typeCount ||
+            (def.superclassIdx != DexFile::kNoIndex && def.superclassIdx >= typeCount) ||
+            (def.sourceFileIdx != DexFile::kNoIndex && def.sourceFileIdx >= stringCount)) {
+            return false;
+        }
+    }
+    for (const CallSiteId& site : dex.callSites) {
+        if (site.callSiteOff == 0) {
+            return false;
+        }
+    }
+    for (const MethodHandle& handle : dex.methodHandles) {
+        if (handle.handleType > 8) {
+            return false;
+        }
+        const ca::u32 limit = handle.handleType <= 3 ? fieldCount : methodCount;
+        if (handle.targetIdx >= limit) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /// @brief 复制 string_data_item 原字节（ULEB 头 + MUTF-8 + NUL）。
 Result<std::vector<ca::u8>, WriteError> copyStringData(const ca::core::Bytes& source,
                                                        ca::u32 offset)
@@ -182,6 +250,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     if (dex.header.endianTag != kEndianTag) {
         return Err(WriteError::NotModeled);
     }
+    if (!validIdTables(dex)) {
+        return Err(WriteError::InvalidModel);
+    }
 
     const ca::core::Bytes& src = dex.sourceBytes();
     const ByteSlice source = dex.source();
@@ -218,6 +289,15 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     std::unordered_set<ca::u32> methodsWithCode;
     for (const auto& entry : classDataByOff) {
         const ClassData& data = *entry.second;
+        const std::vector<EncodedField>* fieldLists[2] = {&data.staticFields,
+                                                          &data.instanceFields};
+        for (const std::vector<EncodedField>* fields : fieldLists) {
+            for (const EncodedField& field : *fields) {
+                if (field.fieldIndex >= dex.fieldCount()) {
+                    return Err(WriteError::InvalidModel);
+                }
+            }
+        }
         const std::vector<EncodedMethod>* lists[2] = {&data.directMethods, &data.virtualMethods};
         for (const std::vector<EncodedMethod>* list : lists) {
             for (const EncodedMethod& method : *list) {
@@ -415,6 +495,20 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         Result<std::vector<ca::u8>, WriteError> bytes = copyTypeList(src, oldOff);
         if (bytes.is_err()) {
             return Err(bytes.unwrap_err());
+        }
+        const std::vector<ca::u8>& raw = bytes.unwrap();
+        const ca::u32 count = static_cast<ca::u32>(raw[0]) |
+                              (static_cast<ca::u32>(raw[1]) << 8) |
+                              (static_cast<ca::u32>(raw[2]) << 16) |
+                              (static_cast<ca::u32>(raw[3]) << 24);
+        for (ca::u32 i = 0; i < count; ++i) {
+            const ca::usize at = 4u + static_cast<ca::usize>(i) * 2u;
+            const ca::u16 typeIdx =
+                static_cast<ca::u16>(static_cast<ca::u16>(raw[at]) |
+                                     static_cast<ca::u16>(raw[at + 1] << 8));
+            if (typeIdx >= dex.typeCount()) {
+                return Err(WriteError::InvalidModel);
+            }
         }
         typeLists.add(oldOff, std::move(bytes).unwrap());
         return Ok();
