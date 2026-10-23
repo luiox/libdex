@@ -17,7 +17,7 @@ DEX 字节核（L1）的 C++ 建模库，契约与 libjbc core 同族：
 
 ## 当前状态
 
-开发中，未发布。`0.0.1` 只是构建占位版本，不代表发布基线；仓内只有原型基线提交。
+开发中，未发布。`0.0.1` 只是构建占位版本，不代表发布基线；主线仍是原型提交。
 
 已实现：035–041 解析、全方法体指令解码与精确重编码、class_data/code_item 的整条目重编码、try/catch 处理器、类型/方法描述符、注解族与静态初值、debug_info 状态机、call_site/method_handle、未知 map section 保留、值编码往返、未修改字节往返，以及 `buildDex` 的 canonical 整文件重建与方法体替换；041 的 container 语义未冻结，builder 明确拒绝。baksmali 文本对拍已接入 CI，但还没有 APK 端到端验证与 ART 实机验证；尚未接线：ReDex 写回参照、条目级 dirty 状态、ID 表追加护栏、smali 文本层与 APK 容器语义。设计与裁决见 [doc_ai/design.md](doc_ai/design.md)，实现账目见 [dev_plan.md](dev_plan.md)。
 
