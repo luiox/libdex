@@ -92,7 +92,7 @@ target("dexbuild")
     set_default(false)
 
     add_deps("libdex")
-    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core", "zlib")
+    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
     add_files("tools/dexbuild/*.cpp", "test/unittest/dex_fixture.cpp")
     add_includedirs("src", "test/unittest")
 
@@ -112,7 +112,7 @@ target("libdex_unittest")
 
     add_deps("libdex")
     -- xmake 3.x 不会自动链静态依赖的二级传递闭包；显式列全。
-    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core", "zlib")
+    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
     add_packages("gtest")
     add_files("test/unittest/*.cpp")
     add_includedirs("src")
