@@ -660,6 +660,124 @@ TEST(DexBuilder, RejectsDuplicateTypeDescriptors)
     EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
 }
 
+TEST(DexBuilder, AddsAndReusesIdTableEntries)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto sameType = file->addType("I");
+    ASSERT_TRUE(sameType.is_ok());
+    EXPECT_EQ(sameType.unwrap(), 0u);
+
+    const auto stringType = file->addType("Ljava/lang/String;");
+    ASSERT_TRUE(stringType.is_ok());
+    EXPECT_EQ(stringType.unwrap(), 4u);
+    const auto stringTypeAgain = file->addType("Ljava/lang/String;");
+    ASSERT_TRUE(stringTypeAgain.is_ok());
+    EXPECT_EQ(stringTypeAgain.unwrap(), stringType.unwrap());
+
+    const auto sameProto = file->addProto(1, 0, 0);  // ()I
+    ASSERT_TRUE(sameProto.is_ok());
+    EXPECT_EQ(sameProto.unwrap(), 0u);
+    const auto objectShorty = file->internUtf8("L");
+    ASSERT_TRUE(objectShorty.is_ok());
+    const auto stringProto = file->addProto(objectShorty.unwrap(), stringType.unwrap(), 0);
+    ASSERT_TRUE(stringProto.is_ok());
+    EXPECT_EQ(stringProto.unwrap(), 2u);
+
+    const auto name = file->internUtf8("baz");
+    ASSERT_TRUE(name.is_ok());
+    const auto field = file->addField(stringType.unwrap(), stringType.unwrap(), name.unwrap());
+    ASSERT_TRUE(field.is_ok());
+    EXPECT_EQ(field.unwrap(), 1u);
+    const auto fieldAgain =
+        file->addField(stringType.unwrap(), stringType.unwrap(), name.unwrap());
+    ASSERT_TRUE(fieldAgain.is_ok());
+    EXPECT_EQ(fieldAgain.unwrap(), field.unwrap());
+
+    const auto method = file->addMethod(stringType.unwrap(), stringProto.unwrap(), name.unwrap());
+    ASSERT_TRUE(method.is_ok());
+    EXPECT_EQ(method.unwrap(), 1u);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    EXPECT_EQ(second->typeCount(), 5u);
+    EXPECT_EQ(second->protoCount(), 3u);
+    EXPECT_EQ(second->fieldCount(), 2u);
+    EXPECT_EQ(second->methodCount(), 2u);
+
+    const auto newType = second->typeDescriptor(3);
+    ASSERT_TRUE(newType.is_ok());
+    EXPECT_EQ(newType.unwrap().as_std_view(), "Ljava/lang/String;");
+    EXPECT_EQ(second->protoIds[1].returnTypeIdx, 3u);
+
+    ASSERT_EQ(second->fieldCount(), 2u);
+    EXPECT_EQ(second->fieldName(1).unwrap().as_std_view(), "baz");
+    EXPECT_EQ(second->fieldClassDescriptor(1).unwrap().as_std_view(),
+              "Ljava/lang/String;");
+    EXPECT_EQ(second->fieldTypeDescriptor(1).unwrap().as_std_view(),
+              "Ljava/lang/String;");
+
+    ASSERT_EQ(second->methodCount(), 2u);
+    EXPECT_EQ(second->methodName(1).unwrap().as_std_view(), "baz");
+    EXPECT_EQ(second->methodClassDescriptor(1).unwrap().as_std_view(),
+              "Ljava/lang/String;");
+    EXPECT_EQ(second->methodIds[1].protoIdx, 1u);
+
+    auto again = buildDex(*second, options);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RejectsDanglingIdTableAdds)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto badProtoShorty = file->addProto(99, 0, 0);
+    ASSERT_TRUE(badProtoShorty.is_err());
+    EXPECT_EQ(badProtoShorty.unwrap_err(), ReadError::BadIndex);
+
+    const auto badProtoReturn = file->addProto(1, 99, 0);
+    ASSERT_TRUE(badProtoReturn.is_err());
+    EXPECT_EQ(badProtoReturn.unwrap_err(), ReadError::BadIndex);
+
+    const auto badTypeList = file->addProto(1, 0, 0xFFFFFFF0u);
+    ASSERT_TRUE(badTypeList.is_err());
+    EXPECT_EQ(badTypeList.unwrap_err(), ReadError::BadTableSpan);
+
+    const auto badFieldClass = file->addField(99, 0, 5);
+    ASSERT_TRUE(badFieldClass.is_err());
+    EXPECT_EQ(badFieldClass.unwrap_err(), ReadError::BadIndex);
+
+    const auto badFieldName = file->addField(0, 0, 99);
+    ASSERT_TRUE(badFieldName.is_err());
+    EXPECT_EQ(badFieldName.unwrap_err(), ReadError::BadIndex);
+
+    const auto badMethodProto = file->addMethod(0, 99, 5);
+    ASSERT_TRUE(badMethodProto.is_err());
+    EXPECT_EQ(badMethodProto.unwrap_err(), ReadError::BadIndex);
+}
+
+TEST(DexBuilder, RejectsIdTableAddsAtCapacity)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    file->fieldIds.resize(DexFile::kIdTableLimit);
+    const auto added = file->addField(1, 1, 1);
+    ASSERT_TRUE(added.is_err());
+    EXPECT_EQ(added.unwrap_err(), ReadError::IdTableFull);
+}
+
 TEST(DexBuilder, RejectsRemapWithOpaqueRawSections)
 {
     std::unique_ptr<DexFile> shifted = readFixture(dex_test::makeHelloDex());
