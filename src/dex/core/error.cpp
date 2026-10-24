@@ -24,6 +24,7 @@ const char* to_string(ReadError e) noexcept
         case ReadError::BadIndex: return "bad_index";
         case ReadError::BadChecksum: return "bad_checksum";
         case ReadError::BadSignature: return "bad_signature";
+        case ReadError::IdTableFull: return "id_table_full";
     }
     return "unknown";
 }

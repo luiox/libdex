@@ -48,6 +48,8 @@ DEX 要求 string_ids 按 UTF-16 排序，type/proto/field/method 按各自键�
 
 class_defs 可以删除与重排；删类不回收 ID 表条目。容量：type/proto/field/method 各 65536，string 是 u32；`buildDex` 在入口检查容量与表内索引，越界返回 `InvalidModel`。
 
+ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已有条目，返回索引，表满返回 `IdTableFull`。新增条目只进 ID 表，不创建 class_data 成员或方法体；需要被本 dex 定义的新成员要等类成员注入能力。
+
 ## 错误
 
 错误走 `Result`，不抛异常。结构性问题返回 Err；语义问题（校验和不符、悬垂索引、map 计数不符）记诊断并将 `ParseState` 置 `Recovered`，模型仍可读。

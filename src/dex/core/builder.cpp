@@ -121,8 +121,6 @@ struct PendingCode
     ca::u32 newOffset = 0;
 };
 
-constexpr ca::u32 kMaxIdCount = 0x10000u;
-
 /// @brief 重建前的 ID 表护栏：容量与表内索引。
 ///
 /// DEX 的 type/proto/field/method 索引是 16 位；string 索引是 32 位。
@@ -130,10 +128,10 @@ constexpr ca::u32 kMaxIdCount = 0x10000u;
 bool validIdTables(const DexFile& dex) noexcept
 {
     if (dex.stringIds.size() > 0xFFFFFFFFu ||
-        dex.typeIds.size() > kMaxIdCount ||
-        dex.protoIds.size() > kMaxIdCount ||
-        dex.fieldIds.size() > kMaxIdCount ||
-        dex.methodIds.size() > kMaxIdCount) {
+        dex.typeIds.size() > DexFile::kIdTableLimit ||
+        dex.protoIds.size() > DexFile::kIdTableLimit ||
+        dex.fieldIds.size() > DexFile::kIdTableLimit ||
+        dex.methodIds.size() > DexFile::kIdTableLimit) {
         return false;
     }
 

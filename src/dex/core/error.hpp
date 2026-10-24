@@ -35,6 +35,7 @@ enum class ReadError {
     BadIndex,              ///< 索引悬垂或指向错误类型的条目（诊断）
     BadChecksum,           ///< adler32 校验和不符（诊断）
     BadSignature,          ///< SHA-1 签名不符（诊断）
+    IdTableFull,           ///< type/proto/field/method 表达到 65536 条上限
 };
 
 /// @brief 写出失败原因。
