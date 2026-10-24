@@ -120,6 +120,47 @@ REBUILT_NATIVE=$(native_path "$TMP/rebuilt.dex")
 "$JAVA" -cp "$CP" org.jf.baksmali.Main d -a "$API"     -o "$(native_path "$TMP/original")" "$DEX_NATIVE"
 "$JAVA" -cp "$CP" org.jf.baksmali.Main d -a "$API"     -o "$(native_path "$TMP/rebuilt")" "$REBUILT_NATIVE"
 
+# baksmali 按 class_data 顺序输出方法块；canonical 重建按 DEX 规范重排
+# method_ids 后该顺序会变。方法块顺序不是语义，先按块排序再 diff；字段、
+# 注解与指令文本仍逐字节比较。
+sort_methods() {
+    find "$1" -type f -name '*.smali' | while IFS= read -r file; do
+        awk '
+            /^\.method / && !inmethod {
+                inmethod = 1
+                block = $0 "\n"
+                next
+            }
+            inmethod {
+                block = block $0 "\n"
+                if ($0 == ".end method") {
+                    blocks[++count] = block
+                    inmethod = 0
+                }
+                next
+            }
+            count == 0 { prefix = prefix $0 "\n" }
+            END {
+                for (i = 1; i <= count; ++i) {
+                    for (j = i + 1; j <= count; ++j) {
+                        if (blocks[j] < blocks[i]) {
+                            swap = blocks[i]
+                            blocks[i] = blocks[j]
+                            blocks[j] = swap
+                        }
+                    }
+                }
+                printf "%s", prefix
+                for (i = 1; i <= count; ++i) {
+                    printf "%s", blocks[i]
+                }
+            }
+        ' "$file" > "$file.sorted" && mv "$file.sorted" "$file"
+    done
+}
+sort_methods "$TMP/original"
+sort_methods "$TMP/rebuilt"
+
 if diff -ru "$TMP/original" "$TMP/rebuilt" > "$TMP/diff.txt"; then
     COUNT=$(find "$TMP/rebuilt" -type f -name '*.smali' | wc -l | tr -d ' ')
     echo "oracle ok: $DEX ($COUNT classes)"

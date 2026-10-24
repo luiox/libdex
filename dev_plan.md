@@ -11,29 +11,29 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 - `writeClassData` / `writeCodeItem` 重算差分与 handler_off，保持 handler 共享。
 - `buildDex` 生成 canonical 布局：回填字符串、type_list、class_data、code、注解与 call_site 偏移，重建 map_list，重算 checksum/SHA-1；支持按 method_idx 替换方法体。
 - `internString` / `internUtf8` 追加或复用字符串；`buildDex` 按 UTF-16 合并排序去重，重写 ID 表、const-string、debug_info、encoded_value 与注解元素名中的字符串索引。
-- 字段/方法改名：`buildDex` 按 DEX 排序键重排 field_ids/method_ids，重写 class_data（并按新索引重排四个列表）、注解目录、指令、method_handle 与 encoded_value 中的成员索引。
-- 字符串或成员索引移动与保留的未建模 section 冲突返回 `UnmappedRawSection`；改类描述符破坏 type 表顺序返回 `UnsortedTables`。
+- 类型/字段/方法改名：`buildDex` 按 DEX 排序键重排五张 ID 表与 class_defs，重新编码 type_list，重写 class_data（并按新索引重排四个列表）、注解目录、指令、catch、debug_info 局部变量、method_handle 与 encoded_value 中的全部索引。
+- 任何表索引移动与保留的未建模 section 冲突返回 `UnmappedRawSection`。
 - `buildDex` 入口检查 ID 表容量与表内索引；悬垂索引、非法 method_handle 与零 call_site 返回 `InvalidModel`。
 - adapter 原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`。
-- baksmali 2.5.2 文本对拍：合成 fixture、level1（5528 B）与 level2（719560 B）smali diff 均为空。
+- baksmali 2.5.2 文本对拍：合成 fixture、level1（5528 B）与 level2（719560 B）在方法块顺序规范化后 diff 均为空。
 - CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍；真实语料不提交。
-- 本地带真实语料 102 个用例全绿；真实语料的字段/方法改名重建与二次重建固定点通过。
+- 本地带真实语料 105 个用例全绿；真实语料的成员/类型改名重建与二次重建固定点通过。
 
 ## 已知缺口
 
 - 041 container 语义未冻结，`buildDex` 明确拒绝；非空 link 区同样拒绝。
 - 没有条目级 dirty 状态；重建总是全量 canonical。
-- type/proto 表的新增与重排未提供：需要全量索引重写，范围覆盖 type_list、catch、注解与指令；改类描述符暂受排序限制。
-- 字符串或字段/方法索引重排不能跨未建模 section：保留 section 时只要旧索引移动就拒绝重建。
+- ID 表条目新增与删除未提供（字符串 intern 除外）：type/proto/field/method/class_def 的增删需要调用方自带成员与注解，仍留待后续切片。
+- ID 表索引重排不能跨未建模 section：保留 section 时只要旧索引移动就拒绝重建。
 - `buildDex` 丢弃不可达的建模条目；未建模 section 内部的绝对偏移不回填。
-- 源字符串的 MUTF-8 在重建时校验 UTF-16 长度；type_list 不校验元素索引。
+- 源字符串的 MUTF-8 在重建时校验 UTF-16 长度；type_list 元素索引越界返回 `InvalidModel`。
 - ReDex 写回参照与 ART 实机验证未接线；baksmali 不覆盖未建模 section。
 - 没有 smali 文本层与 APK 容器语义。
 
 ## 下一批
 
 - 条目级 dirty 状态：只重编码被改条目，避免全量 canonical。
-- type/proto 表扩展：重排序与全量索引重写，打通类重命名与新增类型。
+- ID 表条目新增：类型/成员/类的追加 API 与索引全量重写。
 - adapter 原语继续补齐：寄存器域、payload 重建与批量编辑辅助。
 - oracle 扩展：ReDex 与 ART 实机；先定 oracle 不一致时的仲裁规则。
 - 语料矩阵：补齐 035/037/038/039/040/041 样本与哈希清单。
