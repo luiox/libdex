@@ -51,8 +51,7 @@ struct CodeReplacement
 ///
 /// @ref classDefIdx 指向 class_defs；该类没有 class_data 时新建。
 /// @ref fieldIdx 必须已在 field_ids 中且未被任何 class_data 定义。
-/// 静态字段会改变 static_values 数组长度，当前只允许追加到没有
-/// static_values 的类。
+/// 静态字段会触发 static_values 数组按新字段顺序重建，新槽位填类型默认值。
 struct FieldAddition
 {
     ca::u32 classDefIdx = 0;

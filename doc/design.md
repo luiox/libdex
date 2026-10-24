@@ -50,11 +50,11 @@ class_defs 可以删除与重排；删类不回收 ID 表条目。容量：type/
 
 ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已有条目，返回索引，表满返回 `IdTableFull`。
 
-成员注入走 `BuildOptions::fieldAdditions`/`methodAdditions`：成员追加到目标 classDef 的 class_data 副本（类没有 class_data 时新建），新增方法体与替换体一起进入统一 code 单元，按新方法索引排序后落位，保证二次重建固定。新增静态字段会改变 static_values 数组长度，当前只允许加到没有 static_values 的类；新增成员的注解与参数注解暂不支持。
+成员注入走 `BuildOptions::fieldAdditions`/`methodAdditions`：成员追加到目标 classDef 的 class_data 副本（类没有 class_data 时新建），新增方法体与替换体一起进入统一 code 单元，按新方法索引排序后落位，保证二次重建固定。静态字段增删会按新的字段顺序重建 static_values：新增字段填类型默认值，删除字段去掉对应槽位。新增成员的注解与参数注解暂不支持。
 
 新增类不需要额外 API：向 `classDefs` 追加 ClassDef，再用成员注入填 class_data。类上的注解、静态初值与新的接口 type_list 没有创建入口，只能复用已有条目。
 
-删除类直接 erase `classDefs`；删除成员走 `removedFields`/`removedMethods`，只从 class_data 移除，ID 表条目不回收。静态字段位于有 static_values 的类时不能删除（数组槽位无法回收），删除后仍被指令引用的条目按 DEX 的外部引用处理，调用方负责一致性。
+删除类直接 erase `classDefs`；删除成员走 `removedFields`/`removedMethods`，只从 class_data 移除，ID 表条目不回收。删除静态字段会同步重建 static_values。删除后仍被指令引用的条目按 DEX 的外部引用处理，调用方负责一致性。
 
 ## 错误
 
