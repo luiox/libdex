@@ -887,6 +887,25 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         methodsByClass[add.classDefIdx].push_back(&add);
     }
 
+    std::unordered_map<ca::u32, ca::u32> fieldFlagEdits;
+    for (const AccessFlagEdit& edit : options.fieldAccessFlags) {
+        if (edit.index >= dex.fieldCount() || removedFields.count(edit.index) != 0 ||
+            addedFields.count(edit.index) != 0 ||
+            definedFields.count(edit.index) == 0 ||
+            !fieldFlagEdits.emplace(edit.index, edit.accessFlags).second) {
+            return Err(WriteError::InvalidModel);
+        }
+    }
+    std::unordered_map<ca::u32, ca::u32> methodFlagEdits;
+    for (const AccessFlagEdit& edit : options.methodAccessFlags) {
+        if (edit.index >= dex.methodCount() || removedMethods.count(edit.index) != 0 ||
+            addedMethods.count(edit.index) != 0 ||
+            definedMethods.count(edit.index) == 0 ||
+            !methodFlagEdits.emplace(edit.index, edit.accessFlags).second) {
+            return Err(WriteError::InvalidModel);
+        }
+    }
+
     std::map<ca::u32, ClassData> classDataEdits;
     const auto ensureEdit = [&](ca::u32 classDefIdx) -> ClassData& {
         ClassData& edit = classDataEdits[classDefIdx];
@@ -1661,6 +1680,45 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         for (std::vector<EncodedMethod>* list : {&copy.directMethods, &copy.virtualMethods}) {
             list->erase(std::remove_if(list->begin(), list->end(), methodRemoved),
                         list->end());
+        }
+
+        if (!fieldFlagEdits.empty()) {
+            for (std::vector<EncodedField>* list : {&copy.staticFields,
+                                                    &copy.instanceFields}) {
+                for (EncodedField& field : *list) {
+                    const auto edit = fieldFlagEdits.find(field.fieldIndex);
+                    if (edit == fieldFlagEdits.end()) {
+                        continue;
+                    }
+                    if (((field.accessFlags ^ edit->second) & 0x8u) != 0) {
+                        return Err(WriteError::InvalidModel);  // 不能改 static 位
+                    }
+                    field.accessFlags = edit->second;
+                }
+            }
+        }
+        if (!methodFlagEdits.empty()) {
+            std::vector<EncodedMethod> moved;
+            for (std::vector<EncodedMethod>* list : {&copy.directMethods,
+                                                     &copy.virtualMethods}) {
+                for (auto it = list->begin(); it != list->end();) {
+                    const auto edit = methodFlagEdits.find(it->methodIndex);
+                    if (edit == methodFlagEdits.end()) {
+                        ++it;
+                        continue;
+                    }
+                    EncodedMethod method = *it;
+                    method.accessFlags = edit->second;
+                    moved.push_back(std::move(method));
+                    it = list->erase(it);
+                }
+            }
+            for (EncodedMethod& method : moved) {
+                const bool direct =
+                    (method.accessFlags & (kAccPrivate | kAccStatic | kAccConstructor)) != 0;
+                (direct ? copy.directMethods : copy.virtualMethods)
+                    .push_back(std::move(method));
+            }
         }
 
         std::vector<EncodedField>* fieldLists[2] = {&copy.staticFields,

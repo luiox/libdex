@@ -73,6 +73,16 @@ struct MethodAddition
     std::vector<ca::u8> insns;
 };
 
+/// @brief 覆盖一个已有成员的 access_flags。
+///
+/// 字段不能借这里改变 ACC_STATIC（0x8），否则会与 static/instance 分组和
+/// static_values 槽位冲突；方法可以改变直接/虚方法分组，重建时自动搬移。
+struct AccessFlagEdit
+{
+    ca::u32 index = 0;
+    ca::u32 accessFlags = 0;
+};
+
 /// @brief 整文件重建选项。
 ///
 /// ID 表条目不会因删除成员而回收：`removedMethods`/`removedFields` 只把成员
@@ -83,6 +93,8 @@ struct BuildOptions
     std::vector<CodeReplacement> codeReplacements;
     std::vector<FieldAddition> fieldAdditions;
     std::vector<MethodAddition> methodAdditions;
+    std::vector<AccessFlagEdit> fieldAccessFlags;
+    std::vector<AccessFlagEdit> methodAccessFlags;
     std::vector<ca::u32> removedFields;
     std::vector<ca::u32> removedMethods;
     bool keepUnknownSections = true;  ///< 保留未建模 map section 的原始字节

@@ -1201,6 +1201,85 @@ TEST(DexBuilder, RejectsRemovingReplacedMethod)
     EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
 }
 
+TEST(DexBuilder, OverridesMemberAccessFlags)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAccessFlags.push_back(AccessFlagEdit{0, 0x1});   // public
+    options.methodAccessFlags.push_back(AccessFlagEdit{0, 0x1});  // public，转虚方法
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    EXPECT_EQ(data.unwrap()->staticFields.size(), 0u);
+    ASSERT_EQ(data.unwrap()->instanceFields.size(), 1u);
+    EXPECT_EQ(data.unwrap()->instanceFields[0].accessFlags, 0x1u);
+    EXPECT_EQ(data.unwrap()->directMethods.size(), 0u);
+    ASSERT_EQ(data.unwrap()->virtualMethods.size(), 1u);
+    EXPECT_EQ(data.unwrap()->virtualMethods[0].accessFlags, 0x1u);
+    EXPECT_NE(data.unwrap()->virtualMethods[0].codeOff, 0u);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RejectsInvalidAccessFlagEdits)
+{
+    const auto expectInvalid = [](std::unique_ptr<DexFile> file, BuildOptions options) {
+        const auto built = buildDex(*file, options);
+        ASSERT_TRUE(built.is_err());
+        EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
+    };
+
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.fieldAccessFlags.push_back(AccessFlagEdit{99, 0x1});
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        // 不能借 access_flags 把实例字段改成静态字段。
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.fieldAccessFlags.push_back(AccessFlagEdit{0, 0xA});
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.methodAccessFlags.push_back(AccessFlagEdit{99, 0x1});
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.methodAccessFlags.push_back(AccessFlagEdit{0, 0x1});
+        options.methodAccessFlags.push_back(AccessFlagEdit{0, 0x1});
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.removedFields = {0};
+        options.fieldAccessFlags.push_back(AccessFlagEdit{0, 0x1});
+        expectInvalid(std::move(file), std::move(options));
+    }
+}
+
 TEST(DexBuilder, StripsDebugInfo)
 {
     std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
