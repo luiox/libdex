@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include "jstr/conversion.hpp"
+
 #include "dex/dex.hpp"
 #include "dex_fixture.hpp"
 
@@ -280,6 +282,158 @@ TEST(DexBuilder, RejectsUnfrozenStructures)
     const auto builtLink = buildDex(*fileLink);
     ASSERT_TRUE(builtLink.is_err());
     EXPECT_EQ(builtLink.unwrap_err(), WriteError::NotModeled);
+}
+
+TEST(DexBuilder, RebuildsSortedStringPoolAfterIntern)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto added = file->internUtf8("Hello2.java");
+    ASSERT_TRUE(added.is_ok());
+    file->classDefs[0].sourceFileIdx = added.unwrap();
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    EXPECT_EQ(second->stringCount(), 8u);
+    const auto sourceFile = second->sourceFile(0);
+    ASSERT_TRUE(sourceFile.is_ok());
+    EXPECT_EQ(sourceFile.unwrap().as_std_view(), "Hello2.java");
+
+    for (ca::u32 i = 1; i < second->stringCount(); ++i) {
+        const auto previous = second->string(i - 1);
+        const auto current = second->string(i);
+        ASSERT_TRUE(previous.is_ok());
+        ASSERT_TRUE(current.is_ok());
+        const auto previousUtf16 = jstr::mutf8_to_utf16(previous.unwrap());
+        const auto currentUtf16 = jstr::mutf8_to_utf16(current.unwrap());
+        ASSERT_TRUE(previousUtf16.is_ok());
+        ASSERT_TRUE(currentUtf16.is_ok());
+        EXPECT_LT(previousUtf16.unwrap(), currentUtf16.unwrap());
+    }
+
+    const auto descriptor = second->classDescriptor(0);
+    ASSERT_TRUE(descriptor.is_ok());
+    EXPECT_EQ(descriptor.unwrap().as_std_view(), "LHello;");
+    const auto methodName = second->methodName(0);
+    ASSERT_TRUE(methodName.is_ok());
+    EXPECT_EQ(methodName.unwrap().as_std_view(), "foo");
+
+    auto again = buildDex(*second, options);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RemapsStringIndexInReplacementInsns)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    const auto added = file->internUtf8("Hello2.java");
+    ASSERT_TRUE(added.is_ok());
+
+    const auto data = file->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    const EncodedMethod& method = data.unwrap()->directMethods[0];
+    const auto code = file->codeItem(method.codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+
+    CodeReplacement replacement;
+    replacement.methodIdx = method.methodIndex;
+    replacement.item = *code.unwrap();
+    replacement.item.registersSize = 1;
+    replacement.item.insnsSize = 3;
+    replacement.item.debugInfoOff = 0;
+    replacement.item.triesSize = 0;
+    replacement.item.tryBlocks.clear();
+    replacement.item.catchHandlers.clear();
+    // const-string v0, string@<new index> ; return-void
+    replacement.insns = {0x1a, 0x00,
+                         static_cast<ca::u8>(added.unwrap() & 0xFFu),
+                         static_cast<ca::u8>(added.unwrap() >> 8), 0x0e, 0x00};
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.codeReplacements.push_back(replacement);
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto newData = second->classData(0);
+    ASSERT_TRUE(newData.is_ok());
+    ASSERT_NE(newData.unwrap(), nullptr);
+    const EncodedMethod& newMethod = newData.unwrap()->directMethods[0];
+    const auto newCode = second->codeItem(newMethod.codeOff);
+    ASSERT_TRUE(newCode.is_ok());
+    ASSERT_NE(newCode.unwrap(), nullptr);
+
+    const ByteSlice insns = subOrEmpty(second->source(), newCode.unwrap()->insns.offset,
+                                       newCode.unwrap()->insns.length);
+    auto decoded = decodeInsns(insns);
+    ASSERT_TRUE(decoded.is_ok());
+    const std::vector<Insn> list = std::move(decoded).unwrap();
+    ASSERT_EQ(list.size(), 2u);
+    const Insn& load = list[0];
+    EXPECT_EQ(load.opcode, 0x1a);
+    EXPECT_EQ(load.indexKind, IndexKind::String);
+    EXPECT_EQ(load.index, 1u);  // "Hello2.java" 排到 "I" 之前
+
+    const auto text = second->string(load.index);
+    ASSERT_TRUE(text.is_ok());
+    EXPECT_EQ(text.unwrap().as_std_view(), "Hello2.java");
+}
+
+TEST(DexBuilder, RejectsRenamesThatBreakTableOrder)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto zzz = file->internUtf8("zzz");
+    ASSERT_TRUE(zzz.is_ok());
+    file->methodIds.push_back(
+        MethodId{file->methodIds[0].classIdx, file->methodIds[0].protoIdx, zzz.unwrap()});
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+
+    const auto aaa = file->internUtf8("aaa");
+    ASSERT_TRUE(aaa.is_ok());
+    file->methodIds[1].nameIdx = aaa.unwrap();
+
+    const auto broken = buildDex(*file, options);
+    ASSERT_TRUE(broken.is_err());
+    EXPECT_EQ(broken.unwrap_err(), WriteError::UnsortedTables);
+}
+
+TEST(DexBuilder, RejectsRemapWithOpaqueRawSections)
+{
+    std::unique_ptr<DexFile> shifted = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(shifted, nullptr);
+    ASSERT_TRUE(shifted->internUtf8("Hello2.java").is_ok());
+    const auto rejected = buildDex(*shifted);
+    ASSERT_TRUE(rejected.is_err());
+    EXPECT_EQ(rejected.unwrap_err(), WriteError::UnmappedRawSection);
+
+    // 新字符串排在末尾时旧索引不动，未知 section 可以原样保留。
+    std::unique_ptr<DexFile> appended = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(appended, nullptr);
+    ASSERT_TRUE(appended->internUtf8("zzz").is_ok());
+    const auto accepted = buildDex(*appended);
+    ASSERT_TRUE(accepted.is_ok()) << to_string(accepted.unwrap_err());
 }
 
 TEST(DexBuilder, RejectsDanglingIdTables)

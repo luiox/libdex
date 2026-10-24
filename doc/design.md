@@ -14,7 +14,7 @@ libdex 是 DEX 字节核：输入单个 `.dex`，输出保真 DOM 与写回字�
 
 ## 所有权
 
-一个 DexFile 拥有源字节、骨架和全部懒解码产物，析构一次回收。MUTF-8、type_list、insns 的视图指向模型自有字节。
+一个 DexFile 拥有源字节、骨架和全部懒解码产物，析构一次回收。MUTF-8、type_list、insns 的视图指向模型自有字节；`internString`/`internUtf8` 追加的字符串存在 DexFile 的自有池里，与源字符串走同一套懒解码入口。
 
 reader 默认复制入参；关闭复制时借用调用方 buffer，其生命周期必须覆盖模型。公共 API 不返回调用方需要 delete 的指针。
 
@@ -36,11 +36,15 @@ lazy：string_data、class_data、code_item、type_list、注解族、encoded_ar
 
 `buildDex` 只输出可达条目，不可达的建模条目会丢弃；string_data 与 type_list 原字节复制，其余条目精确重编码。未建模 section 默认透传，可选择丢弃；其中若含绝对偏移不会回填。041 与非空 link 区返回 `NotModeled`。
 
-## ID 表
+## ID 表与字符串池
 
-DEX 要求 string_ids 按 UTF-16 排序，type/proto/field/method 按各自键排序。新增条目不能只追加：必须重排序并重写所有内嵌索引。当前库不做重编号，读取、方法体替换与 canonical 重建都保持既有索引；追加与重命名留给后续的 linker 切片。
+DEX 要求 string_ids 按 UTF-16 排序，type/proto/field/method 按各自键排序。新增或重命名不能只追加，必须重排序并重写所有内嵌索引。
 
-class_defs 可以删除与重排；删类不回收 ID 表条目。容量：type/proto/field/method 各 65536，string 是 u32；`buildDex` 在入口检查容量与表内索引，越界返回 `InvalidModel`。const-string 的 jumbo 选择由 adapter 负责。
+字符串这一层已经接通：`internString` 接受 MUTF-8，`internUtf8` 接受标准 UTF-8，返回可写入 `nameIdx`/`sourceFileIdx`/指令索引的 string 索引。`buildDex` 把所有源字符串与自有字符串合成 canonical 池：按 UTF-16 code unit 排序、去重、建立旧→新映射，再重写 type/proto/field/method 的字符串索引、class_def 的 source_file_idx、const-string/const-string/jumbo、debug_info 的参数名与 SET_FILE、encoded_value 的 String、注解元素名。旧索引全部不动时跳过指令与值重编码，保持原字节。
+
+重排后 type/field/method 表仍须满足排序约定；重命名如果破坏顺序返回 `UnsortedTables`，不做表级重编号。字符串索引发生变化而仍保留未建模 section 时返回 `UnmappedRawSection`，因为无法迁移其中可能存在的索引；显式关闭 `keepUnknownSections` 才能继续。const-string 不自动提升为 jumbo，新索引超出 16 位返回 `Unencodable`，形态选择仍归 adapter。
+
+type/proto/field/method 的新增与重排尚未提供：那需要同样的全量索引重写，范围覆盖指令、class_data、注解目录与 method_handle。class_defs 可以删除与重排；删类不回收 ID 表条目。容量：type/proto/field/method 各 65536，string 是 u32；`buildDex` 在入口检查容量与表内索引，越界返回 `InvalidModel`。
 
 ## 错误
 
@@ -76,7 +80,7 @@ baksmali 不覆盖未建模 section，也不等于 ART 接受；与 AOSP DEX 规
 
 - odex / vdex / art / compact dex。
 - APK、resources.arsc、AXML 与多 dex 模型。
-- 五表重编号、压缩、vacuum。
+- type/proto/field/method 表的重编号与条目增删；压缩与 vacuum。
 - visitor 形状与库内方法体 AST。
 - opcode 形态合并或自动提升。
 - 修改后字节 diff 最小化。

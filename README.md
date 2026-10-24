@@ -11,11 +11,12 @@ DEX（Android 字节码）读写库。保真 DOM 加逐条目 codec，返回值�
 - 读取 035–041：header、ID 表、class_data、code_item、try/catch、注解、静态初值、debug_info、call_site/method_handle。
 - 未修改写回原字节透传；`buildDex` 重新排布为 canonical 布局，回填偏移并重算 checksum/SHA-1。
 - 按 method_idx 替换方法体，供反混淆、审计与重写使用。
+- 追加或复用字符串（`internString`/`internUtf8`）；重建时按 UTF-16 重排字符串池，重写 ID 表、指令、debug_info 与注解里的字符串索引。
 - 指令与 encoded_value 精确编码：保留原始宽度与指令形态，不合并 `const` 变体。
 - 给 adapter 提供 const 取值域、索引上限、分支目标与地址重算原语。
 - 未建模 map section 按原字节保留，可选择在重建时丢弃。
 
-041 的 container 字段只解析不重建；非空 link 区、APK 容器与 smali 文本层不在当前范围。
+041 的 container 字段只解析不重建；非空 link 区、APK 容器与 smali 文本层不在当前范围。字符串索引移动而仍保留未建模 section 时，重建返回 `UnmappedRawSection`，需显式丢弃这些 section。
 
 ## 构建
 

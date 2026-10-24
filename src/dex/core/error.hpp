@@ -43,8 +43,10 @@ enum class WriteError {
     MissingSource,     ///< 需要源字节但模型未保留
     Unencodable,       ///< 模型内容超出其编码域宽或自相矛盾，拒绝产出截断字节
     NotModeled,        ///< 版本或结构没有冻结语义（041 container、非空 link 区）
-    SourceUnreadable,  ///< 重建需要再次解码源条目，但源字节不可读
+    SourceUnreadable,  ///< 重建需要再次解码源条目，但源字节不可读或自相矛盾
     InvalidModel,      ///< 模型引用缺失或替换项指向不存在/无方法体的方法
+    UnsortedTables,    ///< 字符串重排后 type/field/method 表不再满足 DEX 排序约定
+    UnmappedRawSection, ///< 字符串索引需要重排，但未建模 section 无法迁移内部引用
 };
 
 /// @brief 模型的解析状态：描述能力，而非合法性。
