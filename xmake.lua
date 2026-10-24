@@ -1,5 +1,5 @@
 -- libdex：DEX 字节核（L1）——单 DexFile lazy DOM + 保真写回。
--- 设计见 doc_ai/design.md；契约与 libjbc core 同族。
+-- 设计见 doc/design.md；契约与 libjbc core 同族。
 --
 -- 依赖：libca（luiox-repo git 直连包）与 libjstr（MUTF-8 容器）经包仓消费；
 -- gtest 仅测试态。libca 模块集取 luiox 家族统一超集，避免同一消费图内
@@ -29,7 +29,7 @@ if has_config("with_tests") then
     add_requires("gtest")
 end
 add_requires("libca " .. LUIOX_LIBCA_VERSION, {configs = {modules = LUIOX_LIBCA_MODULES}})
-add_requires("libjstr 0.0.3")
+add_requires("libjstr 0.0.4")
 add_requireconfs("libjstr.libca", {version = LUIOX_LIBCA_VERSION, configs = {modules = LUIOX_LIBCA_MODULES}})
 -- libca_zip 的消费方自带 zlib（libca 包不传递声明，libjstr 的包定义声明了它）。
 add_requires("zlib")

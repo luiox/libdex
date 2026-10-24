@@ -5,6 +5,8 @@
 #include <cstring>
 #include <unordered_map>
 
+#include "jstr/conversion.hpp"
+
 #include "dex/core/leb128.hpp"
 
 namespace dex::core {
@@ -47,6 +49,43 @@ bool indicesStrictlyIncreasing(const std::vector<Entry>& entries, IndexOf indexO
         }
     }
     return true;
+}
+
+struct StringBody
+{
+    const ca::u8* base = nullptr;
+    ca::usize begin = 0;
+    ca::usize end = 0;  ///< 终止 NUL 的位置（不含）
+};
+
+/// @brief 定位 string_data_item 的 MUTF-8 主体，不校验其编码。
+Result<StringBody, ReadError> locateStringBody(ByteSlice storage, ca::u32 offset)
+{
+    if (offset >= storage.size()) {
+        return Err(ReadError::BadStringData);
+    }
+    const ca::core::Bytes bytes = ca::core::Bytes::from_static(storage.data(), storage.size());
+    Result<Reader, ReadError> reader = Reader::at(bytes, offset);
+    if (reader.is_err()) {
+        return Err(ReadError::BadStringData);
+    }
+    Reader cur = std::move(reader).unwrap();
+    const Result<ca::u32, ReadError> length = readUleb128(cur);
+    if (length.is_err()) {
+        return Err(length.unwrap_err());
+    }
+
+    const ca::u8* base = storage.data();
+    const ca::usize start = cur.pos();
+    if (start >= storage.size()) {
+        return Err(ReadError::BadStringData);
+    }
+    const void* nul = std::memchr(base + start, 0, storage.size() - start);
+    if (nul == nullptr) {
+        return Err(ReadError::BadStringData);
+    }
+    return Ok(StringBody{base, start,
+                         static_cast<ca::usize>(static_cast<const ca::u8*>(nul) - base)});
 }
 
 }   // namespace
@@ -126,34 +165,120 @@ Result<jstr::MUtf8StringRef, ReadError> DexFile::string(ca::u32 index)
         return Err(e);
     };
 
-    const ca::u32 offset = stringIds[index].dataOff;
-    Result<Reader, ReadError> reader = Reader::at(sourceBytes_, offset);
-    if (reader.is_err()) {
-        return fail(ReadError::BadStringData);
+    const StringId& id = stringIds[index];
+    ByteSlice storage;
+    ca::u32 offset = 0;
+    if (id.owned) {
+        if (id.ownedIndex >= ownedStrings_.size()) {
+            return fail(ReadError::BadStringData);
+        }
+        const std::vector<ca::u8>& bytes = ownedStrings_[id.ownedIndex];
+        storage = ByteSlice{bytes.data(), bytes.size()};
+    } else {
+        storage = source();
+        offset = id.dataOff;
     }
-    Reader cur = std::move(reader).unwrap();
 
-    // utf16_size 只用于定位字节起点；本阶段不做 UTF-16 长度校验。
-    const Result<ca::u32, ReadError> len = readUleb128(cur);
-    if (len.is_err()) {
-        return fail(len.unwrap_err());
+    Result<StringBody, ReadError> body = locateStringBody(storage, offset);
+    if (body.is_err()) {
+        return fail(body.unwrap_err());
     }
+    const StringBody& located = body.unwrap();
 
-    const ca::usize start = cur.pos();
-    const ca::usize sourceSize = sourceBytes_.len();
-    if (start >= sourceSize) {
-        return fail(ReadError::BadStringData);
-    }
-    const ca::u8* base = sourceBytes_.as_ptr();
-    const void* nul = std::memchr(base + start, 0, sourceSize - start);
-    if (nul == nullptr) {
-        return fail(ReadError::BadStringData);
-    }
-    const ca::usize end = static_cast<const ca::u8*>(nul) - base;
-
-    slot.view = jstr::MUtf8StringRef(reinterpret_cast<const char*>(base + start), end - start);
+    slot.view = jstr::MUtf8StringRef(
+        reinterpret_cast<const char*>(located.base + located.begin),
+        located.end - located.begin);
     slot.state = LazyString::State::Decoded;
     return Ok(slot.view);
+}
+
+Result<std::vector<ca::u8>, ReadError> DexFile::stringData(ca::u32 index) const
+{
+    if (index >= stringIds.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    const StringId& id = stringIds[index];
+    if (id.owned) {
+        if (id.ownedIndex >= ownedStrings_.size()) {
+            return Err(ReadError::BadStringData);
+        }
+        const std::vector<ca::u8>& bytes = ownedStrings_[id.ownedIndex];
+        return Ok(std::vector<ca::u8>(bytes.begin(), bytes.end()));
+    }
+
+    const ByteSlice storage = source();
+    Result<StringBody, ReadError> body = locateStringBody(storage, id.dataOff);
+    if (body.is_err()) {
+        return Err(body.unwrap_err());
+    }
+    const StringBody& located = body.unwrap();
+    return Ok(std::vector<ca::u8>(located.base + id.dataOff,
+                                  located.base + located.end + 1));
+}
+
+Result<ca::u32, ReadError> DexFile::internString(jstr::MUtf8StringRef mutf8)
+{
+    Result<std::u16string, jstr::EncodingError> decoded = jstr::mutf8_to_utf16(mutf8);
+    if (decoded.is_err()) {
+        return Err(ReadError::BadStringData);
+    }
+    const std::u16string units = std::move(decoded).unwrap();
+    if (units.size() > 0xFFFFFFFFu) {
+        return Err(ReadError::BadStringData);
+    }
+
+    if (internIndexedCount_ != stringIds.size()) {
+        refreshInternIndex();
+    }
+
+    std::string key;
+    if (!mutf8.empty()) {
+        key.assign(mutf8.data(), mutf8.size());
+    }
+    const auto found = internIndex_.find(key);
+    if (found != internIndex_.end()) {
+        return Ok(found->second);
+    }
+
+    std::vector<ca::u8> item;
+    writeUleb128(item, static_cast<ca::u32>(units.size()));
+    item.insert(item.end(), mutf8.begin(), mutf8.end());
+    item.push_back(0);
+    ownedStrings_.push_back(std::move(item));
+
+    StringId id;
+    id.owned = true;
+    id.ownedIndex = static_cast<ca::u32>(ownedStrings_.size() - 1);
+    stringIds.push_back(id);
+
+    const ca::u32 index = static_cast<ca::u32>(stringIds.size() - 1);
+    internIndex_.emplace(std::move(key), index);
+    internIndexedCount_ = stringIds.size();
+    return Ok(index);
+}
+
+Result<ca::u32, ReadError> DexFile::internUtf8(std::string_view utf8)
+{
+    const std::string text(utf8);
+    Result<jstr::MUtf8String, jstr::EncodingError> converted = jstr::utf8_to_mutf8(text);
+    if (converted.is_err()) {
+        return Err(ReadError::BadStringData);
+    }
+    const jstr::MUtf8String mutf8 = std::move(converted).unwrap();
+    return internString(mutf8.view());
+}
+
+void DexFile::refreshInternIndex()
+{
+    internIndex_.clear();
+    internIndexedCount_ = stringIds.size();
+    for (ca::u32 i = 0; i < stringIds.size(); ++i) {
+        Result<jstr::MUtf8StringRef, ReadError> text = string(i);
+        if (text.is_err()) {
+            continue;  // 坏条目不能作为查重目标
+        }
+        internIndex_.emplace(std::string(text.unwrap().as_std_view()), i);
+    }
 }
 
 const jstr::MUtf8StringRef* DexFile::peekString(ca::u32 index) const noexcept

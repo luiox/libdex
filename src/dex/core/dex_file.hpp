@@ -3,8 +3,9 @@
 ///
 /// 一个 @ref DexFile 就是一个 .dex 文件的完整、可独立析构的所有者：头、
 /// map_list 目录、五张全局 ID 表、class_defs，以及按需解码的 string_data /
-/// class_data / code_item。它不持有 APK、不持有多 dex 集合、不持有全局索引——
-/// 那些是容器层与 mbase 的事。
+/// class_data / code_item。@ref internString 追加的字符串由同一个对象持有，
+/// 与源字符串共用懒解码入口。它不持有 APK、不持有多 dex 集合、不持有全局
+/// 索引——那些是容器层与 mbase 的事。
 ///
 /// eager/lazy 划线：
 ///   - eager：header、map_list、五张 ID 表的定长条目、class_defs；
@@ -22,7 +23,10 @@
 #pragma once
 
 #include <array>
+#include <deque>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -126,9 +130,15 @@ struct RawSection
 bool isModeledMapType(MapType type) noexcept;
 
 /// @brief string_id_item：指向 string_data_item 的文件偏移。
+///
+/// @ref owned 为 true 的条目指向 @ref DexFile 的自有字符串池（由
+/// @ref DexFile::internString 追加），不占用源文件偏移；@ref ownedIndex 是池
+/// 下标。两种形态都是完整的 string_data_item 编码（ULEB 长度 + MUTF-8 + NUL）。
 struct StringId
 {
-    ca::u32 dataOff = 0;
+    ca::u32 dataOff = 0;     ///< 源文件偏移；owned 为 true 时忽略
+    ca::u32 ownedIndex = 0;  ///< 自有字符串池下标；owned 为 false 时忽略
+    bool owned = false;      ///< 字符串是否来自自有池而非源字节
 };
 
 /// @brief type_id_item：指向类型描述符字符串的 string 索引。
@@ -397,6 +407,23 @@ public:
     /// @brief 已解码的字符串视图；未解码或索引非法返回 nullptr（peek 不置脏、不解码）。
     const jstr::MUtf8StringRef* peekString(ca::u32 index) const noexcept;
 
+    /// @brief 第 index 个条目的完整 string_data_item 字节（ULEB 长度 + MUTF-8 + NUL）。
+    ///
+    /// 源字符串与自有字符串统一走本入口；builder 用它保留非最小 ULEB 编码。
+    Result<std::vector<ca::u8>, ReadError> stringData(ca::u32 index) const;
+
+    /// @brief 追加一个 MUTF-8 字符串并返回 string 索引；内容已存在时复用旧索引。
+    ///
+    /// 输入必须是合法 MUTF-8（无裸 NUL、无四字节序列）；错误返回
+    /// @ref ReadError::BadStringData。新条目由本对象持有，不写回源字节；
+    /// @ref buildDex 会把它并入 canonical 字符串池并重排所有字符串索引。
+    /// 调用方修改 `stringIds` 后需保证自上次 intern 以来条目未变，否则查重表
+    /// 可能过期（追加条目会自动重建，原地改写不会）。
+    Result<ca::u32, ReadError> internString(jstr::MUtf8StringRef mutf8);
+
+    /// @brief 把标准 UTF-8 转成 MUTF-8 后追加；语义同 @ref internString。
+    Result<ca::u32, ReadError> internUtf8(std::string_view utf8);
+
     // ---- lazy 解码：类型与列表 ----
 
     /// @brief 类型描述符（type_id → string_id → string_data）。
@@ -513,7 +540,13 @@ private:
     Result<std::unique_ptr<ClassData>, ReadError> decodeClassData(ca::u32 offset);
     Result<std::unique_ptr<CodeItem>, ReadError> decodeCodeItem(ca::u32 offset);
 
+    void refreshInternIndex();
+
     ca::core::Bytes sourceBytes_;  ///< 源字节存储（自有 copy 或静态借用）
+    /// 自有 string_data_item 块；deque 保证追加时既有视图地址不变。
+    std::deque<std::vector<ca::u8>> ownedStrings_;
+    std::unordered_map<std::string, ca::u32> internIndex_;
+    ca::usize internIndexedCount_ = 0;
     ParseState state_ = ParseState::Validated;
     Diagnostics diag_;
 
