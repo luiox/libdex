@@ -868,6 +868,90 @@ TEST(DexRealCorpus, RebuildsAfterMethodAndFieldRenames)
     }
 }
 
+TEST(DexRealCorpus, StripsMetadata)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has no .dex files";
+    }
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        auto parsed = dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+        ASSERT_TRUE(parsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+
+        dex::core::BuildOptions options;
+        options.keepUnknownSections = false;
+        options.stripDebugInfo = true;
+        options.stripAnnotations = true;
+
+        auto built = dex::core::buildDex(*file, options);
+        ASSERT_TRUE(built.is_ok())
+            << path.string() << ": " << dex::core::to_string(built.unwrap_err());
+        const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+        auto reparsed = dex::core::readDex(
+            dex::core::ByteSlice{rebuilt.data(), rebuilt.size()});
+        ASSERT_TRUE(reparsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(reparsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> second = std::move(reparsed).unwrap();
+
+        EXPECT_EQ(second->state(), dex::core::ParseState::Validated) << path.string();
+        const dex::core::Integrity integrity = dex::core::verifyIntegrity(
+            second->source(), second->header.checksum, second->header.signature);
+        EXPECT_TRUE(integrity.checksumOk) << path.string();
+        EXPECT_TRUE(integrity.signatureOk) << path.string();
+
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::DebugInfoItem), nullptr)
+            << path.string();
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::AnnotationItem), nullptr)
+            << path.string();
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::AnnotationSetItem), nullptr)
+            << path.string();
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::AnnotationSetRefList), nullptr)
+            << path.string();
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::AnnotationsDirectoryItem), nullptr)
+            << path.string();
+
+        for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+            const auto annotations = second->classAnnotations(classIdx);
+            ASSERT_TRUE(annotations.is_ok()) << path.string() << " class " << classIdx;
+            EXPECT_EQ(annotations.unwrap(), nullptr) << path.string();
+            const auto data = second->classData(classIdx);
+            ASSERT_TRUE(data.is_ok()) << path.string() << " class " << classIdx;
+            if (data.unwrap() == nullptr) {
+                continue;
+            }
+            const std::vector<dex::core::EncodedMethod>* lists[2] = {
+                &data.unwrap()->directMethods,
+                &data.unwrap()->virtualMethods,
+            };
+            for (const std::vector<dex::core::EncodedMethod>* list : lists) {
+                for (const dex::core::EncodedMethod& method : *list) {
+                    if (method.codeOff == 0) {
+                        continue;
+                    }
+                    const auto code = second->codeItem(method.codeOff);
+                    ASSERT_TRUE(code.is_ok()) << path.string();
+                    ASSERT_NE(code.unwrap(), nullptr) << path.string();
+                    EXPECT_EQ(code.unwrap()->debugInfoOff, 0u) << path.string();
+                }
+            }
+        }
+
+        dex::core::BuildOptions plain;
+        plain.keepUnknownSections = false;
+        auto builtAgain = dex::core::buildDex(*second, plain);
+        ASSERT_TRUE(builtAgain.is_ok())
+            << path.string() << ": " << dex::core::to_string(builtAgain.unwrap_err());
+        EXPECT_EQ(builtAgain.unwrap(), rebuilt) << path.string();
+    }
+}
+
 TEST(DexRealCorpus, RebuildsAfterRemovingMembers)
 {
     const std::vector<std::filesystem::path> files = corpusFiles();

@@ -86,6 +86,8 @@ struct BuildOptions
     std::vector<ca::u32> removedFields;
     std::vector<ca::u32> removedMethods;
     bool keepUnknownSections = true;  ///< 保留未建模 map section 的原始字节
+    bool stripDebugInfo = false;      ///< 丢弃全部 debug_info，code_item.debug_info_off 置 0
+    bool stripAnnotations = false;    ///< 丢弃注解族，class_def.annotations_off 置 0
 };
 
 /// @brief 把 DOM 重建为一份 canonical 布局的 .dex 字节。

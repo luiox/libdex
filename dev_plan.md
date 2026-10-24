@@ -16,12 +16,13 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 - 成员注入：`BuildOptions::fieldAdditions`/`methodAdditions` 把字段/方法写进目标类的 class_data（无 class_data 时新建），新增方法体与替换体进入统一 code 单元并参与布局。
 - 新增类：追加 `classDefs` 后用成员注入填 class_data；接口可复用已有 type_list。
 - 删除：类直接从 `classDefs` erase；`removedFields`/`removedMethods` 把成员移出 class_data，ID 表条目保留。
+- 剥离：`stripDebugInfo` 丢弃 debug_info，`stripAnnotations` 丢弃注解族；两者都不动 ID 表与指令。
 - 任何表索引移动与保留的未建模 section 冲突返回 `UnmappedRawSection`。
 - `buildDex` 入口检查 ID 表容量与表内索引；悬垂索引、非法 method_handle 与零 call_site 返回 `InvalidModel`。
 - adapter 原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`。
 - baksmali 2.5.2 文本对拍：合成 fixture、level1（5528 B）与 level2（719560 B）在方法块顺序规范化后 diff 均为空。
 - CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍；真实语料不提交。
-- 本地带真实语料 118 个用例全绿；真实语料的成员/类型改名、成员增删与二次重建固定点通过。
+- 本地带真实语料 120 个用例全绿；真实语料的成员/类型改名、成员增删、元数据剥离与二次重建固定点通过。
 
 ## 已知缺口
 
@@ -37,7 +38,7 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 ## 下一批
 
 - 条目级 dirty 状态：只重编码被改条目，避免全量 canonical。
-- 可写注解层：新增/删除/编辑注解族，并为新增成员补注解。
+- 可写注解层：新增/删除/编辑注解族，并为新增成员补注解；当前只能整体剥离。
 - adapter 原语继续补齐：寄存器域、payload 重建与批量编辑辅助。
 - oracle 扩展：ReDex 与 ART 实机；先定 oracle 不一致时的仲裁规则。
 - 语料矩阵：补齐 035/037/038/039/040/041 样本与哈希清单。

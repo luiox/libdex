@@ -1201,6 +1201,40 @@ TEST(DexBuilder, RejectsRemovingReplacedMethod)
     EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
 }
 
+TEST(DexBuilder, StripsDebugInfo)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.stripDebugInfo = true;
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    EXPECT_EQ(second->findMapItem(MapType::DebugInfoItem), nullptr);
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->directMethods.size(), 1u);
+    const auto code = second->codeItem(data.unwrap()->directMethods[0].codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+    EXPECT_EQ(code.unwrap()->debugInfoOff, 0u);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
 TEST(DexBuilder, RejectsRemapWithOpaqueRawSections)
 {
     std::unique_ptr<DexFile> shifted = readFixture(dex_test::makeHelloDex());
