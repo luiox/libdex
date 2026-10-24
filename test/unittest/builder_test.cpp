@@ -395,7 +395,7 @@ TEST(DexBuilder, RemapsStringIndexInReplacementInsns)
     EXPECT_EQ(text.unwrap().as_std_view(), "Hello2.java");
 }
 
-TEST(DexBuilder, RejectsRenamesThatBreakTableOrder)
+TEST(DexBuilder, ReordersMethodTableAfterRename)
 {
     std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
     ASSERT_NE(file, nullptr);
@@ -405,18 +405,155 @@ TEST(DexBuilder, RejectsRenamesThatBreakTableOrder)
     file->methodIds.push_back(
         MethodId{file->methodIds[0].classIdx, file->methodIds[0].protoIdx, zzz.unwrap()});
 
-    BuildOptions options;
-    options.keepUnknownSections = false;
-    auto built = buildDex(*file, options);
-    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const auto data = file->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    const EncodedMethod& original = data.unwrap()->directMethods[0];
+    const auto code = file->codeItem(original.codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+
+    CodeReplacement replacement;
+    replacement.methodIdx = original.methodIndex;
+    replacement.item = *code.unwrap();
+    replacement.item.insnsSize = 4;
+    replacement.item.debugInfoOff = 0;
+    replacement.item.triesSize = 0;
+    replacement.item.tryBlocks.clear();
+    replacement.item.catchHandlers.clear();
+    // invoke-static {}, method@0 ; return-void
+    replacement.insns = {0x71, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00};
 
     const auto aaa = file->internUtf8("aaa");
     ASSERT_TRUE(aaa.is_ok());
     file->methodIds[1].nameIdx = aaa.unwrap();
 
-    const auto broken = buildDex(*file, options);
-    ASSERT_TRUE(broken.is_err());
-    EXPECT_EQ(broken.unwrap_err(), WriteError::UnsortedTables);
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.codeReplacements.push_back(replacement);
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto firstName = second->methodName(0);
+    const auto secondName = second->methodName(1);
+    ASSERT_TRUE(firstName.is_ok());
+    ASSERT_TRUE(secondName.is_ok());
+    EXPECT_EQ(firstName.unwrap().as_std_view(), "aaa");
+    EXPECT_EQ(secondName.unwrap().as_std_view(), "foo");
+
+    const auto newData = second->classData(0);
+    ASSERT_TRUE(newData.is_ok());
+    ASSERT_NE(newData.unwrap(), nullptr);
+    const EncodedMethod& newMethod = newData.unwrap()->directMethods[0];
+    EXPECT_EQ(newMethod.methodIndex, 1u);  // 旧 foo 排到 aaa 之后
+    ASSERT_NE(newMethod.codeOff, 0u);
+
+    const auto newCode = second->codeItem(newMethod.codeOff);
+    ASSERT_TRUE(newCode.is_ok());
+    ASSERT_NE(newCode.unwrap(), nullptr);
+    const ByteSlice insns = subOrEmpty(second->source(), newCode.unwrap()->insns.offset,
+                                       newCode.unwrap()->insns.length);
+    auto decoded = decodeInsns(insns);
+    ASSERT_TRUE(decoded.is_ok());
+    const std::vector<Insn> list = std::move(decoded).unwrap();
+    ASSERT_EQ(list.size(), 2u);
+    EXPECT_EQ(list[0].opcode, 0x71);
+    EXPECT_EQ(list[0].indexKind, IndexKind::Method);
+    EXPECT_EQ(list[0].index, 1u);
+
+    ASSERT_EQ(second->methodHandles.size(), 1u);
+    EXPECT_EQ(second->methodHandles[0].targetIdx, 1u);
+}
+
+TEST(DexBuilder, ReordersFieldTableAndRemapsReferences)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto zzz = file->internUtf8("zzz");
+    ASSERT_TRUE(zzz.is_ok());
+    FieldId extra = file->fieldIds[0];
+    extra.nameIdx = zzz.unwrap();
+    file->fieldIds.push_back(extra);
+
+    const auto data = file->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    const EncodedMethod& original = data.unwrap()->directMethods[0];
+    const auto code = file->codeItem(original.codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+
+    CodeReplacement replacement;
+    replacement.methodIdx = original.methodIndex;
+    replacement.item = *code.unwrap();
+    replacement.item.registersSize = 1;
+    replacement.item.insnsSize = 3;
+    replacement.item.debugInfoOff = 0;
+    replacement.item.triesSize = 0;
+    replacement.item.tryBlocks.clear();
+    replacement.item.catchHandlers.clear();
+    // sget-object v0, field@0 ; return-void
+    replacement.insns = {0x62, 0x00, 0x00, 0x00, 0x0e, 0x00};
+
+    const auto aaa = file->internUtf8("aaa");
+    ASSERT_TRUE(aaa.is_ok());
+    file->fieldIds[1].nameIdx = aaa.unwrap();
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.codeReplacements.push_back(replacement);
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto firstName = second->fieldName(0);
+    const auto secondName = second->fieldName(1);
+    ASSERT_TRUE(firstName.is_ok());
+    ASSERT_TRUE(secondName.is_ok());
+    EXPECT_EQ(firstName.unwrap().as_std_view(), "aaa");
+    EXPECT_EQ(secondName.unwrap().as_std_view(), "bar");
+
+    const auto newData = second->classData(0);
+    ASSERT_TRUE(newData.is_ok());
+    ASSERT_NE(newData.unwrap(), nullptr);
+    ASSERT_EQ(newData.unwrap()->instanceFields.size(), 1u);
+    EXPECT_EQ(newData.unwrap()->instanceFields[0].fieldIndex, 1u);
+
+    const EncodedMethod& newMethod = newData.unwrap()->directMethods[0];
+    const auto newCode = second->codeItem(newMethod.codeOff);
+    ASSERT_TRUE(newCode.is_ok());
+    ASSERT_NE(newCode.unwrap(), nullptr);
+    const ByteSlice insns = subOrEmpty(second->source(), newCode.unwrap()->insns.offset,
+                                       newCode.unwrap()->insns.length);
+    auto decoded = decodeInsns(insns);
+    ASSERT_TRUE(decoded.is_ok());
+    const std::vector<Insn> list = std::move(decoded).unwrap();
+    ASSERT_EQ(list.size(), 2u);
+    EXPECT_EQ(list[0].opcode, 0x62);
+    EXPECT_EQ(list[0].indexKind, IndexKind::Field);
+    EXPECT_EQ(list[0].index, 1u);
+}
+
+TEST(DexBuilder, RejectsTypeDescriptorRenamesThatBreakOrder)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto aaa = file->internUtf8("aaa");
+    ASSERT_TRUE(aaa.is_ok());
+    file->typeIds[0].descriptorIdx = aaa.unwrap();
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    const auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_err());
+    EXPECT_EQ(built.unwrap_err(), WriteError::UnsortedTables);
 }
 
 TEST(DexBuilder, RejectsRemapWithOpaqueRawSections)
