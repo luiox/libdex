@@ -52,6 +52,8 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 成员注入走 `BuildOptions::fieldAdditions`/`methodAdditions`：成员追加到目标 classDef 的 class_data 副本（类没有 class_data 时新建），新增方法体与替换体一起进入统一 code 单元，按新方法索引排序后落位，保证二次重建固定。新增静态字段会改变 static_values 数组长度，当前只允许加到没有 static_values 的类；新增成员的注解与参数注解暂不支持。
 
+新增类不需要额外 API：向 `classDefs` 追加 ClassDef，再用成员注入填 class_data。类上的注解、静态初值与新的接口 type_list 没有创建入口，只能复用已有条目。
+
 ## 错误
 
 错误走 `Result`，不抛异常。结构性问题返回 Err；语义问题（校验和不符、悬垂索引、map 计数不符）记诊断并将 `ParseState` 置 `Recovered`，模型仍可读。

@@ -934,6 +934,73 @@ TEST(DexBuilder, AddsMembersToClassWithoutClassData)
     EXPECT_EQ(again.unwrap(), rebuilt);
 }
 
+TEST(DexBuilder, AddsClassDefWithMembers)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto newType = file->addType("LNew;");
+    ASSERT_TRUE(newType.is_ok());
+    ClassDef def;
+    def.classIdx = newType.unwrap();
+    def.accessFlags = 0x1;  // public
+    def.superclassIdx = 2;  // Ljava/lang/Object;
+    file->classDefs.push_back(def);
+
+    const auto name = file->internUtf8("run");
+    ASSERT_TRUE(name.is_ok());
+    const auto methodIdx = file->addMethod(newType.unwrap(), 1, name.unwrap());
+    ASSERT_TRUE(methodIdx.is_ok());
+
+    MethodAddition method;
+    method.classDefIdx = 1;  // 新追加的 class_def
+    method.methodIdx = methodIdx.unwrap();
+    method.accessFlags = 0x9;  // public static
+    method.item.insnsSize = 1;
+    method.insns = {0x0e, 0x00};
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.methodAdditions.push_back(method);
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    ASSERT_EQ(second->classCount(), 2u);
+    ca::u32 newClassIdx = DexFile::kNoIndex;
+    for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+        const auto descriptor = second->classDescriptor(classIdx);
+        ASSERT_TRUE(descriptor.is_ok());
+        if (descriptor.unwrap().as_std_view() == "LNew;") {
+            newClassIdx = classIdx;
+        }
+    }
+    ASSERT_NE(newClassIdx, DexFile::kNoIndex);
+    EXPECT_EQ(second->superclassDescriptor(newClassIdx).unwrap().as_std_view(),
+              "Ljava/lang/Object;");
+
+    const auto data = second->classData(newClassIdx);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->directMethods.size(), 1u);
+    const EncodedMethod& added = data.unwrap()->directMethods[0];
+    EXPECT_EQ(second->methodName(added.methodIndex).unwrap().as_std_view(), "run");
+    const auto code = second->codeItem(added.codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
 TEST(DexBuilder, RejectsInvalidMemberAdditions)
 {
     const auto expectInvalid = [](std::unique_ptr<DexFile> file, BuildOptions options) {

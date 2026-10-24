@@ -14,18 +14,19 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 - 类型/字段/方法改名：`buildDex` 按 DEX 排序键重排五张 ID 表与 class_defs，重新编码 type_list，重写 class_data（并按新索引重排四个列表）、注解目录、指令、catch、debug_info 局部变量、method_handle 与 encoded_value 中的全部索引。
 - `addType`/`addProto`/`addField`/`addMethod` 追加或复用 ID 表条目并返回索引；表满返回 `IdTableFull`。
 - 成员注入：`BuildOptions::fieldAdditions`/`methodAdditions` 把字段/方法写进目标类的 class_data（无 class_data 时新建），新增方法体与替换体进入统一 code 单元并参与布局。
+- 新增类：追加 `classDefs` 后用成员注入填 class_data；接口可复用已有 type_list。
 - 任何表索引移动与保留的未建模 section 冲突返回 `UnmappedRawSection`。
 - `buildDex` 入口检查 ID 表容量与表内索引；悬垂索引、非法 method_handle 与零 call_site 返回 `InvalidModel`。
 - adapter 原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`。
 - baksmali 2.5.2 文本对拍：合成 fixture、level1（5528 B）与 level2（719560 B）在方法块顺序规范化后 diff 均为空。
 - CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍；真实语料不提交。
-- 本地带真实语料 112 个用例全绿；真实语料的成员/类型改名、成员注入与二次重建固定点通过。
+- 本地带真实语料 113 个用例全绿；真实语料的成员/类型改名、成员注入与二次重建固定点通过。
 
 ## 已知缺口
 
 - 041 container 语义未冻结，`buildDex` 明确拒绝；非空 link 区同样拒绝。
 - 没有条目级 dirty 状态；重建总是全量 canonical。
-- ID 表条目删除、class_def 新增未提供；新增静态字段不扩展 static_values（只允许加到没有 static_values 的类），新增成员也没有注解与参数注解。
+- ID 表条目删除未提供；新增静态字段不扩展 static_values（只允许加到没有 static_values 的类）；新增类/成员没有注解、参数注解与新的接口 type_list。
 - ID 表索引重排不能跨未建模 section：保留 section 时只要旧索引移动就拒绝重建。
 - `buildDex` 丢弃不可达的建模条目；未建模 section 内部的绝对偏移不回填。
 - 源字符串的 MUTF-8 在重建时校验 UTF-16 长度；type_list 元素索引越界返回 `InvalidModel`。
@@ -35,7 +36,7 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 ## 下一批
 
 - 条目级 dirty 状态：只重编码被改条目，避免全量 canonical。
-- 新增 class_def 与成员删除：类身份、class_data 与注解目录的创建/回收。
+- 成员与类删除、static_values 扩槽、注解目录创建：补齐可写的注解层。
 - adapter 原语继续补齐：寄存器域、payload 重建与批量编辑辅助。
 - oracle 扩展：ReDex 与 ART 实机；先定 oracle 不一致时的仲裁规则。
 - 语料矩阵：补齐 035/037/038/039/040/041 样本与哈希清单。
