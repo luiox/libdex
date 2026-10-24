@@ -10,9 +10,16 @@
 /// 操作编码、handler 共享、method_handle 的 unused 字段，以及未建模 section
 /// 的原始字节（可由 @ref BuildOptions::keepUnknownSections 关闭）。
 ///
-/// 重建不做的事：不校验 ID 表的排序约定，不校验 MUTF-8 码点，不推断未知
-/// section 内部是否含文件偏移。unknown section 的偏移按原字节透传，若其中
-/// 含指向其他 section 的绝对偏移，重建后不会回填。
+/// string_ids 按 UTF-16 重排并去重：@ref DexFile::internString 追加的字符串
+/// 并入池，所有字符串引用（ID 表、const-string、debug_info、encoded_value、
+/// 注解元素名）按旧→新索引重写。字符串重排后 type/field/method 表仍须满足
+/// DEX 排序约定，否则返回 `UnsortedTables`。索引变化时若仍保留未建模 section，
+/// 返回 `UnmappedRawSection`（无法迁移其中可能存在的字符串索引）。不自动把
+/// const-string 提升为 jumbo，新索引超出 16 位返回 `Unencodable`。
+///
+/// 重建不做的事：不重编号 type/proto/field/method 表，不推断未知 section
+/// 内部是否含文件偏移。unknown section 的偏移按原字节透传，若其中含指向其他
+/// section 的绝对偏移，重建后不会回填。
 #pragma once
 
 #include <vector>
@@ -56,7 +63,9 @@ struct BuildOptions
 /// 失败原因见 @ref WriteError：版本 041（container 语义未冻结）或非空 link
 /// 区返回 `NotModeled`；重建期间再次解码源条目失败返回 `SourceUnreadable`；
 /// 替换项指向不存在或无可替换方法体的方法返回 `InvalidModel`；条目超出编码
-/// 域宽返回 `Unencodable`。返回 Err 时输出字节一律作废。
+/// 域宽返回 `Unencodable`；字符串重排破坏 ID 表顺序返回 `UnsortedTables`；
+/// 索引变化与保留的未建模 section 冲突返回 `UnmappedRawSection`。返回 Err 时
+/// 输出字节一律作废。
 ///
 /// 重建会按需解码 string_data/class_data/code_item/注解等条目并填充
 /// @ref DexFile 的 lazy 缓存，因此入参是非 const 引用；语义上不修改文件内容。
