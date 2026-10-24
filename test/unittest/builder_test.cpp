@@ -540,20 +540,124 @@ TEST(DexBuilder, ReordersFieldTableAndRemapsReferences)
     EXPECT_EQ(list[0].index, 1u);
 }
 
-TEST(DexBuilder, RejectsTypeDescriptorRenamesThatBreakOrder)
+TEST(DexBuilder, ReordersTypeProtoAndClassTablesAfterDescriptorRename)
 {
     std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
     ASSERT_NE(file, nullptr);
 
-    const auto aaa = file->internUtf8("aaa");
-    ASSERT_TRUE(aaa.is_ok());
-    file->typeIds[0].descriptorIdx = aaa.unwrap();
+    // 把 I 改名为 Z：type_ids 重排，proto 返回类型顺序随之翻转，
+    // field 的类型、class_def 的 class/superclass 索引全部要跟着改写。
+    const auto zed = file->internUtf8("Z");
+    ASSERT_TRUE(zed.is_ok());
+    file->typeIds[0].descriptorIdx = zed.unwrap();
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    EXPECT_EQ(second->state(), ParseState::Validated);
+
+    const char* expectedTypes[] = {"LHello;", "Ljava/lang/Object;", "V", "Z"};
+    ASSERT_EQ(second->typeCount(), 4u);
+    for (ca::u32 i = 0; i < 4; ++i) {
+        const auto descriptor = second->typeDescriptor(i);
+        ASSERT_TRUE(descriptor.is_ok());
+        EXPECT_EQ(descriptor.unwrap().as_std_view(), expectedTypes[i]);
+    }
+
+    ASSERT_EQ(second->protoCount(), 2u);
+    EXPECT_EQ(second->protoIds[0].returnTypeIdx, 2u);  // ()V 排到前面
+    EXPECT_EQ(second->protoIds[1].returnTypeIdx, 3u);  // ()Z
+    ASSERT_EQ(second->methodCount(), 1u);
+    EXPECT_EQ(second->methodIds[0].protoIdx, 0u);
+
+    ASSERT_EQ(second->fieldCount(), 1u);
+    EXPECT_EQ(second->fieldIds[0].classIdx, 0u);
+    EXPECT_EQ(second->fieldIds[0].typeIdx, 3u);
+
+    ASSERT_EQ(second->classCount(), 1u);
+    EXPECT_EQ(second->classDefs[0].classIdx, 0u);
+    EXPECT_EQ(second->classDefs[0].superclassIdx, 1u);
+
+    // 表重排后的布局必须是固定点。
+    auto again = buildDex(*second, options);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RemapsTypeIndicesInInsnsAndCatchHandlers)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto zed = file->internUtf8("Z");
+    ASSERT_TRUE(zed.is_ok());
+    file->typeIds[0].descriptorIdx = zed.unwrap();
+
+    // const-class v0, type 1（LHello;）+ return-void；catch 也指向 LHello;。
+    CodeReplacement replacement;
+    replacement.methodIdx = 0;
+    replacement.item.registersSize = 1;
+    replacement.item.triesSize = 1;
+    replacement.item.insnsSize = 3;
+    replacement.item.tryBlocks.push_back(TryBlock{0, 2, 0, 0});
+    CatchHandler handler;
+    handler.typed.push_back(TypedCatch{1, 2});
+    replacement.item.catchHandlers.push_back(std::move(handler));
+    replacement.insns = {0x1c, 0x00, 0x01, 0x00, 0x0e, 0x00};
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.codeReplacements.push_back(std::move(replacement));
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->directMethods.size(), 1u);
+    const auto code = second->codeItem(data.unwrap()->directMethods[0].codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+
+    const ByteSlice insns = subOrEmpty(second->source(), code.unwrap()->insns.offset,
+                                       code.unwrap()->insns.length);
+    auto decoded = decodeInsns(insns);
+    ASSERT_TRUE(decoded.is_ok());
+    const std::vector<Insn> list = std::move(decoded).unwrap();
+    ASSERT_EQ(list.size(), 2u);
+    EXPECT_EQ(list[0].opcode, 0x1c);
+    EXPECT_EQ(list[0].indexKind, IndexKind::Type);
+    EXPECT_EQ(list[0].index, 0u);  // LHello; 的新 type 索引
+    EXPECT_EQ(list[1].opcode, 0x0e);
+
+    ASSERT_EQ(code.unwrap()->catchHandlers.size(), 1u);
+    ASSERT_EQ(code.unwrap()->catchHandlers[0].typed.size(), 1u);
+    EXPECT_EQ(code.unwrap()->catchHandlers[0].typed[0].typeIdx, 0u);
+}
+
+TEST(DexBuilder, RejectsDuplicateTypeDescriptors)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    // type 0 改成与 type 3 相同的 V，type_ids 无法形成严格排序。
+    file->typeIds[0].descriptorIdx = 4;
 
     BuildOptions options;
     options.keepUnknownSections = false;
     const auto built = buildDex(*file, options);
     ASSERT_TRUE(built.is_err());
-    EXPECT_EQ(built.unwrap_err(), WriteError::UnsortedTables);
+    EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
 }
 
 TEST(DexBuilder, RejectsRemapWithOpaqueRawSections)

@@ -5,22 +5,21 @@
 /// `buildDex` 是把 DOM 重新排布成一份新 dex。后者的输入必须是可完整解码的
 /// 文件；重建只输出从 class_defs 可达的条目，不可达的建模条目被丢弃。
 ///
-/// 重建保持的保真项：string_data 与 type_list 原字节复制（含非最小 ULEB、
-/// 共享 type_list）、encoded_value 的 value_arg 宽度、debug_info 的原始
-/// 操作编码、handler 共享、method_handle 的 unused 字段，以及未建模 section
-/// 的原始字节（可由 @ref BuildOptions::keepUnknownSections 关闭）。
+/// 重建保持的保真项：string_data 原字节复制（含非最小 ULEB 与共享条目）、
+/// encoded_value 的 value_arg 宽度、debug_info 的原始操作编码、handler 共享、
+/// method_handle 的 unused 字段，以及未建模 section 的原始字节（可由
+/// @ref BuildOptions::keepUnknownSections 关闭）。
 ///
-/// string_ids 按 UTF-16 重排并去重：@ref DexFile::internString 追加的字符串
-/// 并入池，所有字符串引用（ID 表、const-string、debug_info、encoded_value、
-/// 注解元素名）按旧→新索引重写。field_ids 与 method_ids 按
-/// (class, name, type/proto) 重排，class_data、指令、注解目录、method_handle
-/// 与 encoded_value 中的字段/方法引用同步重写。字符串重排后 type 表仍须满足
-/// 描述符顺序，否则返回 `UnsortedTables`；type/proto 表本身不重排。索引变化
+/// 五张 ID 表按 DEX 约定重排：string_ids 按 UTF-16 并去重，type_ids 按描述符，
+/// proto_ids 按返回类型、参数个数与逐参数，field_ids 与 method_ids 按
+/// (class, name, type/proto)，class_defs 按 class_idx。@ref DexFile::internString
+/// 追加的字符串并入池；type_list 重新编码；ID 表、class_data、指令、catch
+/// handler、debug_info、注解与 encoded_value 中的索引按旧→新全部重写。索引变化
 /// 时若仍保留未建模 section，返回 `UnmappedRawSection`（无法迁移其中可能存在的
 /// 索引）。不自动把 const-string 提升为 jumbo，新索引超出 16 位返回
 /// `Unencodable`。
 ///
-/// 重建不做的事：不重编号 type/proto 表，不推断未知 section 内部是否含文件
+/// 重建不做的事：不新增或删除 ID 表条目，不推断未知 section 内部是否含文件
 /// 偏移。unknown section 的偏移按原字节透传，若其中含指向其他 section 的
 /// 绝对偏移，重建后不会回填。
 #pragma once
@@ -65,9 +64,9 @@ struct BuildOptions
 ///
 /// 失败原因见 @ref WriteError：版本 041（container 语义未冻结）或非空 link
 /// 区返回 `NotModeled`；重建期间再次解码源条目失败返回 `SourceUnreadable`；
-/// 替换项指向不存在或无可替换方法体的方法返回 `InvalidModel`；条目超出编码
-/// 域宽返回 `Unencodable`；字符串重命名破坏 type 表描述符顺序返回
-/// `UnsortedTables`；索引变化与保留的未建模 section 冲突返回
+/// 替换项指向不存在或无可替换方法体的方法返回 `InvalidModel`；表内键重复、
+/// 索引越界或条目无法重编码返回 `InvalidModel`；条目超出编码域宽返回
+/// `Unencodable`；索引变化与保留的未建模 section 冲突返回
 /// `UnmappedRawSection`。返回 Err 时输出字节一律作废。
 ///
 /// 重建会按需解码 string_data/class_data/code_item/注解等条目并填充

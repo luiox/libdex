@@ -11,13 +11,13 @@ DEX（Android 字节码）读写库。保真 DOM 加逐条目 codec，返回值�
 - 读取 035–041：header、ID 表、class_data、code_item、try/catch、注解、静态初值、debug_info、call_site/method_handle。
 - 未修改写回原字节透传；`buildDex` 重新排布为 canonical 布局，回填偏移并重算 checksum/SHA-1。
 - 按 method_idx 替换方法体，供反混淆、审计与重写使用。
-- 追加或复用字符串（`internString`/`internUtf8`）；重建时按 UTF-16 重排字符串池，重写 ID 表、指令、debug_info 与注解里的字符串索引。
-- 重名字段/方法：重建时按 DEX 排序键重排 field_ids/method_ids，并同步重写 class_data、指令、注解目录、method_handle 与 encoded_value 中的索引。
+- 追加或复用字符串（`internString`/`internUtf8`）；重建时按 UTF-16 重排字符串池并去重。
+- 重命名类型、字段或方法：重建时按 DEX 排序键重排五张 ID 表与 class_defs，重新编码 type_list，并同步重写 class_data、指令、catch、debug_info、注解与 encoded_value 中的全部索引。
 - 指令与 encoded_value 精确编码：保留原始宽度与指令形态，不合并 `const` 变体。
 - 给 adapter 提供 const 取值域、索引上限、分支目标与地址重算原语。
 - 未建模 map section 按原字节保留，可选择在重建时丢弃。
 
-041 的 container 字段只解析不重建；非空 link 区、APK 容器与 smali 文本层不在当前范围。type/proto 表不重排，改类描述符仍会受排序限制。字符串或成员索引移动而仍保留未建模 section 时，重建返回 `UnmappedRawSection`，需显式丢弃这些 section。
+041 的 container 字段只解析不重建；非空 link 区、APK 容器与 smali 文本层不在当前范围。索引移动而仍保留未建模 section 时，重建返回 `UnmappedRawSection`，需显式丢弃这些 section。
 
 ## 构建
 
@@ -34,7 +34,7 @@ xmake run libdex_unittest --gtest_brief=1
 
 真实 dex 通过 `LIBDEX_REAL_DEX_DIR` 注入，不提交到仓库；变量缺席时相关测试 skip。
 
-对拍用 baksmali 2.5.2：重建后分别反汇编原文与产物，smali 文本必须一致。脚本会把固定版本 jar 拉到 `.oracle-cache/`，需要 Java 17+。
+对拍用 baksmali 2.5.2：重建后分别反汇编原文与产物，smali 文本必须一致。canonical 重建会按规范重排 method_ids，class_data 的方法顺序随之变化，因此脚本按方法块排序后再比较（字段、注解与指令文本仍逐字节比较）。脚本会把固定版本 jar 拉到 `.oracle-cache/`，需要 Java 17+。
 
 ```sh
 ./build/<plat>/<arch>/release/dexbuild fixture /tmp/hello.dex
