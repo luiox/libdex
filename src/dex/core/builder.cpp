@@ -1086,7 +1086,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                               std::vector<ca::u32> methods) -> Result<void, WriteError> {
         CodeUnit unit;
         unit.item = item;
-        unit.oldDebugOff = debugOff;
+        unit.oldDebugOff = options.stripDebugInfo ? 0u : debugOff;
         unit.sortKey = sortKey;
         unit.methods = std::move(methods);
         if (indicesChanged) {
@@ -1155,7 +1155,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     ItemTable debugInfos;
     const auto addDebugInfo = [&](ca::u32 oldOff) -> Result<void, WriteError> {
-        if (oldOff == 0 || debugInfos.contains(oldOff)) {
+        if (options.stripDebugInfo || oldOff == 0 || debugInfos.contains(oldOff)) {
             return Ok();
         }
         const Result<const DebugInfo*, WriteError> info = requireDecoded(dex.debugInfo(oldOff));
@@ -1232,9 +1232,11 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     // ---- 注解族：目录 → 参数 ref 列表 → set → item ----
     std::set<ca::u32> directoryOffs;
-    for (const ClassDef& def : dex.classDefs) {
-        if (def.annotationsOff != 0) {
-            directoryOffs.insert(def.annotationsOff);
+    if (!options.stripAnnotations) {
+        for (const ClassDef& def : dex.classDefs) {
+            if (def.annotationsOff != 0) {
+                directoryOffs.insert(def.annotationsOff);
+            }
         }
     }
 
@@ -1817,7 +1819,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             return Err(WriteError::InvalidModel);
         }
         if (!remap(typeLists, def.interfacesOff, &interfaces) ||
-            !remap(annotationDirectories, def.annotationsOff, &annotations)) {
+            (!options.stripAnnotations &&
+             !remap(annotationDirectories, def.annotationsOff, &annotations))) {
             return Err(WriteError::InvalidModel);
         }
         const ca::u32 base = classDefsOff + i * 32u;
