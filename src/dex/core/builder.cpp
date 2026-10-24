@@ -2,6 +2,7 @@
 /// @brief       canonical 布局重建与偏移回填。
 #include "dex/core/builder.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <map>
@@ -9,8 +10,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "jstr/conversion.hpp"
+
 #include "dex/core/annotation.hpp"
 #include "dex/core/debug_info.hpp"
+#include "dex/core/insn.hpp"
 #include "dex/core/integrity.hpp"
 #include "dex/core/leb128.hpp"
 
@@ -112,6 +116,7 @@ struct PendingCode
 {
     const CodeItem* item = nullptr;
     ByteSlice insns{};
+    std::vector<ca::u8> remappedInsns;  ///< 非空时 insns 指向这里
     ca::u32 oldDebugOff = 0;
     ca::u32 newOffset = 0;
 };
@@ -184,31 +189,330 @@ bool validIdTables(const DexFile& dex) noexcept
     return true;
 }
 
-/// @brief 复制 string_data_item 原字节（ULEB 头 + MUTF-8 + NUL）。
-Result<std::vector<ca::u8>, WriteError> copyStringData(const ca::core::Bytes& source,
-                                                       ca::u32 offset)
+struct PoolString
 {
-    Result<Reader, ReadError> reader = Reader::at(source, offset);
+    std::u16string key;        ///< UTF-16 code unit 序列，DEX 排序键
+    std::vector<ca::u8> data;  ///< 原始 string_data_item 编码
+    ca::u32 oldIndex = 0;
+};
+
+/// @brief canonical 字符串池与旧索引到新索引的映射。
+struct StringPool
+{
+    std::vector<PoolString> strings;   ///< 按 UTF-16 升序、已去重
+    std::vector<ca::u32> remap;        ///< old string_idx → new string_idx
+    std::vector<ca::u32> poolIndexByOld;
+    bool remapIsIdentity = true;       ///< 所有旧索引是否原地不动
+
+    const std::u16string& keyOf(ca::u32 oldIndex) const
+    {
+        return strings[poolIndexByOld[oldIndex]].key;
+    }
+};
+
+/// @brief 从 string_data_item 字节解出 UTF-16 排序键，并校验声明的长度。
+Result<std::u16string, WriteError> decodeStringKey(const std::vector<ca::u8>& item)
+{
+    const ca::core::Bytes bytes = ca::core::Bytes::from_static(item.data(), item.size());
+    Result<Reader, ReadError> reader = Reader::at(bytes, 0);
     if (reader.is_err()) {
         return Err(WriteError::SourceUnreadable);
     }
     Reader cur = std::move(reader).unwrap();
-    const Result<ca::u32, ReadError> length = readUleb128(cur);
-    if (length.is_err()) {
+    const Result<ca::u32, ReadError> declared = readUleb128(cur);
+    if (declared.is_err()) {
+        return Err(WriteError::SourceUnreadable);
+    }
+    const ca::usize start = cur.pos();
+    if (start >= item.size() || item.back() != 0) {
         return Err(WriteError::SourceUnreadable);
     }
 
-    const ByteSlice rest = cur.remainingView();
-    const void* nul = rest.empty() ? nullptr : std::memchr(rest.data(), 0, rest.size());
-    if (nul == nullptr) {
+    const ca::usize bodySize = item.size() - start - 1;
+    Result<std::u16string, jstr::EncodingError> key = jstr::mutf8_to_utf16(
+        jstr::MUtf8StringRef(reinterpret_cast<const char*>(item.data() + start), bodySize));
+    if (key.is_err()) {
         return Err(WriteError::SourceUnreadable);
     }
+    std::u16string units = std::move(key).unwrap();
+    if (units.size() != declared.unwrap()) {
+        return Err(WriteError::SourceUnreadable);
+    }
+    return Ok(std::move(units));
+}
 
-    const ca::usize head = cur.pos() - offset;
-    const ca::usize tail = static_cast<const ca::u8*>(nul) - rest.data();
-    const ca::usize total = head + tail + 1;
-    const ca::u8* base = source.as_ptr();
-    return Ok(std::vector<ca::u8>(base + offset, base + offset + total));
+Result<StringPool, WriteError> collectStringPool(DexFile& dex)
+{
+    const ca::u32 count = dex.stringCount();
+    StringPool pool;
+    pool.remap.resize(count);
+    pool.poolIndexByOld.resize(count);
+
+    std::vector<PoolString> entries;
+    entries.reserve(count);
+    for (ca::u32 i = 0; i < count; ++i) {
+        Result<std::vector<ca::u8>, ReadError> fetched = dex.stringData(i);
+        if (fetched.is_err()) {
+            return Err(fetched.unwrap_err() == ReadError::BadIndex
+                           ? WriteError::InvalidModel
+                           : WriteError::SourceUnreadable);
+        }
+        std::vector<ca::u8> data = std::move(fetched).unwrap();
+        Result<std::u16string, WriteError> key = decodeStringKey(data);
+        if (key.is_err()) {
+            return Err(key.unwrap_err());
+        }
+        entries.push_back(PoolString{std::move(key).unwrap(), std::move(data), i});
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const PoolString& a, const PoolString& b) {
+        if (a.key != b.key) {
+            return a.key < b.key;
+        }
+        return a.oldIndex < b.oldIndex;
+    });
+
+    for (PoolString& entry : entries) {
+        const ca::u32 oldIndex = entry.oldIndex;
+        ca::u32 canonical = 0;
+        if (pool.strings.empty() || pool.strings.back().key != entry.key) {
+            canonical = static_cast<ca::u32>(pool.strings.size());
+            pool.strings.push_back(std::move(entry));
+        } else {
+            canonical = static_cast<ca::u32>(pool.strings.size() - 1);
+        }
+        pool.remap[oldIndex] = canonical;
+        pool.poolIndexByOld[oldIndex] = canonical;
+    }
+
+    for (ca::u32 i = 0; i < count; ++i) {
+        if (pool.remap[i] != i) {
+            pool.remapIsIdentity = false;
+            break;
+        }
+    }
+    return Ok(std::move(pool));
+}
+
+/// @brief 字符串值重排后，依赖字符串内容的 ID 表仍须满足 DEX 排序约定。
+Result<void, WriteError> validateIdOrder(const DexFile& dex, const StringPool& pool)
+{
+    for (ca::usize i = 1; i < dex.typeIds.size(); ++i) {
+        if (!(pool.keyOf(dex.typeIds[i - 1].descriptorIdx) <
+              pool.keyOf(dex.typeIds[i].descriptorIdx))) {
+            return Err(WriteError::UnsortedTables);
+        }
+    }
+
+    const auto fieldLess = [&pool](const FieldId& a, const FieldId& b) {
+        if (a.classIdx != b.classIdx) {
+            return a.classIdx < b.classIdx;
+        }
+        const int cmp = pool.keyOf(a.nameIdx).compare(pool.keyOf(b.nameIdx));
+        if (cmp != 0) {
+            return cmp < 0;
+        }
+        return a.typeIdx < b.typeIdx;
+    };
+    for (ca::usize i = 1; i < dex.fieldIds.size(); ++i) {
+        if (!fieldLess(dex.fieldIds[i - 1], dex.fieldIds[i])) {
+            return Err(WriteError::UnsortedTables);
+        }
+    }
+
+    const auto methodLess = [&pool](const MethodId& a, const MethodId& b) {
+        if (a.classIdx != b.classIdx) {
+            return a.classIdx < b.classIdx;
+        }
+        const int cmp = pool.keyOf(a.nameIdx).compare(pool.keyOf(b.nameIdx));
+        if (cmp != 0) {
+            return cmp < 0;
+        }
+        return a.protoIdx < b.protoIdx;
+    };
+    for (ca::usize i = 1; i < dex.methodIds.size(); ++i) {
+        if (!methodLess(dex.methodIds[i - 1], dex.methodIds[i])) {
+            return Err(WriteError::UnsortedTables);
+        }
+    }
+    return Ok();
+}
+
+Result<std::vector<ca::u8>, WriteError> remapInsnStrings(ByteSlice insns,
+                                                         const StringPool& pool)
+{
+    Result<std::vector<Insn>, InsnError> decoded = decodeInsns(insns);
+    if (decoded.is_err()) {
+        return Err(WriteError::SourceUnreadable);
+    }
+    std::vector<Insn> list = std::move(decoded).unwrap();
+
+    bool changed = false;
+    for (Insn& insn : list) {
+        if (insn.indexKind != IndexKind::String) {
+            continue;
+        }
+        if (insn.index >= pool.remap.size()) {
+            return Err(WriteError::InvalidModel);
+        }
+        const ca::u32 mapped = pool.remap[insn.index];
+        if (mapped != insn.index) {
+            insn.index = mapped;
+            changed = true;
+        }
+    }
+    if (!changed) {
+        std::vector<ca::u8> raw;
+        if (!insns.empty()) {
+            raw.assign(insns.data(), insns.data() + insns.size());
+        }
+        return Ok(std::move(raw));
+    }
+
+    Result<std::vector<ca::u8>, InsnEncodeError> encoded = encodeInsns(list);
+    if (encoded.is_err()) {
+        return Err(encoded.unwrap_err() == InsnEncodeError::OperandOverflow
+                       ? WriteError::Unencodable
+                       : WriteError::SourceUnreadable);
+    }
+    return Ok(std::move(encoded).unwrap());
+}
+
+Result<void, WriteError> remapDebugInfoStrings(DebugInfo& info, const StringPool& pool)
+{
+    bool headerChanged = false;
+    for (ca::u32& name : info.parameterNames) {
+        if (name >= pool.remap.size()) {
+            return Err(WriteError::InvalidModel);
+        }
+        const ca::u32 mapped = pool.remap[name];
+        if (mapped != name) {
+            name = mapped;
+            headerChanged = true;
+        }
+    }
+    if (headerChanged) {
+        info.headerRaw = ByteSlice{};
+    }
+
+    for (DebugOp& op : info.ops) {
+        bool changed = false;
+        if (op.opcode == kDbgStartLocal || op.opcode == kDbgStartLocalExtended ||
+            op.opcode == kDbgSetFile) {
+            if (op.nameIdx >= pool.remap.size()) {
+                return Err(WriteError::InvalidModel);
+            }
+            const ca::u32 mapped = pool.remap[op.nameIdx];
+            if (mapped != op.nameIdx) {
+                op.nameIdx = mapped;
+                changed = true;
+            }
+        }
+        if (op.opcode == kDbgStartLocalExtended) {
+            if (op.sigIdx >= pool.remap.size()) {
+                return Err(WriteError::InvalidModel);
+            }
+            const ca::u32 mapped = pool.remap[op.sigIdx];
+            if (mapped != op.sigIdx) {
+                op.sigIdx = mapped;
+                changed = true;
+            }
+        }
+        if (changed) {
+            op.raw = ByteSlice{};
+        }
+    }
+    return Ok();
+}
+
+ca::u8 minimalIndexWidth(ca::u32 value) noexcept
+{
+    if (value <= 0xFFu) {
+        return 1;
+    }
+    if (value <= 0xFFFFu) {
+        return 2;
+    }
+    if (value <= 0xFFFFFFu) {
+        return 3;
+    }
+    return 4;
+}
+
+Result<void, WriteError> remapValueStrings(EncodedValue& value, const StringPool& pool)
+{
+    switch (value.type) {
+        case EncodedValueType::String: {
+            if (value.index >= pool.remap.size()) {
+                return Err(WriteError::InvalidModel);
+            }
+            const ca::u32 mapped = pool.remap[value.index];
+            if (mapped != value.index) {
+                value.index = mapped;
+                // 新索引可能比原宽度更长；只增不减，保留源编码的宽裕宽度。
+                const ca::u8 width = minimalIndexWidth(mapped);
+                if (static_cast<ca::u32>(value.valueArg) + 1u < width) {
+                    value.valueArg = static_cast<ca::u8>(width - 1u);
+                }
+            }
+            return Ok();
+        }
+        case EncodedValueType::Array:
+            for (EncodedValue& element : value.array) {
+                const Result<void, WriteError> mapped = remapValueStrings(element, pool);
+                if (mapped.is_err()) {
+                    return Err(mapped.unwrap_err());
+                }
+            }
+            return Ok();
+        case EncodedValueType::Annotation:
+            if (value.annotation != nullptr) {
+                for (AnnotationElement& element : value.annotation->elements) {
+                    if (element.nameIdx >= pool.remap.size()) {
+                        return Err(WriteError::InvalidModel);
+                    }
+                    element.nameIdx = pool.remap[element.nameIdx];
+                    const Result<void, WriteError> mapped =
+                        remapValueStrings(element.value, pool);
+                    if (mapped.is_err()) {
+                        return Err(mapped.unwrap_err());
+                    }
+                }
+            }
+            return Ok();
+        default:
+            return Ok();
+    }
+}
+
+Result<std::vector<ca::u8>, WriteError> encodeAnnotationItemRemapped(
+    const AnnotationItem& item, const StringPool& pool)
+{
+    AnnotationItem copy = item;
+    for (AnnotationElement& element : copy.annotation.elements) {
+        if (element.nameIdx >= pool.remap.size()) {
+            return Err(WriteError::InvalidModel);
+        }
+        element.nameIdx = pool.remap[element.nameIdx];
+        const Result<void, WriteError> mapped = remapValueStrings(element.value, pool);
+        if (mapped.is_err()) {
+            return Err(mapped.unwrap_err());
+        }
+    }
+    return writeAnnotationItem(copy);
+}
+
+Result<std::vector<ca::u8>, WriteError> encodeArrayRemapped(const EncodedArrayItem& item,
+                                                            const StringPool& pool)
+{
+    EncodedArrayItem copy = item;
+    for (EncodedValue& value : copy.values) {
+        const Result<void, WriteError> mapped = remapValueStrings(value, pool);
+        if (mapped.is_err()) {
+            return Err(mapped.unwrap_err());
+        }
+    }
+    return writeEncodedArrayItem(copy);
 }
 
 /// @brief 复制 type_list 原字节（u32 计数 + 类型索引）。
@@ -252,6 +556,20 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     }
     if (!validIdTables(dex)) {
         return Err(WriteError::InvalidModel);
+    }
+
+    // ---- canonical 字符串池：排序、去重、建立旧→新索引映射 ----
+    Result<StringPool, WriteError> collected = collectStringPool(dex);
+    if (collected.is_err()) {
+        return Err(collected.unwrap_err());
+    }
+    const StringPool pool = std::move(collected).unwrap();
+    const Result<void, WriteError> ordered = validateIdOrder(dex, pool);
+    if (ordered.is_err()) {
+        return Err(ordered.unwrap_err());
+    }
+    if (!pool.remapIsIdentity && options.keepUnknownSections && !dex.rawSections.empty()) {
+        return Err(WriteError::UnmappedRawSection);
     }
 
     const ca::core::Bytes& src = dex.sourceBytes();
@@ -350,7 +668,14 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         if (info.is_err()) {
             return Err(info.unwrap_err());
         }
-        Result<std::vector<ca::u8>, WriteError> encoded = writeDebugInfo(*info.unwrap());
+        DebugInfo copy = *info.unwrap();
+        if (!pool.remapIsIdentity) {
+            const Result<void, WriteError> remapped = remapDebugInfoStrings(copy, pool);
+            if (remapped.is_err()) {
+                return Err(remapped.unwrap_err());
+            }
+        }
+        Result<std::vector<ca::u8>, WriteError> encoded = writeDebugInfo(copy);
         if (encoded.is_err()) {
             return Err(encoded.unwrap_err());
         }
@@ -382,7 +707,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             return Err(array.unwrap_err());
         }
         Result<std::vector<ca::u8>, WriteError> encoded =
-            writeEncodedArrayItem(*array.unwrap());
+            pool.remapIsIdentity ? writeEncodedArrayItem(*array.unwrap())
+                                 : encodeArrayRemapped(*array.unwrap(), pool);
         if (encoded.is_err()) {
             return Err(encoded.unwrap_err());
         }
@@ -479,7 +805,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         if (item.is_err()) {
             return Err(item.unwrap_err());
         }
-        Result<std::vector<ca::u8>, WriteError> encoded = writeAnnotationItem(*item.unwrap());
+        Result<std::vector<ca::u8>, WriteError> encoded =
+            pool.remapIsIdentity ? writeAnnotationItem(*item.unwrap())
+                                 : encodeAnnotationItemRemapped(*item.unwrap(), pool);
         if (encoded.is_err()) {
             return Err(encoded.unwrap_err());
         }
@@ -526,14 +854,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
     }
 
-    ItemTable strings;
-    for (const StringId& id : dex.stringIds) {
-        Result<std::vector<ca::u8>, WriteError> bytes = copyStringData(src, id.dataOff);
-        if (bytes.is_err()) {
-            return Err(bytes.unwrap_err());
-        }
-        strings.add(id.dataOff, std::move(bytes).unwrap());
-    }
+    std::vector<ca::u32> stringOffsets(pool.strings.size(), 0);
+    const ca::u32 stringCount = static_cast<ca::u32>(pool.strings.size());
 
     // ---- 输出骨架：ID 区 ----
     std::vector<ca::u8> out;
@@ -542,18 +864,17 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     mapItems.push_back(MapItem{MapType::HeaderItem, 0, 1, 0});
 
     ca::u32 stringIdsOff = 0;
-    if (!dex.stringIds.empty()) {
+    if (stringCount != 0) {
         stringIdsOff = offsetOf(out);
-        out.resize(out.size() + dex.stringIds.size() * 4u, 0);
-        mapItems.push_back(
-            MapItem{MapType::StringIdItem, 0, dex.stringCount(), stringIdsOff});
+        out.resize(out.size() + static_cast<ca::usize>(stringCount) * 4u, 0);
+        mapItems.push_back(MapItem{MapType::StringIdItem, 0, stringCount, stringIdsOff});
     }
 
     ca::u32 typeIdsOff = 0;
     if (!dex.typeIds.empty()) {
         typeIdsOff = offsetOf(out);
         for (const TypeId& id : dex.typeIds) {
-            appendU32(out, id.descriptorIdx);
+            appendU32(out, pool.remap[id.descriptorIdx]);
         }
         mapItems.push_back(MapItem{MapType::TypeIdItem, 0, dex.typeCount(), typeIdsOff});
     }
@@ -562,7 +883,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     if (!dex.protoIds.empty()) {
         protoIdsOff = offsetOf(out);
         for (const ProtoId& proto : dex.protoIds) {
-            appendU32(out, proto.shortyIdx);
+            appendU32(out, pool.remap[proto.shortyIdx]);
             appendU32(out, proto.returnTypeIdx);
             appendU32(out, 0);  // parameters_off 稍后回填
         }
@@ -575,7 +896,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         for (const FieldId& field : dex.fieldIds) {
             appendU16(out, field.classIdx);
             appendU16(out, field.typeIdx);
-            appendU32(out, field.nameIdx);
+            appendU32(out, pool.remap[field.nameIdx]);
         }
         mapItems.push_back(MapItem{MapType::FieldIdItem, 0, dex.fieldCount(), fieldIdsOff});
     }
@@ -586,7 +907,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         for (const MethodId& method : dex.methodIds) {
             appendU16(out, method.classIdx);
             appendU16(out, method.protoIdx);
-            appendU32(out, method.nameIdx);
+            appendU32(out, pool.remap[method.nameIdx]);
         }
         mapItems.push_back(MapItem{MapType::MethodIdItem, 0, dex.methodCount(), methodIdsOff});
     }
@@ -599,7 +920,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             appendU32(out, def.accessFlags);
             appendU32(out, def.superclassIdx);
             appendU32(out, 0);  // interfaces_off
-            appendU32(out, def.sourceFileIdx);
+            appendU32(out, def.sourceFileIdx == DexFile::kNoIndex
+                               ? DexFile::kNoIndex
+                               : pool.remap[def.sourceFileIdx]);
             appendU32(out, 0);  // annotations_off
             appendU32(out, 0);  // class_data_off
             appendU32(out, 0);  // static_values_off
@@ -651,7 +974,15 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         return sectionStart;
     };
 
-    place(strings, 1, MapType::StringDataItem);
+    if (!pool.strings.empty()) {
+        const ca::u32 sectionStart = offsetOf(out);
+        for (ca::usize i = 0; i < pool.strings.size(); ++i) {
+            stringOffsets[i] = offsetOf(out);
+            const std::vector<ca::u8>& data = pool.strings[i].data;
+            out.insert(out.end(), data.begin(), data.end());
+        }
+        mapItems.push_back(MapItem{MapType::StringDataItem, 0, stringCount, sectionStart});
+    }
     place(typeLists, 4, MapType::TypeList);
     place(arrays, 1, MapType::EncodedArrayItem);
     place(annotationItems, 1, MapType::AnnotationItem);
@@ -745,6 +1076,21 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     std::vector<PendingCode> pending;
     std::unordered_map<ca::u32, ca::usize> methodPending;
+    const auto appendPending = [&](const CodeItem* item, ByteSlice insns,
+                                   ca::u32 debugOff) -> Result<void, WriteError> {
+        pending.push_back(PendingCode{item, insns, {}, debugOff, 0});
+        if (!pool.remapIsIdentity) {
+            Result<std::vector<ca::u8>, WriteError> remapped = remapInsnStrings(insns, pool);
+            if (remapped.is_err()) {
+                return Err(remapped.unwrap_err());
+            }
+            PendingCode& entry = pending.back();
+            entry.remappedInsns = std::move(remapped).unwrap();
+            entry.insns = ByteSlice{entry.remappedInsns.data(), entry.remappedInsns.size()};
+        }
+        return Ok();
+    };
+
     for (ca::u32 oldOff : codeOrder) {
         const std::vector<const MethodSite*>& owners = sitesByCode[oldOff];
         bool hasUnreplaced = false;
@@ -759,9 +1105,12 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         if (hasUnreplaced) {
             const CodeItem* code = codeByOff[oldOff];
             keptIndex = pending.size();
-            pending.push_back(PendingCode{
-                code, subOrEmpty(source, code->insns.offset, code->insns.length),
-                code->debugInfoOff, 0});
+            const Result<void, WriteError> added =
+                appendPending(code, subOrEmpty(source, code->insns.offset, code->insns.length),
+                              code->debugInfoOff);
+            if (added.is_err()) {
+                return Err(added.unwrap_err());
+            }
         }
         for (const MethodSite* site : owners) {
             const auto repl = replacements.find(site->methodIdx);
@@ -771,10 +1120,13 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             }
             const CodeReplacement* replacement = repl->second;
             methodPending[site->methodIdx] = pending.size();
-            pending.push_back(PendingCode{
+            const Result<void, WriteError> added = appendPending(
                 &replacement->item,
                 ByteSlice{replacement->insns.data(), replacement->insns.size()},
-                replacement->item.debugInfoOff, 0});
+                replacement->item.debugInfoOff);
+            if (added.is_err()) {
+                return Err(added.unwrap_err());
+            }
         }
     }
 
@@ -871,12 +1223,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     }
 
     // ---- 回填 ID 表与 class_defs ----
-    for (ca::usize i = 0; i < dex.stringIds.size(); ++i) {
-        ca::u32 newOff = 0;
-        if (!strings.lookup(dex.stringIds[i].dataOff, &newOff)) {
-            return Err(WriteError::InvalidModel);
-        }
-        putU32(out, stringIdsOff + static_cast<ca::u32>(i) * 4u, newOff);
+    for (ca::usize i = 0; i < stringOffsets.size(); ++i) {
+        putU32(out, stringIdsOff + static_cast<ca::u32>(i) * 4u, stringOffsets[i]);
     }
 
     for (ca::usize i = 0; i < dex.protoIds.size(); ++i) {
@@ -939,7 +1287,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     putU32(out, 48, 0);
     putU32(out, 52, mapOff);
 
-    putU32(out, 56, dex.stringCount());
+    putU32(out, 56, stringCount);
     putU32(out, 60, stringIdsOff);
     putU32(out, 64, dex.typeCount());
     putU32(out, 68, typeIdsOff);
