@@ -210,6 +210,52 @@ struct StringPool
     }
 };
 
+/// @brief 一张可重排 ID 表的旧→新索引映射。
+struct IdOrder
+{
+    std::vector<ca::u32> oldIndexByNew;  ///< 新下标 → 旧索引
+    std::vector<ca::u32> remap;          ///< 旧索引 → 新下标
+    bool identity = true;
+};
+
+/// @brief 按 @p less 排序条目并建立双向映射；键重复视为模型错误。
+template <typename Entry, typename Less>
+Result<IdOrder, WriteError> makeIdOrder(const std::vector<Entry>& entries, Less less)
+{
+    IdOrder order;
+    order.oldIndexByNew.resize(entries.size());
+    order.remap.resize(entries.size());
+    for (ca::u32 i = 0; i < entries.size(); ++i) {
+        order.oldIndexByNew[i] = i;
+    }
+
+    std::sort(order.oldIndexByNew.begin(), order.oldIndexByNew.end(),
+              [&entries, &less](ca::u32 a, ca::u32 b) {
+                  if (less(entries[a], entries[b])) {
+                      return true;
+                  }
+                  if (less(entries[b], entries[a])) {
+                      return false;
+                  }
+                  return a < b;
+              });
+
+    for (ca::u32 newIndex = 0; newIndex < order.oldIndexByNew.size(); ++newIndex) {
+        const ca::u32 oldIndex = order.oldIndexByNew[newIndex];
+        if (newIndex != 0) {
+            const ca::u32 previous = order.oldIndexByNew[newIndex - 1];
+            if (!less(entries[previous], entries[oldIndex])) {
+                return Err(WriteError::InvalidModel);  // 键重复
+            }
+        }
+        order.remap[oldIndex] = newIndex;
+        if (oldIndex != newIndex) {
+            order.identity = false;
+        }
+    }
+    return Ok(std::move(order));
+}
+
 /// @brief 从 string_data_item 字节解出 UTF-16 排序键，并校验声明的长度。
 Result<std::u16string, WriteError> decodeStringKey(const std::vector<ca::u8>& item)
 {
@@ -294,8 +340,8 @@ Result<StringPool, WriteError> collectStringPool(DexFile& dex)
     return Ok(std::move(pool));
 }
 
-/// @brief 字符串值重排后，依赖字符串内容的 ID 表仍须满足 DEX 排序约定。
-Result<void, WriteError> validateIdOrder(const DexFile& dex, const StringPool& pool)
+/// @brief type 表尚未重排，字符串重命名不得破坏其描述符顺序。
+Result<void, WriteError> validateTypeOrder(const DexFile& dex, const StringPool& pool)
 {
     for (ca::usize i = 1; i < dex.typeIds.size(); ++i) {
         if (!(pool.keyOf(dex.typeIds[i - 1].descriptorIdx) <
@@ -303,43 +349,19 @@ Result<void, WriteError> validateIdOrder(const DexFile& dex, const StringPool& p
             return Err(WriteError::UnsortedTables);
         }
     }
-
-    const auto fieldLess = [&pool](const FieldId& a, const FieldId& b) {
-        if (a.classIdx != b.classIdx) {
-            return a.classIdx < b.classIdx;
-        }
-        const int cmp = pool.keyOf(a.nameIdx).compare(pool.keyOf(b.nameIdx));
-        if (cmp != 0) {
-            return cmp < 0;
-        }
-        return a.typeIdx < b.typeIdx;
-    };
-    for (ca::usize i = 1; i < dex.fieldIds.size(); ++i) {
-        if (!fieldLess(dex.fieldIds[i - 1], dex.fieldIds[i])) {
-            return Err(WriteError::UnsortedTables);
-        }
-    }
-
-    const auto methodLess = [&pool](const MethodId& a, const MethodId& b) {
-        if (a.classIdx != b.classIdx) {
-            return a.classIdx < b.classIdx;
-        }
-        const int cmp = pool.keyOf(a.nameIdx).compare(pool.keyOf(b.nameIdx));
-        if (cmp != 0) {
-            return cmp < 0;
-        }
-        return a.protoIdx < b.protoIdx;
-    };
-    for (ca::usize i = 1; i < dex.methodIds.size(); ++i) {
-        if (!methodLess(dex.methodIds[i - 1], dex.methodIds[i])) {
-            return Err(WriteError::UnsortedTables);
-        }
-    }
     return Ok();
 }
 
-Result<std::vector<ca::u8>, WriteError> remapInsnStrings(ByteSlice insns,
-                                                         const StringPool& pool)
+/// @brief 重建期间有效的三张索引映射；type/proto/call_site/method_handle 不重排。
+struct IndexRemap
+{
+    const std::vector<ca::u32>& strings;
+    const std::vector<ca::u32>& fields;
+    const std::vector<ca::u32>& methods;
+};
+
+Result<std::vector<ca::u8>, WriteError> remapInsnIndices(ByteSlice insns,
+                                                         const IndexRemap& maps)
 {
     Result<std::vector<Insn>, InsnError> decoded = decodeInsns(insns);
     if (decoded.is_err()) {
@@ -349,13 +371,24 @@ Result<std::vector<ca::u8>, WriteError> remapInsnStrings(ByteSlice insns,
 
     bool changed = false;
     for (Insn& insn : list) {
-        if (insn.indexKind != IndexKind::String) {
-            continue;
+        const std::vector<ca::u32>* table = nullptr;
+        switch (insn.indexKind) {
+            case IndexKind::String:
+                table = &maps.strings;
+                break;
+            case IndexKind::Field:
+                table = &maps.fields;
+                break;
+            case IndexKind::Method:
+                table = &maps.methods;
+                break;
+            default:
+                continue;
         }
-        if (insn.index >= pool.remap.size()) {
+        if (insn.index >= table->size()) {
             return Err(WriteError::InvalidModel);
         }
-        const ca::u32 mapped = pool.remap[insn.index];
+        const ca::u32 mapped = (*table)[insn.index];
         if (mapped != insn.index) {
             insn.index = mapped;
             changed = true;
@@ -439,27 +472,38 @@ ca::u8 minimalIndexWidth(ca::u32 value) noexcept
     return 4;
 }
 
-Result<void, WriteError> remapValueStrings(EncodedValue& value, const StringPool& pool)
+Result<void, WriteError> remapValueIndex(EncodedValue& value,
+                                         const std::vector<ca::u32>& remap)
+{
+    if (value.index >= remap.size()) {
+        return Err(WriteError::InvalidModel);
+    }
+    const ca::u32 mapped = remap[value.index];
+    if (mapped == value.index) {
+        return Ok();
+    }
+    value.index = mapped;
+    // 新索引可能比原宽度更长；只增不减，保留源编码的宽裕宽度。
+    const ca::u8 width = minimalIndexWidth(mapped);
+    if (static_cast<ca::u32>(value.valueArg) + 1u < width) {
+        value.valueArg = static_cast<ca::u8>(width - 1u);
+    }
+    return Ok();
+}
+
+Result<void, WriteError> remapValueIndices(EncodedValue& value, const IndexRemap& maps)
 {
     switch (value.type) {
-        case EncodedValueType::String: {
-            if (value.index >= pool.remap.size()) {
-                return Err(WriteError::InvalidModel);
-            }
-            const ca::u32 mapped = pool.remap[value.index];
-            if (mapped != value.index) {
-                value.index = mapped;
-                // 新索引可能比原宽度更长；只增不减，保留源编码的宽裕宽度。
-                const ca::u8 width = minimalIndexWidth(mapped);
-                if (static_cast<ca::u32>(value.valueArg) + 1u < width) {
-                    value.valueArg = static_cast<ca::u8>(width - 1u);
-                }
-            }
-            return Ok();
-        }
+        case EncodedValueType::String:
+            return remapValueIndex(value, maps.strings);
+        case EncodedValueType::Field:
+        case EncodedValueType::Enum:
+            return remapValueIndex(value, maps.fields);
+        case EncodedValueType::Method:
+            return remapValueIndex(value, maps.methods);
         case EncodedValueType::Array:
             for (EncodedValue& element : value.array) {
-                const Result<void, WriteError> mapped = remapValueStrings(element, pool);
+                const Result<void, WriteError> mapped = remapValueIndices(element, maps);
                 if (mapped.is_err()) {
                     return Err(mapped.unwrap_err());
                 }
@@ -468,12 +512,12 @@ Result<void, WriteError> remapValueStrings(EncodedValue& value, const StringPool
         case EncodedValueType::Annotation:
             if (value.annotation != nullptr) {
                 for (AnnotationElement& element : value.annotation->elements) {
-                    if (element.nameIdx >= pool.remap.size()) {
+                    if (element.nameIdx >= maps.strings.size()) {
                         return Err(WriteError::InvalidModel);
                     }
-                    element.nameIdx = pool.remap[element.nameIdx];
+                    element.nameIdx = maps.strings[element.nameIdx];
                     const Result<void, WriteError> mapped =
-                        remapValueStrings(element.value, pool);
+                        remapValueIndices(element.value, maps);
                     if (mapped.is_err()) {
                         return Err(mapped.unwrap_err());
                     }
@@ -486,15 +530,15 @@ Result<void, WriteError> remapValueStrings(EncodedValue& value, const StringPool
 }
 
 Result<std::vector<ca::u8>, WriteError> encodeAnnotationItemRemapped(
-    const AnnotationItem& item, const StringPool& pool)
+    const AnnotationItem& item, const IndexRemap& maps)
 {
     AnnotationItem copy = item;
     for (AnnotationElement& element : copy.annotation.elements) {
-        if (element.nameIdx >= pool.remap.size()) {
+        if (element.nameIdx >= maps.strings.size()) {
             return Err(WriteError::InvalidModel);
         }
-        element.nameIdx = pool.remap[element.nameIdx];
-        const Result<void, WriteError> mapped = remapValueStrings(element.value, pool);
+        element.nameIdx = maps.strings[element.nameIdx];
+        const Result<void, WriteError> mapped = remapValueIndices(element.value, maps);
         if (mapped.is_err()) {
             return Err(mapped.unwrap_err());
         }
@@ -503,16 +547,42 @@ Result<std::vector<ca::u8>, WriteError> encodeAnnotationItemRemapped(
 }
 
 Result<std::vector<ca::u8>, WriteError> encodeArrayRemapped(const EncodedArrayItem& item,
-                                                            const StringPool& pool)
+                                                            const IndexRemap& maps)
 {
     EncodedArrayItem copy = item;
     for (EncodedValue& value : copy.values) {
-        const Result<void, WriteError> mapped = remapValueStrings(value, pool);
+        const Result<void, WriteError> mapped = remapValueIndices(value, maps);
         if (mapped.is_err()) {
             return Err(mapped.unwrap_err());
         }
     }
     return writeEncodedArrayItem(copy);
+}
+
+Result<std::vector<AnnotationsDirectoryEntry>, WriteError> remapDirectoryEntries(
+    const std::vector<AnnotationsDirectoryEntry>& entries,
+    const std::vector<ca::u32>* memberRemap)
+{
+    std::vector<AnnotationsDirectoryEntry> out = entries;
+    if (memberRemap == nullptr) {
+        return Ok(std::move(out));
+    }
+    for (AnnotationsDirectoryEntry& entry : out) {
+        if (entry.memberIdx >= memberRemap->size()) {
+            return Err(WriteError::InvalidModel);
+        }
+        entry.memberIdx = (*memberRemap)[entry.memberIdx];
+    }
+    std::sort(out.begin(), out.end(),
+              [](const AnnotationsDirectoryEntry& a, const AnnotationsDirectoryEntry& b) {
+                  return a.memberIdx < b.memberIdx;
+              });
+    for (ca::usize i = 1; i < out.size(); ++i) {
+        if (out[i].memberIdx == out[i - 1].memberIdx) {
+            return Err(WriteError::InvalidModel);
+        }
+    }
+    return Ok(std::move(out));
 }
 
 /// @brief 复制 type_list 原字节（u32 计数 + 类型索引）。
@@ -564,13 +634,50 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         return Err(collected.unwrap_err());
     }
     const StringPool pool = std::move(collected).unwrap();
-    const Result<void, WriteError> ordered = validateIdOrder(dex, pool);
-    if (ordered.is_err()) {
-        return Err(ordered.unwrap_err());
+    const Result<void, WriteError> typeOrder = validateTypeOrder(dex, pool);
+    if (typeOrder.is_err()) {
+        return Err(typeOrder.unwrap_err());
     }
-    if (!pool.remapIsIdentity && options.keepUnknownSections && !dex.rawSections.empty()) {
+
+    // ---- field_ids / method_ids：按 (class, name, type/proto) 重排 ----
+    const auto fieldLess = [&pool](const FieldId& a, const FieldId& b) {
+        if (a.classIdx != b.classIdx) {
+            return a.classIdx < b.classIdx;
+        }
+        const int cmp = pool.keyOf(a.nameIdx).compare(pool.keyOf(b.nameIdx));
+        if (cmp != 0) {
+            return cmp < 0;
+        }
+        return a.typeIdx < b.typeIdx;
+    };
+    Result<IdOrder, WriteError> fieldOrderResult = makeIdOrder(dex.fieldIds, fieldLess);
+    if (fieldOrderResult.is_err()) {
+        return Err(fieldOrderResult.unwrap_err());
+    }
+    const IdOrder fieldOrder = std::move(fieldOrderResult).unwrap();
+
+    const auto methodLess = [&pool](const MethodId& a, const MethodId& b) {
+        if (a.classIdx != b.classIdx) {
+            return a.classIdx < b.classIdx;
+        }
+        const int cmp = pool.keyOf(a.nameIdx).compare(pool.keyOf(b.nameIdx));
+        if (cmp != 0) {
+            return cmp < 0;
+        }
+        return a.protoIdx < b.protoIdx;
+    };
+    Result<IdOrder, WriteError> methodOrderResult = makeIdOrder(dex.methodIds, methodLess);
+    if (methodOrderResult.is_err()) {
+        return Err(methodOrderResult.unwrap_err());
+    }
+    const IdOrder methodOrder = std::move(methodOrderResult).unwrap();
+
+    const bool indicesChanged =
+        !pool.remapIsIdentity || !fieldOrder.identity || !methodOrder.identity;
+    if (indicesChanged && options.keepUnknownSections && !dex.rawSections.empty()) {
         return Err(WriteError::UnmappedRawSection);
     }
+    const IndexRemap maps{pool.remap, fieldOrder.remap, methodOrder.remap};
 
     const ca::core::Bytes& src = dex.sourceBytes();
     const ByteSlice source = dex.source();
@@ -632,6 +739,11 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             }
         }
     }
+    // code_item 布局按新方法索引排序，保证重排后二次重建仍是固定点。
+    std::sort(sites.begin(), sites.end(),
+              [&methodOrder](const MethodSite& a, const MethodSite& b) {
+                  return methodOrder.remap[a.methodIdx] < methodOrder.remap[b.methodIdx];
+              });
     for (const auto& entry : replacements) {
         if (methodsWithCode.count(entry.first) == 0) {
             return Err(WriteError::InvalidModel);
@@ -669,7 +781,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             return Err(info.unwrap_err());
         }
         DebugInfo copy = *info.unwrap();
-        if (!pool.remapIsIdentity) {
+        if (indicesChanged) {
             const Result<void, WriteError> remapped = remapDebugInfoStrings(copy, pool);
             if (remapped.is_err()) {
                 return Err(remapped.unwrap_err());
@@ -707,8 +819,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             return Err(array.unwrap_err());
         }
         Result<std::vector<ca::u8>, WriteError> encoded =
-            pool.remapIsIdentity ? writeEncodedArrayItem(*array.unwrap())
-                                 : encodeArrayRemapped(*array.unwrap(), pool);
+            indicesChanged ? writeEncodedArrayItem(*array.unwrap())
+                           : encodeArrayRemapped(*array.unwrap(), maps);
         if (encoded.is_err()) {
             return Err(encoded.unwrap_err());
         }
@@ -806,8 +918,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             return Err(item.unwrap_err());
         }
         Result<std::vector<ca::u8>, WriteError> encoded =
-            pool.remapIsIdentity ? writeAnnotationItem(*item.unwrap())
-                                 : encodeAnnotationItemRemapped(*item.unwrap(), pool);
+            indicesChanged ? writeAnnotationItem(*item.unwrap())
+                           : encodeAnnotationItemRemapped(*item.unwrap(), maps);
         if (encoded.is_err()) {
             return Err(encoded.unwrap_err());
         }
@@ -893,7 +1005,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     ca::u32 fieldIdsOff = 0;
     if (!dex.fieldIds.empty()) {
         fieldIdsOff = offsetOf(out);
-        for (const FieldId& field : dex.fieldIds) {
+        for (ca::u32 i = 0; i < fieldOrder.oldIndexByNew.size(); ++i) {
+            const FieldId& field = dex.fieldIds[fieldOrder.oldIndexByNew[i]];
             appendU16(out, field.classIdx);
             appendU16(out, field.typeIdx);
             appendU32(out, pool.remap[field.nameIdx]);
@@ -904,7 +1017,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     ca::u32 methodIdsOff = 0;
     if (!dex.methodIds.empty()) {
         methodIdsOff = offsetOf(out);
-        for (const MethodId& method : dex.methodIds) {
+        for (ca::u32 i = 0; i < methodOrder.oldIndexByNew.size(); ++i) {
+            const MethodId& method = dex.methodIds[methodOrder.oldIndexByNew[i]];
             appendU16(out, method.classIdx);
             appendU16(out, method.protoIdx);
             appendU32(out, pool.remap[method.nameIdx]);
@@ -941,9 +1055,12 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     if (!dex.methodHandles.empty()) {
         const ca::u32 handlesOff = offsetOf(out);
         for (const MethodHandle& handle : dex.methodHandles) {
+            const ca::u32 target = handle.handleType <= 3
+                                       ? fieldOrder.remap[handle.targetIdx]
+                                       : methodOrder.remap[handle.targetIdx];
             appendU16(out, handle.handleType);
             appendU16(out, handle.unused1);
-            appendU16(out, handle.targetIdx);
+            appendU16(out, static_cast<ca::u16>(target));
             appendU16(out, handle.unused2);
         }
         mapItems.push_back(
@@ -1026,19 +1143,38 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     }
     place(annotationRefLists, 4, MapType::AnnotationSetRefList);
 
+    const std::vector<ca::u32>* fieldMembers =
+        fieldOrder.identity ? nullptr : &fieldOrder.remap;
+    const std::vector<ca::u32>* methodMembers =
+        methodOrder.identity ? nullptr : &methodOrder.remap;
+
     ItemTable annotationDirectories;
     for (const auto& entry : directories) {
         const AnnotationsDirectory& dir = *entry.second;
+        Result<std::vector<AnnotationsDirectoryEntry>, WriteError> fieldEntries =
+            remapDirectoryEntries(dir.fieldAnnotations, fieldMembers);
+        Result<std::vector<AnnotationsDirectoryEntry>, WriteError> methodEntries =
+            remapDirectoryEntries(dir.methodAnnotations, methodMembers);
+        Result<std::vector<AnnotationsDirectoryEntry>, WriteError> parameterEntries =
+            remapDirectoryEntries(dir.parameterAnnotations, methodMembers);
+        if (fieldEntries.is_err() || methodEntries.is_err() || parameterEntries.is_err()) {
+            return Err(WriteError::InvalidModel);
+        }
+        const std::vector<AnnotationsDirectoryEntry>& fields = fieldEntries.unwrap();
+        const std::vector<AnnotationsDirectoryEntry>& methods = methodEntries.unwrap();
+        const std::vector<AnnotationsDirectoryEntry>& parameters =
+            parameterEntries.unwrap();
+
         std::vector<ca::u8> bytes;
         ca::u32 classOff = 0;
         if (!remap(annotationSets, dir.classAnnotationsOff, &classOff)) {
             return Err(WriteError::InvalidModel);
         }
         appendU32(bytes, classOff);
-        appendU32(bytes, static_cast<ca::u32>(dir.fieldAnnotations.size()));
-        appendU32(bytes, static_cast<ca::u32>(dir.methodAnnotations.size()));
-        appendU32(bytes, static_cast<ca::u32>(dir.parameterAnnotations.size()));
-        for (const AnnotationsDirectoryEntry& e : dir.fieldAnnotations) {
+        appendU32(bytes, static_cast<ca::u32>(fields.size()));
+        appendU32(bytes, static_cast<ca::u32>(methods.size()));
+        appendU32(bytes, static_cast<ca::u32>(parameters.size()));
+        for (const AnnotationsDirectoryEntry& e : fields) {
             ca::u32 newOff = 0;
             if (!remap(annotationSets, e.annotationsOff, &newOff)) {
                 return Err(WriteError::InvalidModel);
@@ -1046,7 +1182,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             appendU32(bytes, e.memberIdx);
             appendU32(bytes, newOff);
         }
-        for (const AnnotationsDirectoryEntry& e : dir.methodAnnotations) {
+        for (const AnnotationsDirectoryEntry& e : methods) {
             ca::u32 newOff = 0;
             if (!remap(annotationSets, e.annotationsOff, &newOff)) {
                 return Err(WriteError::InvalidModel);
@@ -1054,7 +1190,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             appendU32(bytes, e.memberIdx);
             appendU32(bytes, newOff);
         }
-        for (const AnnotationsDirectoryEntry& e : dir.parameterAnnotations) {
+        for (const AnnotationsDirectoryEntry& e : parameters) {
             ca::u32 newOff = 0;
             if (!remap(annotationRefLists, e.annotationsOff, &newOff)) {
                 return Err(WriteError::InvalidModel);
@@ -1079,8 +1215,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     const auto appendPending = [&](const CodeItem* item, ByteSlice insns,
                                    ca::u32 debugOff) -> Result<void, WriteError> {
         pending.push_back(PendingCode{item, insns, {}, debugOff, 0});
-        if (!pool.remapIsIdentity) {
-            Result<std::vector<ca::u8>, WriteError> remapped = remapInsnStrings(insns, pool);
+        if (indicesChanged) {
+            Result<std::vector<ca::u8>, WriteError> remapped = remapInsnIndices(insns, maps);
             if (remapped.is_err()) {
                 return Err(remapped.unwrap_err());
             }
@@ -1168,22 +1304,40 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         methodNewCode[site.methodIdx] = pending[index->second].newOffset;
     }
 
-    // ---- class_data：code_off 换成新偏移 ----
+    // ---- class_data：code_off 换成新偏移，field/method 索引换成新下标 ----
     ItemTable classDataItems;
     for (const auto& entry : classDataByOff) {
         ClassData copy = *entry.second;
-        std::vector<EncodedMethod>* lists[2] = {&copy.directMethods, &copy.virtualMethods};
-        for (std::vector<EncodedMethod>* list : lists) {
-            for (EncodedMethod& method : *list) {
-                if (method.codeOff == 0) {
-                    continue;
-                }
-                const auto newOff = methodNewCode.find(method.methodIndex);
-                if (newOff == methodNewCode.end()) {
-                    return Err(WriteError::InvalidModel);
-                }
-                method.codeOff = newOff->second;
+        std::vector<EncodedField>* fieldLists[2] = {&copy.staticFields,
+                                                    &copy.instanceFields};
+        for (std::vector<EncodedField>* list : fieldLists) {
+            for (EncodedField& field : *list) {
+                field.fieldIndex = fieldOrder.remap[field.fieldIndex];
             }
+            std::sort(list->begin(), list->end(),
+                      [](const EncodedField& a, const EncodedField& b) {
+                          return a.fieldIndex < b.fieldIndex;
+                      });
+        }
+
+        std::vector<EncodedMethod>* methodLists[2] = {&copy.directMethods,
+                                                      &copy.virtualMethods};
+        for (std::vector<EncodedMethod>* list : methodLists) {
+            for (EncodedMethod& method : *list) {
+                const ca::u32 oldIndex = method.methodIndex;
+                if (method.codeOff != 0) {
+                    const auto newOff = methodNewCode.find(oldIndex);
+                    if (newOff == methodNewCode.end()) {
+                        return Err(WriteError::InvalidModel);
+                    }
+                    method.codeOff = newOff->second;
+                }
+                method.methodIndex = methodOrder.remap[oldIndex];
+            }
+            std::sort(list->begin(), list->end(),
+                      [](const EncodedMethod& a, const EncodedMethod& b) {
+                          return a.methodIndex < b.methodIndex;
+                      });
         }
         Result<std::vector<ca::u8>, WriteError> encoded = writeClassData(copy);
         if (encoded.is_err()) {

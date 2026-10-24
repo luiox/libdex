@@ -45,7 +45,7 @@ enum class WriteError {
     NotModeled,        ///< 版本或结构没有冻结语义（041 container、非空 link 区）
     SourceUnreadable,  ///< 重建需要再次解码源条目，但源字节不可读或自相矛盾
     InvalidModel,      ///< 模型引用缺失或替换项指向不存在/无方法体的方法
-    UnsortedTables,    ///< 字符串重排后 type/field/method 表不再满足 DEX 排序约定
+    UnsortedTables,    ///< 字符串重排后 type 表不再满足描述符排序约定（表重编号未实现）
     UnmappedRawSection, ///< 字符串索引需要重排，但未建模 section 无法迁移内部引用
 };
 
