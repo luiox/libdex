@@ -679,7 +679,9 @@ TEST(DexBuilder, AddsAndReusesIdTableEntries)
     const auto sameProto = file->addProto(1, 0, 0);  // ()I
     ASSERT_TRUE(sameProto.is_ok());
     EXPECT_EQ(sameProto.unwrap(), 0u);
-    const auto stringProto = file->addProto(1, stringType.unwrap(), 0);
+    const auto objectShorty = file->internUtf8("L");
+    ASSERT_TRUE(objectShorty.is_ok());
+    const auto stringProto = file->addProto(objectShorty.unwrap(), stringType.unwrap(), 0);
     ASSERT_TRUE(stringProto.is_ok());
     EXPECT_EQ(stringProto.unwrap(), 2u);
 
