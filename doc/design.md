@@ -48,7 +48,9 @@ DEX 要求 string_ids 按 UTF-16 排序，type/proto/field/method 按各自键�
 
 class_defs 可以删除与重排；删类不回收 ID 表条目。容量：type/proto/field/method 各 65536，string 是 u32；`buildDex` 在入口检查容量与表内索引，越界返回 `InvalidModel`。
 
-ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已有条目，返回索引，表满返回 `IdTableFull`。新增条目只进 ID 表，不创建 class_data 成员或方法体；需要被本 dex 定义的新成员要等类成员注入能力。
+ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已有条目，返回索引，表满返回 `IdTableFull`。
+
+成员注入走 `BuildOptions::fieldAdditions`/`methodAdditions`：成员追加到目标 classDef 的 class_data 副本（类没有 class_data 时新建），新增方法体与替换体一起进入统一 code 单元，按新方法索引排序后落位，保证二次重建固定。新增静态字段会改变 static_values 数组长度，当前只允许加到没有 static_values 的类；新增成员的注解与参数注解暂不支持。
 
 ## 错误
 

@@ -47,10 +47,39 @@ struct CodeReplacement
     std::vector<ca::u8> insns;  ///< 已编码指令区，长度必须是 item.insnsSize * 2
 };
 
+/// @brief 往已有类里追加一个字段。
+///
+/// @ref classDefIdx 指向 class_defs；该类没有 class_data 时新建。
+/// @ref fieldIdx 必须已在 field_ids 中且未被任何 class_data 定义。
+/// 静态字段会改变 static_values 数组长度，当前只允许追加到没有
+/// static_values 的类。
+struct FieldAddition
+{
+    ca::u32 classDefIdx = 0;
+    ca::u32 fieldIdx = 0;
+    ca::u32 accessFlags = 0;
+    bool isStatic = false;
+};
+
+/// @brief 往已有类里追加一个方法并附带方法体。
+///
+/// @ref methodIdx 必须已在 method_ids 中且未被任何 class_data 定义；
+/// @ref item 与 @ref insns 的约定同 @ref CodeReplacement。
+struct MethodAddition
+{
+    ca::u32 classDefIdx = 0;
+    ca::u32 methodIdx = 0;
+    ca::u32 accessFlags = 0;
+    CodeItem item;
+    std::vector<ca::u8> insns;
+};
+
 /// @brief 整文件重建选项。
 struct BuildOptions
 {
     std::vector<CodeReplacement> codeReplacements;
+    std::vector<FieldAddition> fieldAdditions;
+    std::vector<MethodAddition> methodAdditions;
     bool keepUnknownSections = true;  ///< 保留未建模 map section 的原始字节
 };
 
@@ -64,9 +93,9 @@ struct BuildOptions
 ///
 /// 失败原因见 @ref WriteError：版本 041（container 语义未冻结）或非空 link
 /// 区返回 `NotModeled`；重建期间再次解码源条目失败返回 `SourceUnreadable`；
-/// 替换项指向不存在或无可替换方法体的方法返回 `InvalidModel`；表内键重复、
-/// 索引越界或条目无法重编码返回 `InvalidModel`；条目超出编码域宽返回
-/// `Unencodable`；索引变化与保留的未建模 section 冲突返回
+/// 替换项指向不存在或无可替换方法体的方法返回 `InvalidModel`；新增成员重复
+/// 定义、索引越界、表内键重复或条目无法重编码返回 `InvalidModel`；条目超出
+/// 编码域宽返回 `Unencodable`；索引变化与保留的未建模 section 冲突返回
 /// `UnmappedRawSection`。返回 Err 时输出字节一律作废。
 ///
 /// 重建会按需解码 string_data/class_data/code_item/注解等条目并填充

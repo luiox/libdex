@@ -12,7 +12,8 @@ DEX（Android 字节码）读写库。保真 DOM 加逐条目 codec，返回值�
 - 未修改写回原字节透传；`buildDex` 重新排布为 canonical 布局，回填偏移并重算 checksum/SHA-1。
 - 按 method_idx 替换方法体，供反混淆、审计与重写使用。
 - 追加或复用字符串（`internString`/`internUtf8`）；重建时按 UTF-16 重排字符串池并去重。
-- 追加或复用 type/proto/field/method 条目（`addType`/`addProto`/`addField`/`addMethod`）；新增条目只进 ID 表，不自动挂到 class_data。
+- 追加或复用 type/proto/field/method 条目（`addType`/`addProto`/`addField`/`addMethod`）。
+- 往已有类注入字段/方法（`BuildOptions::fieldAdditions`/`methodAdditions`）：成员写进 class_data，新增方法体参与 code 布局。静态字段目前只能加到没有 static_values 的类。
 - 重命名类型、字段或方法：重建时按 DEX 排序键重排五张 ID 表与 class_defs，重新编码 type_list，并同步重写 class_data、指令、catch、debug_info、注解与 encoded_value 中的全部索引。
 - 指令与 encoded_value 精确编码：保留原始宽度与指令形态，不合并 `const` 变体。
 - 给 adapter 提供 const 取值域、索引上限、分支目标与地址重算原语。
