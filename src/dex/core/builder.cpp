@@ -805,25 +805,16 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         classDataByOff.emplace(off, data.unwrap());
     }
 
-    std::unordered_set<ca::u32> staticValuesOffs;
-    for (const ClassDef& def : dex.classDefs) {
-        if (def.classDataOff != 0 && def.staticValuesOff != 0) {
-            staticValuesOffs.insert(def.classDataOff);
-        }
-    }
-
     std::vector<MethodSite> sites;
     std::unordered_set<ca::u32> methodsWithCode;
     std::unordered_set<ca::u32> definedFields;
     std::unordered_set<ca::u32> definedMethods;
-    std::unordered_set<ca::u32> staticFieldsWithValues;
     for (const auto& entry : classDataByOff) {
         const ClassData& data = *entry.second;
-        const bool hasStaticValues = staticValuesOffs.count(entry.first) != 0;
         const std::vector<EncodedField>* fieldLists[2] = {&data.staticFields,
                                                           &data.instanceFields};
-        for (ca::u32 listIdx = 0; listIdx < 2; ++listIdx) {
-            for (const EncodedField& field : *fieldLists[listIdx]) {
+        for (const std::vector<EncodedField>* fields : fieldLists) {
+            for (const EncodedField& field : *fields) {
                 if (removedFields.count(field.fieldIndex) != 0) {
                     continue;
                 }
@@ -831,9 +822,6 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                     return Err(WriteError::InvalidModel);
                 }
                 definedFields.insert(field.fieldIndex);
-                if (listIdx == 0 && hasStaticValues) {
-                    staticFieldsWithValues.insert(field.fieldIndex);
-                }
             }
         }
         const std::vector<EncodedMethod>* lists[2] = {&data.directMethods, &data.virtualMethods};
@@ -854,11 +842,6 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                 }
                 sites.push_back(MethodSite{method.methodIndex, method.codeOff});
             }
-        }
-    }
-    for (ca::u32 fieldIdx : removedFields) {
-        if (staticFieldsWithValues.count(fieldIdx) != 0) {
-            return Err(WriteError::InvalidModel);  // static_values 槽位无法回收
         }
     }
     // code_item 布局按新方法索引排序，保证重排后二次重建仍是固定点。
@@ -885,10 +868,6 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             removedFields.count(add.fieldIdx) != 0 ||
             !addedFields.insert(add.fieldIdx).second) {
             return Err(WriteError::InvalidModel);  // 重复定义或与删除冲突
-        }
-        // 静态字段必须与 static_values 数组等长；扩展数组留给后续切片。
-        if (add.isStatic && dex.classDefs[add.classDefIdx].staticValuesOff != 0) {
-            return Err(WriteError::InvalidModel);
         }
         fieldsByClass[add.classDefIdx].push_back(&add);
     }
@@ -947,6 +926,130 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                                  (kAccPrivate | kAccStatic | kAccConstructor)) != 0;
             (direct ? edit.directMethods : edit.virtualMethods).push_back(method);
         }
+    }
+
+    // ---- static_values：按新的静态字段顺序重建，补齐新增字段并去掉删除项 ----
+    const auto defaultStaticValue = [&](ca::u32 fieldIdx)
+        -> Result<EncodedValue, WriteError> {
+        Result<jstr::MUtf8StringRef, ReadError> descriptor = dex.fieldTypeDescriptor(fieldIdx);
+        if (descriptor.is_err()) {
+            return Err(WriteError::SourceUnreadable);
+        }
+        const std::string_view text = descriptor.unwrap().as_std_view();
+        if (text.empty()) {
+            return Err(WriteError::InvalidModel);
+        }
+        EncodedValue value;
+        switch (text[0]) {
+            case 'Z': value.type = EncodedValueType::Boolean; break;
+            case 'B': value.type = EncodedValueType::Byte; break;
+            case 'S': value.type = EncodedValueType::Short; break;
+            case 'C': value.type = EncodedValueType::Char; break;
+            case 'I': value.type = EncodedValueType::Int; break;
+            case 'J': value.type = EncodedValueType::Long; break;
+            case 'F': value.type = EncodedValueType::Float; break;
+            case 'D': value.type = EncodedValueType::Double; break;
+            case 'L':
+            case '[': value.type = EncodedValueType::Null; break;
+            default: return Err(WriteError::InvalidModel);
+        }
+        value.valueArg = 0;
+        return Ok(std::move(value));
+    };
+
+    std::unordered_map<ca::u32, std::vector<ca::u8>> staticValueOverrides;
+    for (ca::u32 classDefIdx = 0; classDefIdx < dex.classCount(); ++classDefIdx) {
+        const ca::u32 valuesOff = dex.classDefs[classDefIdx].staticValuesOff;
+        if (valuesOff == 0) {
+            continue;
+        }
+        const ca::u32 dataOff = dex.classDefs[classDefIdx].classDataOff;
+        const ClassData* original = nullptr;
+        if (dataOff != 0) {
+            const auto found = classDataByOff.find(dataOff);
+            if (found == classDataByOff.end()) {
+                return Err(WriteError::InvalidModel);
+            }
+            original = found->second;
+        }
+
+        std::vector<ca::u32> addedStatic;
+        const auto bucket = fieldsByClass.find(classDefIdx);
+        if (bucket != fieldsByClass.end()) {
+            for (const FieldAddition* add : bucket->second) {
+                if (add->isStatic) {
+                    addedStatic.push_back(add->fieldIdx);
+                }
+            }
+        }
+        bool changed = !addedStatic.empty();
+        if (!changed && original != nullptr) {
+            for (const EncodedField& field : original->staticFields) {
+                if (removedFields.count(field.fieldIndex) != 0) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if (!changed) {
+            continue;
+        }
+
+        Result<const EncodedArrayItem*, WriteError> fetched =
+            requireDecoded(dex.encodedArray(valuesOff));
+        if (fetched.is_err()) {
+            return Err(fetched.unwrap_err());
+        }
+        const EncodedArrayItem& array = *fetched.unwrap();
+        const ca::usize originalCount = original == nullptr ? 0 : original->staticFields.size();
+        if (array.values.size() != originalCount) {
+            return Err(WriteError::InvalidModel);  // 源数组与静态字段数不一致
+        }
+
+        struct StaticSlot
+        {
+            ca::u32 fieldIdx = 0;
+            bool fromOriginal = false;
+            ca::usize valuePos = 0;
+        };
+        std::vector<StaticSlot> slots;
+        ca::usize pos = 0;
+        if (original != nullptr) {
+            for (const EncodedField& field : original->staticFields) {
+                const ca::usize valuePos = pos++;
+                if (removedFields.count(field.fieldIndex) == 0) {
+                    slots.push_back(StaticSlot{field.fieldIndex, true, valuePos});
+                }
+            }
+        }
+        for (ca::u32 fieldIdx : addedStatic) {
+            slots.push_back(StaticSlot{fieldIdx, false, 0});
+        }
+        std::sort(slots.begin(), slots.end(),
+                  [&fieldOrder](const StaticSlot& a, const StaticSlot& b) {
+                      return fieldOrder.remap[a.fieldIdx] < fieldOrder.remap[b.fieldIdx];
+                  });
+
+        EncodedArrayItem synthesized;
+        synthesized.values.reserve(slots.size());
+        for (const StaticSlot& slot : slots) {
+            if (slot.fromOriginal) {
+                synthesized.values.push_back(array.values[slot.valuePos]);
+            } else {
+                Result<EncodedValue, WriteError> value = defaultStaticValue(slot.fieldIdx);
+                if (value.is_err()) {
+                    return Err(value.unwrap_err());
+                }
+                synthesized.values.push_back(value.unwrap());
+            }
+        }
+        Result<std::vector<ca::u8>, WriteError> encoded =
+            indicesChanged ? encodeArrayRemapped(synthesized, maps)
+                           : writeEncodedArrayItem(synthesized);
+        if (encoded.is_err()) {
+            return Err(encoded.unwrap_err());
+        }
+        staticValueOverrides.emplace(classDefIdx, std::move(encoded).unwrap());
     }
 
     // ---- code_item 布局单元：共享旧 code_off 的方法合并，新增方法各自一单元 ----
@@ -1100,9 +1203,22 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         arrays.add(oldOff, std::move(encoded).unwrap());
         return Ok();
     };
+    std::unordered_map<ca::u32, ca::u32> staticValueKeyByClass;
+    ca::u32 syntheticArrayKey = 0x80000000u;
     for (ca::u32 i = 0; i < classOrder.oldIndexByNew.size(); ++i) {
+        const ca::u32 classIdx = classOrder.oldIndexByNew[i];
+        const auto overrideIt = staticValueOverrides.find(classIdx);
+        if (overrideIt != staticValueOverrides.end()) {
+            while (arrays.contains(syntheticArrayKey)) {
+                ++syntheticArrayKey;
+            }
+            const ca::u32 key = syntheticArrayKey++;
+            arrays.add(key, std::move(overrideIt->second));
+            staticValueKeyByClass.emplace(classIdx, key);
+            continue;
+        }
         const Result<void, WriteError> added =
-            addArray(dex.classDefs[classOrder.oldIndexByNew[i]].staticValuesOff);
+            addArray(dex.classDefs[classIdx].staticValuesOff);
         if (added.is_err()) {
             return Err(added.unwrap_err());
         }
@@ -1692,9 +1808,16 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             }
             classData = classDataOffsets[found->second];
         }
+        const auto staticOverride = staticValueKeyByClass.find(oldClassIdx);
+        if (staticOverride != staticValueKeyByClass.end()) {
+            if (!arrays.lookup(staticOverride->second, &staticValues)) {
+                return Err(WriteError::InvalidModel);
+            }
+        } else if (!remap(arrays, def.staticValuesOff, &staticValues)) {
+            return Err(WriteError::InvalidModel);
+        }
         if (!remap(typeLists, def.interfacesOff, &interfaces) ||
-            !remap(annotationDirectories, def.annotationsOff, &annotations) ||
-            !remap(arrays, def.staticValuesOff, &staticValues)) {
+            !remap(annotationDirectories, def.annotationsOff, &annotations)) {
             return Err(WriteError::InvalidModel);
         }
         const ca::u32 base = classDefsOff + i * 32u;

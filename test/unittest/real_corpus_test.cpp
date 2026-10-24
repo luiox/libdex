@@ -919,7 +919,9 @@ TEST(DexRealCorpus, RebuildsAfterRemovingMembers)
 
         const auto data = file->classData(target);
         ASSERT_TRUE(data.is_ok());
-        if (!data.unwrap()->instanceFields.empty()) {
+        if (!data.unwrap()->staticFields.empty()) {
+            removedField = data.unwrap()->staticFields.front().fieldIndex;
+        } else if (!data.unwrap()->instanceFields.empty()) {
             removedField = data.unwrap()->instanceFields.front().fieldIndex;
         }
         const auto targetDescriptor = file->classDescriptor(target);
@@ -987,6 +989,15 @@ TEST(DexRealCorpus, RebuildsAfterRemovingMembers)
                     EXPECT_NE(field.fieldIndex, removedField) << path.string();
                 }
             }
+        }
+
+        // static_values 与 static_fields 必须保持同长。
+        const auto values = second->staticValues(secondTarget);
+        ASSERT_TRUE(values.is_ok()) << path.string();
+        if (values.unwrap() != nullptr) {
+            EXPECT_EQ(values.unwrap()->values.size(),
+                      secondData.unwrap()->staticFields.size())
+                << path.string();
         }
 
         dex::core::BuildOptions plain;

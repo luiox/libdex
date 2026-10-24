@@ -1001,6 +1001,55 @@ TEST(DexBuilder, AddsClassDefWithMembers)
     EXPECT_EQ(again.unwrap(), rebuilt);
 }
 
+TEST(DexBuilder, AddsStaticFieldAndExtendsStaticValues)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    ASSERT_NE(file->classDefs[0].staticValuesOff, 0u);
+
+    const auto name = file->internUtf8("gen");
+    ASSERT_TRUE(name.is_ok());
+    const auto fieldIdx = file->addField(1, 0, name.unwrap());
+    ASSERT_TRUE(fieldIdx.is_ok());
+
+    FieldAddition add;
+    add.classDefIdx = 0;
+    add.fieldIdx = fieldIdx.unwrap();
+    add.accessFlags = 0x9;  // public static
+    add.isStatic = true;
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(add);
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->staticFields.size(), 1u);
+    EXPECT_EQ(data.unwrap()->staticFields[0].fieldIndex, fieldIdx.unwrap());
+
+    const auto values = second->staticValues(0);
+    ASSERT_TRUE(values.is_ok());
+    ASSERT_NE(values.unwrap(), nullptr);
+    ASSERT_EQ(values.unwrap()->values.size(), 1u);
+    EXPECT_EQ(values.unwrap()->values[0].type, EncodedValueType::Int);
+    EXPECT_EQ(values.unwrap()->values[0].integer, 0);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
 TEST(DexBuilder, RejectsInvalidMemberAdditions)
 {
     const auto expectInvalid = [](std::unique_ptr<DexFile> file, BuildOptions options) {
@@ -1024,22 +1073,6 @@ TEST(DexBuilder, RejectsInvalidMemberAdditions)
         FieldAddition add;
         add.classDefIdx = 99;
         add.fieldIdx = 0;
-        BuildOptions options;
-        options.keepUnknownSections = false;
-        options.fieldAdditions.push_back(add);
-        expectInvalid(std::move(file), std::move(options));
-    }
-    {
-        // 现有 static_values 数组无法容纳新静态字段。
-        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
-        const auto name = file->internUtf8("gen");
-        ASSERT_TRUE(name.is_ok());
-        const auto fieldIdx = file->addField(1, 0, name.unwrap());
-        ASSERT_TRUE(fieldIdx.is_ok());
-        FieldAddition add;
-        add.classDefIdx = 0;
-        add.fieldIdx = fieldIdx.unwrap();
-        add.isStatic = true;
         BuildOptions options;
         options.keepUnknownSections = false;
         options.fieldAdditions.push_back(add);
