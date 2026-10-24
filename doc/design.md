@@ -56,6 +56,8 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 删除类直接 erase `classDefs`；删除成员走 `removedFields`/`removedMethods`，只从 class_data 移除，ID 表条目不回收。删除静态字段会同步重建 static_values。删除后仍被指令引用的条目按 DEX 的外部引用处理，调用方负责一致性。
 
+已有成员的 access_flags 可用 `fieldAccessFlags`/`methodAccessFlags` 覆盖：方法按新标志在直接/虚方法列表间搬移；字段禁止改变 ACC_STATIC，因为分组与 static_values 槽位按静态性固定。
+
 元数据可以用 `stripDebugInfo` 与 `stripAnnotations` 整体剥离：前者不产出 debug_info 并把 code_item 的 debug_info_off 置 0，后者不产出注解族并把 class_def 的 annotations_off 置 0。剥离不影响 ID 表与指令。
 
 ## 错误

@@ -17,12 +17,13 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 - 新增类：追加 `classDefs` 后用成员注入填 class_data；接口可复用已有 type_list。
 - 删除：类直接从 `classDefs` erase；`removedFields`/`removedMethods` 把成员移出 class_data，ID 表条目保留。
 - 剥离：`stripDebugInfo` 丢弃 debug_info，`stripAnnotations` 丢弃注解族；两者都不动 ID 表与指令。
+- access_flags 覆盖：`fieldAccessFlags`/`methodAccessFlags` 按索引改已有成员；方法自动切换直接/虚方法分组，字段不允许改 static 位。
 - 任何表索引移动与保留的未建模 section 冲突返回 `UnmappedRawSection`。
 - `buildDex` 入口检查 ID 表容量与表内索引；悬垂索引、非法 method_handle 与零 call_site 返回 `InvalidModel`。
 - adapter 原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`。
 - baksmali 2.5.2 文本对拍：合成 fixture、level1（5528 B）与 level2（719560 B）在方法块顺序规范化后 diff 均为空。
 - CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍；真实语料不提交。
-- 本地带真实语料 120 个用例全绿；真实语料的成员/类型改名、成员增删、元数据剥离与二次重建固定点通过。
+- 本地带真实语料 122 个用例全绿；真实语料的成员/类型改名、成员增删、元数据剥离与二次重建固定点通过。
 
 ## 已知缺口
 
