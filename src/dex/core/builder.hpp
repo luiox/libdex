@@ -75,11 +75,17 @@ struct MethodAddition
 };
 
 /// @brief 整文件重建选项。
+///
+/// ID 表条目不会因删除成员而回收：`removedMethods`/`removedFields` 只把成员
+/// 从 class_data 移除，使其变成未定义的外部引用。类删除直接对 `classDefs`
+/// 做 erase。
 struct BuildOptions
 {
     std::vector<CodeReplacement> codeReplacements;
     std::vector<FieldAddition> fieldAdditions;
     std::vector<MethodAddition> methodAdditions;
+    std::vector<ca::u32> removedFields;
+    std::vector<ca::u32> removedMethods;
     bool keepUnknownSections = true;  ///< 保留未建模 map section 的原始字节
 };
 

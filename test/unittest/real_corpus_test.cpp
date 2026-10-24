@@ -868,6 +868,136 @@ TEST(DexRealCorpus, RebuildsAfterMethodAndFieldRenames)
     }
 }
 
+TEST(DexRealCorpus, RebuildsAfterRemovingMembers)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has no .dex files";
+    }
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        auto parsed = dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+        ASSERT_TRUE(parsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+
+        ca::u32 target = dex::core::DexFile::kNoIndex;
+        ca::u32 removedMethod = dex::core::DexFile::kNoIndex;
+        ca::u32 removedField = dex::core::DexFile::kNoIndex;
+        for (ca::u32 classIdx = 0; classIdx < file->classCount(); ++classIdx) {
+            const auto data = file->classData(classIdx);
+            ASSERT_TRUE(data.is_ok()) << path.string() << " class " << classIdx;
+            if (data.unwrap() == nullptr) {
+                continue;
+            }
+            const std::vector<dex::core::EncodedMethod>* methodLists[2] = {
+                &data.unwrap()->directMethods,
+                &data.unwrap()->virtualMethods,
+            };
+            for (const std::vector<dex::core::EncodedMethod>* list : methodLists) {
+                for (const dex::core::EncodedMethod& method : *list) {
+                    if (method.codeOff != 0) {
+                        target = classIdx;
+                        removedMethod = method.methodIndex;
+                        break;
+                    }
+                }
+                if (target != dex::core::DexFile::kNoIndex) {
+                    break;
+                }
+            }
+            if (target != dex::core::DexFile::kNoIndex) {
+                break;
+            }
+        }
+        if (target == dex::core::DexFile::kNoIndex) {
+            continue;
+        }
+
+        const auto data = file->classData(target);
+        ASSERT_TRUE(data.is_ok());
+        if (!data.unwrap()->instanceFields.empty()) {
+            removedField = data.unwrap()->instanceFields.front().fieldIndex;
+        }
+        const auto targetDescriptor = file->classDescriptor(target);
+        ASSERT_TRUE(targetDescriptor.is_ok()) << path.string();
+        const std::string targetName(targetDescriptor.unwrap().as_std_view());
+
+        dex::core::BuildOptions options;
+        options.keepUnknownSections = false;
+        options.removedMethods.push_back(removedMethod);
+        if (removedField != dex::core::DexFile::kNoIndex) {
+            options.removedFields.push_back(removedField);
+        }
+
+        auto built = dex::core::buildDex(*file, options);
+        ASSERT_TRUE(built.is_ok())
+            << path.string() << ": " << dex::core::to_string(built.unwrap_err());
+        const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+        auto reparsed = dex::core::readDex(
+            dex::core::ByteSlice{rebuilt.data(), rebuilt.size()});
+        ASSERT_TRUE(reparsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(reparsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> second = std::move(reparsed).unwrap();
+
+        EXPECT_EQ(second->state(), dex::core::ParseState::Validated) << path.string();
+        const dex::core::Integrity integrity = dex::core::verifyIntegrity(
+            second->source(), second->header.checksum, second->header.signature);
+        EXPECT_TRUE(integrity.checksumOk) << path.string();
+        EXPECT_TRUE(integrity.signatureOk) << path.string();
+        EXPECT_EQ(second->fieldCount(), file->fieldCount()) << path.string();
+        EXPECT_EQ(second->methodCount(), file->methodCount()) << path.string();
+        EXPECT_EQ(second->classCount(), file->classCount()) << path.string();
+
+        ca::u32 secondTarget = dex::core::DexFile::kNoIndex;
+        for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+            const auto descriptor = second->classDescriptor(classIdx);
+            ASSERT_TRUE(descriptor.is_ok());
+            if (descriptor.unwrap().as_std_view() == targetName) {
+                secondTarget = classIdx;
+                break;
+            }
+        }
+        ASSERT_NE(secondTarget, dex::core::DexFile::kNoIndex) << path.string();
+
+        const auto secondData = second->classData(secondTarget);
+        ASSERT_TRUE(secondData.is_ok());
+        ASSERT_NE(secondData.unwrap(), nullptr) << path.string();
+
+        const std::vector<dex::core::EncodedMethod>* methodLists[2] = {
+            &secondData.unwrap()->directMethods,
+            &secondData.unwrap()->virtualMethods,
+        };
+        for (const std::vector<dex::core::EncodedMethod>* list : methodLists) {
+            for (const dex::core::EncodedMethod& method : *list) {
+                EXPECT_NE(method.methodIndex, removedMethod) << path.string();
+            }
+        }
+        if (removedField != dex::core::DexFile::kNoIndex) {
+            const std::vector<dex::core::EncodedField>* fieldLists[2] = {
+                &secondData.unwrap()->staticFields,
+                &secondData.unwrap()->instanceFields,
+            };
+            for (const std::vector<dex::core::EncodedField>* list : fieldLists) {
+                for (const dex::core::EncodedField& field : *list) {
+                    EXPECT_NE(field.fieldIndex, removedField) << path.string();
+                }
+            }
+        }
+
+        dex::core::BuildOptions plain;
+        plain.keepUnknownSections = false;
+        auto builtAgain = dex::core::buildDex(*second, plain);
+        ASSERT_TRUE(builtAgain.is_ok())
+            << path.string() << ": " << dex::core::to_string(builtAgain.unwrap_err());
+        EXPECT_EQ(builtAgain.unwrap(), rebuilt) << path.string();
+    }
+}
+
 TEST(DexRealCorpus, RebuildsAfterAddingMembers)
 {
     const std::vector<std::filesystem::path> files = corpusFiles();

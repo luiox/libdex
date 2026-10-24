@@ -15,6 +15,7 @@ DEX（Android 字节码）读写库。保真 DOM 加逐条目 codec，返回值�
 - 追加或复用 type/proto/field/method 条目（`addType`/`addProto`/`addField`/`addMethod`）。
 - 往已有类注入字段/方法（`BuildOptions::fieldAdditions`/`methodAdditions`）：成员写进 class_data，新增方法体参与 code 布局。静态字段目前只能加到没有 static_values 的类。
 - 新增类：向 `classDefs` 追加条目，再用成员注入填 class_data；接口列表可复用已有 type_list，注解与静态初值暂不新建。
+- 删除成员或类：`removedFields`/`removedMethods` 把成员移出 class_data，类则直接从 `classDefs` erase；ID 表条目保留，被引用的条目变成外部引用。
 - 重命名类型、字段或方法：重建时按 DEX 排序键重排五张 ID 表与 class_defs，重新编码 type_list，并同步重写 class_data、指令、catch、debug_info、注解与 encoded_value 中的全部索引。
 - 指令与 encoded_value 精确编码：保留原始宽度与指令形态，不合并 `const` 变体。
 - 给 adapter 提供 const 取值域、索引上限、分支目标与地址重算原语。
