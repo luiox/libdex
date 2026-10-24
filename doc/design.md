@@ -54,6 +54,8 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 新增类不需要额外 API：向 `classDefs` 追加 ClassDef，再用成员注入填 class_data。类上的注解、静态初值与新的接口 type_list 没有创建入口，只能复用已有条目。
 
+删除类直接 erase `classDefs`；删除成员走 `removedFields`/`removedMethods`，只从 class_data 移除，ID 表条目不回收。静态字段位于有 static_values 的类时不能删除（数组槽位无法回收），删除后仍被指令引用的条目按 DEX 的外部引用处理，调用方负责一致性。
+
 ## 错误
 
 错误走 `Result`，不抛异常。结构性问题返回 Err；语义问题（校验和不符、悬垂索引、map 计数不符）记诊断并将 `ParseState` 置 `Recovered`，模型仍可读。

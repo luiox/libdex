@@ -775,6 +775,22 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
     }
 
+    // ---- 删除成员：只从 class_data 移除，ID 表条目保留 ----
+    std::unordered_set<ca::u32> removedFields(options.removedFields.begin(),
+                                              options.removedFields.end());
+    std::unordered_set<ca::u32> removedMethods(options.removedMethods.begin(),
+                                               options.removedMethods.end());
+    for (ca::u32 fieldIdx : removedFields) {
+        if (fieldIdx >= dex.fieldCount()) {
+            return Err(WriteError::InvalidModel);
+        }
+    }
+    for (ca::u32 methodIdx : removedMethods) {
+        if (methodIdx >= dex.methodCount() || replacements.count(methodIdx) != 0) {
+            return Err(WriteError::InvalidModel);
+        }
+    }
+
     // ---- class_data 与方法体目录（按旧偏移去重，保序）----
     std::map<ca::u32, const ClassData*> classDataByOff;
     for (ca::u32 i = 0; i < dex.classCount(); ++i) {
@@ -789,25 +805,43 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         classDataByOff.emplace(off, data.unwrap());
     }
 
+    std::unordered_set<ca::u32> staticValuesOffs;
+    for (const ClassDef& def : dex.classDefs) {
+        if (def.classDataOff != 0 && def.staticValuesOff != 0) {
+            staticValuesOffs.insert(def.classDataOff);
+        }
+    }
+
     std::vector<MethodSite> sites;
     std::unordered_set<ca::u32> methodsWithCode;
     std::unordered_set<ca::u32> definedFields;
     std::unordered_set<ca::u32> definedMethods;
+    std::unordered_set<ca::u32> staticFieldsWithValues;
     for (const auto& entry : classDataByOff) {
         const ClassData& data = *entry.second;
+        const bool hasStaticValues = staticValuesOffs.count(entry.first) != 0;
         const std::vector<EncodedField>* fieldLists[2] = {&data.staticFields,
                                                           &data.instanceFields};
-        for (const std::vector<EncodedField>* fields : fieldLists) {
-            for (const EncodedField& field : *fields) {
+        for (ca::u32 listIdx = 0; listIdx < 2; ++listIdx) {
+            for (const EncodedField& field : *fieldLists[listIdx]) {
+                if (removedFields.count(field.fieldIndex) != 0) {
+                    continue;
+                }
                 if (field.fieldIndex >= dex.fieldCount()) {
                     return Err(WriteError::InvalidModel);
                 }
                 definedFields.insert(field.fieldIndex);
+                if (listIdx == 0 && hasStaticValues) {
+                    staticFieldsWithValues.insert(field.fieldIndex);
+                }
             }
         }
         const std::vector<EncodedMethod>* lists[2] = {&data.directMethods, &data.virtualMethods};
         for (const std::vector<EncodedMethod>* list : lists) {
             for (const EncodedMethod& method : *list) {
+                if (removedMethods.count(method.methodIndex) != 0) {
+                    continue;
+                }
                 if (method.methodIndex >= dex.methodCount()) {
                     return Err(WriteError::InvalidModel);
                 }
@@ -820,6 +854,11 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                 }
                 sites.push_back(MethodSite{method.methodIndex, method.codeOff});
             }
+        }
+    }
+    for (ca::u32 fieldIdx : removedFields) {
+        if (staticFieldsWithValues.count(fieldIdx) != 0) {
+            return Err(WriteError::InvalidModel);  // static_values 槽位无法回收
         }
     }
     // code_item 布局按新方法索引排序，保证重排后二次重建仍是固定点。
@@ -843,8 +882,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             return Err(WriteError::InvalidModel);
         }
         if (definedFields.count(add.fieldIdx) != 0 ||
+            removedFields.count(add.fieldIdx) != 0 ||
             !addedFields.insert(add.fieldIdx).second) {
-            return Err(WriteError::InvalidModel);  // 重复定义
+            return Err(WriteError::InvalidModel);  // 重复定义或与删除冲突
         }
         // 静态字段必须与 static_values 数组等长；扩展数组留给后续切片。
         if (add.isStatic && dex.classDefs[add.classDefIdx].staticValuesOff != 0) {
@@ -858,8 +898,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
         if (definedMethods.count(add.methodIdx) != 0 ||
             !addedMethods.insert(add.methodIdx).second ||
-            replacements.count(add.methodIdx) != 0) {
-            return Err(WriteError::InvalidModel);  // 重复定义或与替换冲突
+            replacements.count(add.methodIdx) != 0 ||
+            removedMethods.count(add.methodIdx) != 0) {
+            return Err(WriteError::InvalidModel);  // 重复定义或与替换/删除冲突
         }
         if (add.insns.size() != static_cast<ca::usize>(add.item.insnsSize) * 2u) {
             return Err(WriteError::Unencodable);
@@ -1489,6 +1530,21 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     // ---- class_data：code_off 换成新偏移，field/method 索引换成新下标 ----
     const auto encodeClassData = [&](ClassData copy)
         -> Result<std::vector<ca::u8>, WriteError> {
+        const auto fieldRemoved = [&removedFields](const EncodedField& field) {
+            return removedFields.count(field.fieldIndex) != 0;
+        };
+        for (std::vector<EncodedField>* list : {&copy.staticFields, &copy.instanceFields}) {
+            list->erase(std::remove_if(list->begin(), list->end(), fieldRemoved),
+                        list->end());
+        }
+        const auto methodRemoved = [&removedMethods](const EncodedMethod& method) {
+            return removedMethods.count(method.methodIndex) != 0;
+        };
+        for (std::vector<EncodedMethod>* list : {&copy.directMethods, &copy.virtualMethods}) {
+            list->erase(std::remove_if(list->begin(), list->end(), methodRemoved),
+                        list->end());
+        }
+
         std::vector<EncodedField>* fieldLists[2] = {&copy.staticFields,
                                                     &copy.instanceFields};
         for (std::vector<EncodedField>* list : fieldLists) {

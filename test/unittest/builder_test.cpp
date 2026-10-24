@@ -1083,6 +1083,91 @@ TEST(DexBuilder, RejectsInvalidMemberAdditions)
     }
 }
 
+TEST(DexBuilder, RemovesMembersButKeepsIdTables)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.removedFields = {0};
+    options.removedMethods = {0};
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    EXPECT_EQ(second->fieldCount(), 1u);
+    EXPECT_EQ(second->methodCount(), 1u);
+    ASSERT_EQ(second->classCount(), 1u);
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    EXPECT_TRUE(data.unwrap()->staticFields.empty());
+    EXPECT_TRUE(data.unwrap()->instanceFields.empty());
+    EXPECT_TRUE(data.unwrap()->directMethods.empty());
+    EXPECT_TRUE(data.unwrap()->virtualMethods.empty());
+    EXPECT_EQ(second->findMapItem(MapType::CodeItem), nullptr);
+    EXPECT_EQ(second->findMapItem(MapType::DebugInfoItem), nullptr);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RemovesClassDef)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    file->classDefs.clear();
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    EXPECT_EQ(second->classCount(), 0u);
+    EXPECT_EQ(second->methodCount(), 1u);  // ID 表条目保留
+    EXPECT_EQ(second->findMapItem(MapType::ClassDataItem), nullptr);
+    EXPECT_EQ(second->findMapItem(MapType::CodeItem), nullptr);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RejectsRemovingReplacedMethod)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.removedMethods = {0};
+    CodeReplacement replacement;
+    replacement.methodIdx = 0;
+    replacement.item.insnsSize = 1;
+    replacement.insns = {0x0e, 0x00};
+    options.codeReplacements.push_back(replacement);
+
+    const auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_err());
+    EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
+}
+
 TEST(DexBuilder, RejectsRemapWithOpaqueRawSections)
 {
     std::unique_ptr<DexFile> shifted = readFixture(dex_test::makeHelloDex());
