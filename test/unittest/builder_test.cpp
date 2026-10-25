@@ -1513,3 +1513,149 @@ TEST(DexBuilder, RejectsDanglingIdTables)
         file.typeIds.resize(0x10001);
     });
 }
+
+TEST(DexBuilder, AddsTypeListPoolEntries)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto empty = file->addTypeList({});
+    ASSERT_TRUE(empty.is_ok());
+    EXPECT_EQ(empty.unwrap(), DexFile::kNoIndex);
+
+    const auto bad = file->addTypeList({file->typeCount()});
+    ASSERT_TRUE(bad.is_err());
+    EXPECT_EQ(bad.unwrap_err(), ReadError::BadIndex);
+
+    const auto first = file->addTypeList({0, 1});
+    ASSERT_TRUE(first.is_ok());
+    const auto again = file->addTypeList({0, 1});
+    ASSERT_TRUE(again.is_ok());
+    EXPECT_EQ(again.unwrap(), first.unwrap());
+    const auto other = file->addTypeList({1, 0});
+    ASSERT_TRUE(other.is_ok());
+    EXPECT_NE(other.unwrap(), first.unwrap());
+
+    const TypeListSpan span = file->ownedTypeListSpan(first.unwrap());
+    ASSERT_NE(span.entries, nullptr);
+    ASSERT_EQ(span.size, 2u);
+    EXPECT_EQ(span.at(0), 0u);
+    EXPECT_EQ(span.at(1), 1u);
+}
+
+TEST(DexBuilder, AddsProtoWithOwnedParameterList)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    const ca::u32 voidType = 3;   // fixture：V
+    const ca::u32 intType = 0;    // fixture：I
+
+    // 复用：()V 已存在（proto 1）。
+    const auto reused = file->addProtoWithParams(voidType, {});
+    ASSERT_TRUE(reused.is_ok());
+    EXPECT_EQ(reused.unwrap(), 1u);
+    EXPECT_EQ(file->protoCount(), 2u);
+
+    // 新建：(I)V，shorty 应为 "VI"。
+    const auto withParam = file->addProtoWithParams(voidType, {intType});
+    ASSERT_TRUE(withParam.is_ok());
+    EXPECT_EQ(file->protoCount(), 3u);
+    const ProtoId& proto = file->protoIds[withParam.unwrap()];
+    EXPECT_TRUE(proto.ownedParameters);
+    const auto shorty = file->string(proto.shortyIdx);
+    ASSERT_TRUE(shorty.is_ok());
+    EXPECT_EQ(shorty.unwrap().as_std_view(), "VI");
+    const auto params = file->protoParameters(withParam.unwrap());
+    ASSERT_TRUE(params.is_ok());
+    ASSERT_EQ(params.unwrap().size, 1u);
+    EXPECT_EQ(params.unwrap().at(0), intType);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    ASSERT_EQ(second->protoCount(), 3u);
+
+    // 找到单参数 proto：参数应为 I，shorty 为 "VI"。
+    bool found = false;
+    for (ca::u32 i = 0; i < second->protoCount(); ++i) {
+        const auto list = second->protoParameters(i);
+        ASSERT_TRUE(list.is_ok());
+        if (list.unwrap().size != 1u) {
+            continue;
+        }
+        const auto paramDescriptor = second->typeDescriptor(list.unwrap().at(0));
+        ASSERT_TRUE(paramDescriptor.is_ok());
+        const auto protoShorty = second->string(second->protoIds[i].shortyIdx);
+        ASSERT_TRUE(protoShorty.is_ok());
+        EXPECT_EQ(protoShorty.unwrap().as_std_view(), "VI");
+        const auto returnDescriptor = second->typeDescriptor(second->protoIds[i].returnTypeIdx);
+        ASSERT_TRUE(returnDescriptor.is_ok());
+        EXPECT_EQ(returnDescriptor.unwrap().as_std_view(), "V");
+        ASSERT_EQ(paramDescriptor.unwrap().as_std_view(), "I");
+        found = true;
+    }
+    EXPECT_TRUE(found);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RejectsVoidParameterInNewProto)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    const auto bad = file->addProtoWithParams(3 /* V */, {3 /* V */});
+    ASSERT_TRUE(bad.is_err());
+    EXPECT_EQ(bad.unwrap_err(), ReadError::BadIndex);
+    EXPECT_EQ(file->protoCount(), 2u);
+}
+
+TEST(DexBuilder, SetsClassInterfacesWithOwnedList)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    ASSERT_EQ(file->classDefs[0].interfacesOff, 0u);
+
+    const auto runnable = file->addType("Ljava/lang/Runnable;");
+    ASSERT_TRUE(runnable.is_ok());
+    // 接口列表含已有类型与新增类型。
+    const auto set = file->setClassInterfaces(0, {1 /* LHello; */, runnable.unwrap()});
+    ASSERT_TRUE(set.is_ok());
+    const auto list = file->interfaces(0);
+    ASSERT_TRUE(list.is_ok());
+    ASSERT_EQ(list.unwrap().size, 2u);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    const auto interfaces = second->interfaces(0);
+    ASSERT_TRUE(interfaces.is_ok());
+    ASSERT_EQ(interfaces.unwrap().size, 2u);
+    const auto firstInterface = second->typeDescriptor(interfaces.unwrap().at(0));
+    ASSERT_TRUE(firstInterface.is_ok());
+    EXPECT_EQ(firstInterface.unwrap().as_std_view(), "LHello;");
+    const auto secondInterface = second->typeDescriptor(interfaces.unwrap().at(1));
+    ASSERT_TRUE(secondInterface.is_ok());
+    EXPECT_EQ(secondInterface.unwrap().as_std_view(), "Ljava/lang/Runnable;");
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}

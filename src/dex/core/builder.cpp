@@ -659,11 +659,20 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     std::vector<TypeListSpan> protoTypeLists(dex.protoCount());
     std::vector<std::vector<ca::u32>> protoParams(dex.protoCount());
     for (ca::u32 i = 0; i < dex.protoCount(); ++i) {
-        Result<TypeListSpan, ReadError> list = dex.typeList(dex.protoIds[i].parametersOff);
-        if (list.is_err()) {
-            return Err(WriteError::SourceUnreadable);
+        const ProtoId& proto = dex.protoIds[i];
+        if (proto.ownedParameters) {
+            const TypeListSpan owned = dex.ownedTypeListSpan(proto.ownedParametersIdx);
+            if (owned.entries == nullptr) {
+                return Err(WriteError::InvalidModel);  // 池下标悬垂
+            }
+            protoTypeLists[i] = owned;
+        } else {
+            Result<TypeListSpan, ReadError> list = dex.typeList(proto.parametersOff);
+            if (list.is_err()) {
+                return Err(WriteError::SourceUnreadable);
+            }
+            protoTypeLists[i] = std::move(list).unwrap();
         }
-        protoTypeLists[i] = std::move(list).unwrap();
         const TypeListSpan& span = protoTypeLists[i];
         protoParams[i].reserve(span.size);
         for (ca::u32 j = 0; j < span.size; ++j) {
@@ -1344,6 +1353,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     }
 
     // ---- type_list：按新的 type 索引重新编码 ----
+    // 自有列表用合成键（0x40000000 起）挂在同一张表里；源偏移不可能触达该区间。
+    constexpr ca::u32 kOwnedTypeListKeyBase = 0x40000000u;
     ItemTable typeLists;
     const auto addTypeList = [&](ca::u32 oldOff) -> Result<void, WriteError> {
         if (oldOff == 0 || typeLists.contains(oldOff)) {
@@ -1366,17 +1377,49 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         typeLists.add(oldOff, std::move(bytes));
         return Ok();
     };
+    const auto addOwnedTypeList = [&](ca::u32 ownedIdx) -> Result<void, WriteError> {
+        if (ownedIdx == DexFile::kNoIndex) {
+            return Ok();
+        }
+        const TypeListSpan span = dex.ownedTypeListSpan(ownedIdx);
+        if (span.entries == nullptr) {
+            return Err(WriteError::InvalidModel);  // 池下标悬垂
+        }
+        std::vector<ca::u8> bytes;
+        appendU32(bytes, span.size);
+        for (ca::u32 i = 0; i < span.size; ++i) {
+            const ca::u32 typeIdx = span.at(i);
+            if (typeIdx >= dex.typeCount()) {
+                return Err(WriteError::InvalidModel);
+            }
+            appendU16(bytes, static_cast<ca::u16>(typeOrder.remap[typeIdx]));
+        }
+        typeLists.add(kOwnedTypeListKeyBase + ownedIdx, std::move(bytes));
+        return Ok();
+    };
+    const auto protoListKey = [&](const ProtoId& proto) {
+        return proto.ownedParameters ? kOwnedTypeListKeyBase + proto.ownedParametersIdx
+                                     : proto.parametersOff;
+    };
+    const auto interfaceListKey = [&](const ClassDef& def) {
+        return def.ownedInterfaces ? kOwnedTypeListKeyBase + def.ownedInterfacesIdx
+                                   : def.interfacesOff;
+    };
     // 按新的 proto/class 顺序收集，保证二次重建的 type_list 落位一致。
     for (ca::u32 i = 0; i < protoOrder.oldIndexByNew.size(); ++i) {
+        const ProtoId& proto = dex.protoIds[protoOrder.oldIndexByNew[i]];
         const Result<void, WriteError> added =
-            addTypeList(dex.protoIds[protoOrder.oldIndexByNew[i]].parametersOff);
+            proto.ownedParameters ? addOwnedTypeList(proto.ownedParametersIdx)
+                                  : addTypeList(proto.parametersOff);
         if (added.is_err()) {
             return Err(added.unwrap_err());
         }
     }
     for (ca::u32 i = 0; i < classOrder.oldIndexByNew.size(); ++i) {
+        const ClassDef& def = dex.classDefs[classOrder.oldIndexByNew[i]];
         const Result<void, WriteError> added =
-            addTypeList(dex.classDefs[classOrder.oldIndexByNew[i]].interfacesOff);
+            def.ownedInterfaces ? addOwnedTypeList(def.ownedInterfacesIdx)
+                                : addTypeList(def.interfacesOff);
         if (added.is_err()) {
             return Err(added.unwrap_err());
         }
@@ -1851,7 +1894,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     for (ca::u32 i = 0; i < protoOrder.oldIndexByNew.size(); ++i) {
         const ProtoId& proto = dex.protoIds[protoOrder.oldIndexByNew[i]];
         ca::u32 parameters = 0;
-        if (!remap(typeLists, proto.parametersOff, &parameters)) {
+        if (!remap(typeLists, protoListKey(proto), &parameters)) {
             return Err(WriteError::InvalidModel);
         }
         putU32(out, protoIdsOff + i * 12u + 8u, parameters);
@@ -1882,7 +1925,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         } else if (!remap(arrays, def.staticValuesOff, &staticValues)) {
             return Err(WriteError::InvalidModel);
         }
-        if (!remap(typeLists, def.interfacesOff, &interfaces) ||
+        if (!remap(typeLists, interfaceListKey(def), &interfaces) ||
             (!options.stripAnnotations &&
              !remap(annotationDirectories, def.annotationsOff, &annotations))) {
             return Err(WriteError::InvalidModel);
