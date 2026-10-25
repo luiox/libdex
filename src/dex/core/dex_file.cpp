@@ -567,6 +567,263 @@ Result<void, ReadError> DexFile::setClassInterfaces(ca::u32 classDefIdx,
     return Ok();
 }
 
+namespace {
+
+bool sameAnnotationValue(const EncodedValue& a, const EncodedValue& b)
+{
+    if (a.type != b.type || a.valueArg != b.valueArg) {
+        return false;
+    }
+    switch (a.type) {
+        case EncodedValueType::Array:
+            if (a.array.size() != b.array.size()) {
+                return false;
+            }
+            for (ca::usize i = 0; i < a.array.size(); ++i) {
+                if (!sameAnnotationValue(a.array[i], b.array[i])) {
+                    return false;
+                }
+            }
+            return true;
+        case EncodedValueType::Annotation:
+            if (a.annotation == nullptr || b.annotation == nullptr) {
+                return a.annotation == b.annotation;
+            }
+            if (a.annotation->typeIdx != b.annotation->typeIdx ||
+                a.annotation->elements.size() != b.annotation->elements.size()) {
+                return false;
+            }
+            for (ca::usize i = 0; i < a.annotation->elements.size(); ++i) {
+                const AnnotationElement& ea = a.annotation->elements[i];
+                const AnnotationElement& eb = b.annotation->elements[i];
+                if (ea.nameIdx != eb.nameIdx || !sameAnnotationValue(ea.value, eb.value)) {
+                    return false;
+                }
+            }
+            return true;
+        case EncodedValueType::Boolean:
+            return a.boolean == b.boolean;
+        case EncodedValueType::String:
+        case EncodedValueType::MethodType:
+        case EncodedValueType::MethodHandle:
+        case EncodedValueType::Type:
+        case EncodedValueType::Field:
+        case EncodedValueType::Method:
+        case EncodedValueType::Enum:
+            return a.index == b.index;
+        case EncodedValueType::Char:
+        case EncodedValueType::Float:
+        case EncodedValueType::Double:
+            return a.bits == b.bits;
+        default:
+            return a.integer == b.integer;
+    }
+}
+
+bool sameAnnotation(const AnnotationItem& a, const AnnotationItem& b)
+{
+    if (a.visibility != b.visibility ||
+        a.annotation.typeIdx != b.annotation.typeIdx ||
+        a.annotation.elements.size() != b.annotation.elements.size()) {
+        return false;
+    }
+    for (ca::usize i = 0; i < a.annotation.elements.size(); ++i) {
+        const AnnotationElement& ea = a.annotation.elements[i];
+        const AnnotationElement& eb = b.annotation.elements[i];
+        if (ea.nameIdx != eb.nameIdx || !sameAnnotationValue(ea.value, eb.value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+ca::u8 minimalIndexWidth(ca::u32 value) noexcept
+{
+    if (value <= 0xFFu) {
+        return 1;
+    }
+    if (value <= 0xFFFFu) {
+        return 2;
+    }
+    if (value <= 0xFFFFFFu) {
+        return 3;
+    }
+    return 4;
+}
+
+/// 索引型 encoded_value 引用的表容量。
+ca::u64 indexLimitOf(EncodedValueType type, const DexFile& dex) noexcept
+{
+    switch (type) {
+        case EncodedValueType::String: return dex.stringIds.size();
+        case EncodedValueType::Type: return dex.typeIds.size();
+        case EncodedValueType::Field:
+        case EncodedValueType::Enum: return dex.fieldIds.size();
+        case EncodedValueType::Method: return dex.methodIds.size();
+        case EncodedValueType::MethodType: return dex.protoIds.size();
+        case EncodedValueType::MethodHandle: return dex.methodHandles.size();
+        default: return 0;
+    }
+}
+
+/// 校验注解引用的表索引并把索引型载荷的宽度改到最小可用。
+Result<void, ReadError> normalizeAnnotationValue(EncodedValue& value, const DexFile& dex)
+{
+    switch (value.type) {
+        case EncodedValueType::String:
+        case EncodedValueType::Type:
+        case EncodedValueType::Field:
+        case EncodedValueType::Method:
+        case EncodedValueType::Enum:
+        case EncodedValueType::MethodType:
+        case EncodedValueType::MethodHandle: {
+            if (value.index >= indexLimitOf(value.type, dex)) {
+                return Err(ReadError::BadIndex);
+            }
+            const ca::u8 width = minimalIndexWidth(value.index);
+            if (static_cast<ca::u32>(value.valueArg) + 1u < width) {
+                value.valueArg = static_cast<ca::u8>(width - 1u);
+            }
+            return Ok();
+        }
+        case EncodedValueType::Array: {
+            for (EncodedValue& element : value.array) {
+                const Result<void, ReadError> normalized = normalizeAnnotationValue(element, dex);
+                if (normalized.is_err()) {
+                    return normalized;
+                }
+            }
+            return Ok();
+        }
+        case EncodedValueType::Annotation: {
+            if (value.annotation == nullptr) {
+                return Ok();
+            }
+            if (value.annotation->typeIdx >= dex.typeIds.size()) {
+                return Err(ReadError::BadIndex);
+            }
+            for (AnnotationElement& element : value.annotation->elements) {
+                if (element.nameIdx >= dex.stringIds.size()) {
+                    return Err(ReadError::BadIndex);
+                }
+                const Result<void, ReadError> normalized =
+                    normalizeAnnotationValue(element.value, dex);
+                if (normalized.is_err()) {
+                    return normalized;
+                }
+            }
+            return Ok();
+        }
+        default:
+            return Ok();
+    }
+}
+
+}   // namespace
+
+Result<ca::u32, ReadError> DexFile::addAnnotationItem(const AnnotationItem& item)
+{
+    if (item.annotation.typeIdx >= typeIds.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    AnnotationItem normalized = item;
+    for (AnnotationElement& element : normalized.annotation.elements) {
+        if (element.nameIdx >= stringIds.size()) {
+            return Err(ReadError::BadIndex);
+        }
+        const Result<void, ReadError> value = normalizeAnnotationValue(element.value, *this);
+        if (value.is_err()) {
+            return Err(value.unwrap_err());
+        }
+    }
+    for (ca::u32 i = 0; i < ownedAnnotationItems_.size(); ++i) {
+        if (sameAnnotation(ownedAnnotationItems_[i], normalized)) {
+            return Ok(i);
+        }
+    }
+    ownedAnnotationItems_.push_back(std::move(normalized));
+    return Ok(static_cast<ca::u32>(ownedAnnotationItems_.size() - 1));
+}
+
+const AnnotationItem* DexFile::ownedAnnotationItem(ca::u32 index) const noexcept
+{
+    if (index >= ownedAnnotationItems_.size()) {
+        return nullptr;
+    }
+    return &ownedAnnotationItems_[index];
+}
+
+Result<void, ReadError> DexFile::setClassAnnotations(ca::u32 classDefIdx,
+                                                     const std::vector<ca::u32>& items)
+{
+    if (classDefIdx >= classDefs.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    for (ca::u32 item : items) {
+        if (item >= ownedAnnotationItems_.size()) {
+            return Err(ReadError::BadIndex);
+        }
+    }
+    AnnotationAttachments& attachments = ownedAnnotations_[classDefIdx];
+    attachments.hasClass = true;
+    attachments.classItems = items;
+    return Ok();
+}
+
+namespace {
+
+/// 注解目标成员与池下标的共同校验。
+bool validAnnotationHandles(const std::vector<ca::u32>& items, const DexFile& dex)
+{
+    for (ca::u32 item : items) {
+        if (dex.ownedAnnotationItem(item) == nullptr) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}   // namespace
+
+Result<void, ReadError> DexFile::setFieldAnnotations(ca::u32 classDefIdx, ca::u32 fieldIdx,
+                                                     const std::vector<ca::u32>& items)
+{
+    if (classDefIdx >= classDefs.size() || fieldIdx >= fieldIds.size() ||
+        !validAnnotationHandles(items, *this)) {
+        return Err(ReadError::BadIndex);
+    }
+    ownedAnnotations_[classDefIdx].fields[fieldIdx] = items;
+    return Ok();
+}
+
+Result<void, ReadError> DexFile::setMethodAnnotations(ca::u32 classDefIdx,
+                                                      ca::u32 methodIdx,
+                                                      const std::vector<ca::u32>& items)
+{
+    if (classDefIdx >= classDefs.size() || methodIdx >= methodIds.size() ||
+        !validAnnotationHandles(items, *this)) {
+        return Err(ReadError::BadIndex);
+    }
+    ownedAnnotations_[classDefIdx].methods[methodIdx] = items;
+    return Ok();
+}
+
+Result<void, ReadError> DexFile::setParameterAnnotations(
+    ca::u32 classDefIdx, ca::u32 methodIdx,
+    const std::vector<std::vector<ca::u32>>& perParameter)
+{
+    if (classDefIdx >= classDefs.size() || methodIdx >= methodIds.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    for (const std::vector<ca::u32>& items : perParameter) {
+        if (!validAnnotationHandles(items, *this)) {
+            return Err(ReadError::BadIndex);
+        }
+    }
+    ownedAnnotations_[classDefIdx].parameters[methodIdx] = perParameter;
+    return Ok();
+}
+
 void DexFile::refreshInternIndex()
 {
     internIndex_.clear();

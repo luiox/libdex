@@ -52,7 +52,7 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 成员注入走 `BuildOptions::fieldAdditions`/`methodAdditions`：成员追加到目标 classDef 的 class_data 副本（类没有 class_data 时新建），新增方法体与替换体一起进入统一 code 单元，按新方法索引排序后落位，保证二次重建固定。静态字段增删会按新的字段顺序重建 static_values：新增字段填类型默认值，删除字段去掉对应槽位。新增成员的注解与参数注解暂不支持。
 
-新增类不需要额外 API：向 `classDefs` 追加 ClassDef，再用成员注入填 class_data，接口列表用 `setClassInterfaces` 新建。类上的注解与静态初值没有创建入口：静态初值只能随静态字段增删按类型默认值重建，注解只能复用已有条目。
+新增类不需要额外 API：向 `classDefs` 追加 ClassDef，再用成员注入填 class_data，接口列表用 `setClassInterfaces` 新建。注解用覆盖 API 挂上：`addAnnotationItem` 把注解项（可见性 + encoded_annotation，含嵌套值）按内容去重入池并校验全部表索引、把索引型载荷宽度改到最小；`setClassAnnotations`/`setFieldAnnotations`/`setMethodAnnotations`/`setParameterAnnotations` 按成员覆盖，空集表示清空条目。重建把覆盖与源 annotations_directory 逐类合并成生效目录再发射：未覆盖成员沿用源 set/ref_list，被覆盖成员换自有条目，只有生效目录引用的 set 与 item 才落盘（孤儿不发射），二次重建保持固定点。覆盖目标必须在生效 class_data（含注入成员、扣除删除）中有定义，参数注解长度须等于 proto 参数个数；与 `stripAnnotations` 同时使用返回 `InvalidModel`。静态初值没有显式赋值入口。
 
 删除类直接 erase `classDefs`；删除成员走 `removedFields`/`removedMethods`，只从 class_data 移除，ID 表条目不回收。删除静态字段会同步重建 static_values。删除后仍被指令引用的条目按 DEX 的外部引用处理，调用方负责一致性。
 

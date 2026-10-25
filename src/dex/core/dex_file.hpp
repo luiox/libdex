@@ -24,6 +24,7 @@
 
 #include <array>
 #include <deque>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -329,6 +330,26 @@ struct TypeListSpan
     }
 };
 
+/// @brief 一个类的注解覆盖：哪些注解集由自有注解项池重建。
+///
+/// 只记录显式覆盖：字段/方法/参数的 map 中「存在键」即覆盖该成员（空向量
+/// 表示清空该成员的注解条目），未出现的成员沿用源 annotations_directory。
+/// std::map 按 memberIdx 排序，保证重建发射顺序确定。
+struct AnnotationAttachments
+{
+    bool hasClass = false;                        ///< 是否覆盖类注解集
+    std::vector<ca::u32> classItems;              ///< 类注解集：注解项池下标，空=清空
+    std::map<ca::u32, std::vector<ca::u32>> fields;    ///< fieldIdx → 池下标
+    std::map<ca::u32, std::vector<ca::u32>> methods;   ///< methodIdx → 池下标
+    /// methodIdx → 每参数一组的池下标；内层空向量表示该参数无注解。
+    std::map<ca::u32, std::vector<std::vector<ca::u32>>> parameters;
+
+    bool empty() const noexcept
+    {
+        return !hasClass && fields.empty() && methods.empty() && parameters.empty();
+    }
+};
+
 /// @brief 单 DexFile DOM 的唯一所有者。
 ///
 /// 生命周期只有一条规则：本对象析构，其下一切（源字节副本、ID 表、懒解码
@@ -491,6 +512,58 @@ public:
     Result<void, ReadError> setClassInterfaces(ca::u32 classDefIdx,
                                                const std::vector<ca::u32>& interfaces);
 
+    // ---- 自有注解 ----
+    //
+    // 注解项先入池，再按类挂到目标成员；@ref buildDex 把覆盖与源
+    // annotations_directory 合并成生效目录后重新发射注解族。只覆盖显式
+    // 指定的成员，其余沿用源条目；覆盖目标必须在生效 class_data 中有定义
+    // （含注入成员），否则重建返回 `InvalidModel`。与 stripAnnotations 同时
+    // 使用同样返回 `InvalidModel`。
+
+    /// @brief 追加注解项（可见性 + encoded_annotation），返回池下标。
+    ///
+    /// 内容（含 valueArg 宽度）相同的项复用旧下标。typeIdx、元素名与值里的
+    /// String/Type/Field/Method/Enum/MethodType/MethodHandle 索引必须在当前
+    /// 表内，越界返回 @ref ReadError::BadIndex；索引型载荷的 valueArg 过窄
+    /// 时按最小宽度改宽。
+    Result<ca::u32, ReadError> addAnnotationItem(const AnnotationItem& item);
+
+    /// @brief 覆盖类注解集；空 @p items 清空类注解（annotations_off 目录仍会
+    /// 保留其余条目）。
+    Result<void, ReadError> setClassAnnotations(ca::u32 classDefIdx,
+                                                const std::vector<ca::u32>& items);
+
+    /// @brief 覆盖字段注解集；空 @p items 移除该字段的注解条目。
+    Result<void, ReadError> setFieldAnnotations(ca::u32 classDefIdx, ca::u32 fieldIdx,
+                                                const std::vector<ca::u32>& items);
+
+    /// @brief 覆盖方法注解集；空 @p items 移除该方法的注解条目。
+    Result<void, ReadError> setMethodAnnotations(ca::u32 classDefIdx, ca::u32 methodIdx,
+                                                 const std::vector<ca::u32>& items);
+
+    /// @brief 覆盖方法参数注解；第 i 项对应方法 proto 的第 i 个参数。
+    ///
+    /// 内层空向量表示该参数无注解（ref_list 槽位写 0）。重建时要求长度等于
+    /// proto 参数个数。
+    Result<void, ReadError> setParameterAnnotations(
+        ca::u32 classDefIdx, ca::u32 methodIdx,
+        const std::vector<std::vector<ca::u32>>& perParameter);
+
+    /// @brief 自有注解项池的只读访问；下标越界返回 nullptr。
+    const AnnotationItem* ownedAnnotationItem(ca::u32 index) const noexcept;
+
+    /// @brief 自有注解项池的条目数（越界判断用）。
+    ca::u32 ownedAnnotationItemCount() const noexcept
+    {
+        return static_cast<ca::u32>(ownedAnnotationItems_.size());
+    }
+
+    /// @brief 逐类注解覆盖表（classDefIdx → 附件），供 builder 与查询用。
+    const std::map<ca::u32, AnnotationAttachments>& annotationAttachments() const noexcept
+    {
+        return ownedAnnotations_;
+    }
+
     /// @brief 自有 type_list 的零拷贝视图；下标越界返回 size=0、entries=nullptr。
     ///
     /// 视图指向模型自有字节，在模型存活且不再 addTypeList 期间有效；
@@ -623,6 +696,9 @@ private:
     /// 自有 type_list 池：已编码的 type_list 字节（u32 计数 + u16 LE 条目），
     /// 由 addTypeList/addProtoWithParams/setClassInterfaces 填充。
     std::deque<std::vector<ca::u8>> ownedTypeLists_;
+    /// 自有注解项池（按内容去重）与逐类覆盖表。
+    std::deque<AnnotationItem> ownedAnnotationItems_;
+    std::map<ca::u32, AnnotationAttachments> ownedAnnotations_;
     ParseState state_ = ParseState::Validated;
     Diagnostics diag_;
 

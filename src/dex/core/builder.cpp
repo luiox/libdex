@@ -1264,7 +1264,94 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
     }
 
-    // ---- 注解族：目录 → 参数 ref 列表 → set → item ----
+    // ---- 注解族：源目录与自有覆盖合并成生效目录，再按生效目录发现 ----
+    // 自有条目用合成键挂进各 ItemTable；源偏移与合成键以 0x40000000 为界。
+    constexpr ca::u32 kOwnedTypeListKeyBase = 0x40000000u;
+    constexpr ca::u32 kOwnedItemKeyBase = 0x50000000u;
+    constexpr ca::u32 kOwnedSetKeyBase = 0x60000000u;
+    constexpr ca::u32 kOwnedRefListKeyBase = 0x70000000u;
+    constexpr ca::u32 kOwnedDirectoryKeyBase = 0x78000000u;
+
+    const std::map<ca::u32, AnnotationAttachments>& attachments = dex.annotationAttachments();
+    if (!attachments.empty() && options.stripAnnotations) {
+        return Err(WriteError::InvalidModel);  // 剥离与新建注解互相矛盾
+    }
+
+    // 覆盖目标必须在生效 class_data（含注入成员，扣除删除）中有定义。
+    const auto validateTargets = [&](const AnnotationAttachments& attach,
+                                     ca::u32 classDefIdx) -> Result<void, WriteError> {
+        const ClassData* effective = nullptr;
+        const auto edited = classDataEdits.find(classDefIdx);
+        if (edited != classDataEdits.end()) {
+            effective = &edited->second;
+        } else {
+            const ca::u32 off = dex.classDefs[classDefIdx].classDataOff;
+            if (off != 0) {
+                const auto found = classDataByOff.find(off);
+                if (found == classDataByOff.end()) {
+                    return Err(WriteError::InvalidModel);
+                }
+                effective = found->second;
+            }
+        }
+        const auto memberDefined = [effective, &removedFields, &removedMethods](
+                                        bool method, ca::u32 memberIdx) {
+            if (method ? removedMethods.count(memberIdx) != 0
+                       : removedFields.count(memberIdx) != 0) {
+                return false;  // 成员已被删除，不能作为注解目标
+            }
+            if (effective == nullptr) {
+                return false;
+            }
+            if (method) {
+                for (const EncodedMethod& m : effective->directMethods) {
+                    if (m.methodIndex == memberIdx) return true;
+                }
+                for (const EncodedMethod& m : effective->virtualMethods) {
+                    if (m.methodIndex == memberIdx) return true;
+                }
+                return false;
+            }
+            for (const EncodedField& f : effective->staticFields) {
+                if (f.fieldIndex == memberIdx) return true;
+            }
+            for (const EncodedField& f : effective->instanceFields) {
+                if (f.fieldIndex == memberIdx) return true;
+            }
+            return false;
+        };
+        for (const auto& entry : attach.fields) {
+            if (!memberDefined(false, entry.first)) {
+                return Err(WriteError::InvalidModel);
+            }
+        }
+        for (const auto& entry : attach.methods) {
+            if (!memberDefined(true, entry.first)) {
+                return Err(WriteError::InvalidModel);
+            }
+        }
+        for (const auto& entry : attach.parameters) {
+            if (!memberDefined(true, entry.first)) {
+                return Err(WriteError::InvalidModel);
+            }
+            const Result<TypeListSpan, ReadError> params =
+                dex.protoParameters(dex.methodIds[entry.first].protoIdx);
+            if (params.is_err() || params.unwrap().size != entry.second.size()) {
+                return Err(WriteError::InvalidModel);  // 参数个数不匹配
+            }
+        }
+        return Ok();
+    };
+    for (const auto& entry : attachments) {
+        if (entry.first >= dex.classCount()) {
+            return Err(WriteError::InvalidModel);
+        }
+        const Result<void, WriteError> targets = validateTargets(entry.second, entry.first);
+        if (targets.is_err()) {
+            return Err(targets.unwrap_err());
+        }
+    }
+
     std::set<ca::u32> directoryOffs;
     if (!options.stripAnnotations) {
         for (const ClassDef& def : dex.classDefs) {
@@ -1273,34 +1360,141 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             }
         }
     }
-
     std::map<ca::u32, const AnnotationsDirectory*> directories;
-    std::set<ca::u32> setOffs;
-    std::set<ca::u32> refListOffs;
     for (ca::u32 off : directoryOffs) {
         const Result<const AnnotationsDirectory*, WriteError> directory =
             requireDecoded(dex.annotationsDirectory(off));
         if (directory.is_err()) {
             return Err(directory.unwrap_err());
         }
-        const AnnotationsDirectory* dir = directory.unwrap();
-        directories.emplace(off, dir);
-        if (dir->classAnnotationsOff != 0) {
-            setOffs.insert(dir->classAnnotationsOff);
+        directories.emplace(off, directory.unwrap());
+    }
+
+    // 逐类合并源目录与覆盖；条目的 annotationsOff 字段承载键（源偏移或合成键）。
+    struct EffectiveDirectory
+    {
+        bool overridden = false;       // 有自有覆盖，目录按合成键发射
+        bool effectivelyEmpty = true;  // 覆盖后无任何内容（不发射目录）
+        AnnotationsDirectory content;
+    };
+    std::vector<EffectiveDirectory> effectiveDirs(dex.classCount());
+    std::map<ca::u32, const std::vector<ca::u32>*> ownedSetItems;        // set 键 → 池下标
+    std::map<ca::u32, std::vector<ca::u32>> ownedRefListSets;            // refList 键 → set 键
+    ca::u32 ownedSetKeySeq = 0;
+    ca::u32 ownedRefListKeySeq = 0;
+    for (ca::u32 i = 0; i < dex.classCount(); ++i) {
+        const ClassDef& def = dex.classDefs[i];
+        const AnnotationsDirectory* source = nullptr;
+        if (def.annotationsOff != 0) {
+            source = directories.find(def.annotationsOff)->second;
         }
-        for (const AnnotationsDirectoryEntry& entry : dir->fieldAnnotations) {
-            if (entry.annotationsOff != 0) {
-                setOffs.insert(entry.annotationsOff);
+        const AnnotationAttachments* attach = nullptr;
+        const auto found = attachments.find(i);
+        if (found != attachments.end()) {
+            attach = &found->second;
+        }
+        EffectiveDirectory& eff = effectiveDirs[i];
+        eff.overridden = attach != nullptr;
+
+        if (attach != nullptr && attach->hasClass) {
+            if (!attach->classItems.empty()) {
+                const ca::u32 key = kOwnedSetKeyBase + ownedSetKeySeq++;
+                eff.content.classAnnotationsOff = key;
+                ownedSetItems.emplace(key, &attach->classItems);
+            }
+        } else if (source != nullptr) {
+            eff.content.classAnnotationsOff = source->classAnnotationsOff;
+        }
+
+        const auto mergeEntries = [&](const std::vector<AnnotationsDirectoryEntry>& src,
+                                      const std::map<ca::u32, std::vector<ca::u32>>* overrides,
+                                      std::vector<AnnotationsDirectoryEntry>& out) {
+            if (src.empty() && overrides == nullptr) {
+                return;
+            }
+            for (const AnnotationsDirectoryEntry& entry : src) {
+                if (overrides != nullptr && overrides->count(entry.memberIdx) != 0) {
+                    continue;  // 该成员被覆盖，源条目不进入生效目录
+                }
+                out.push_back(entry);
+            }
+            if (overrides == nullptr) {
+                return;
+            }
+            for (const auto& entry : *overrides) {
+                if (entry.second.empty()) {
+                    continue;  // 显式清空：无条目
+                }
+                const ca::u32 key = kOwnedSetKeyBase + ownedSetKeySeq++;
+                out.push_back(AnnotationsDirectoryEntry{entry.first, key});
+                ownedSetItems.emplace(key, &entry.second);
+            }
+        };
+        const std::vector<AnnotationsDirectoryEntry> noEntries;
+        mergeEntries(source == nullptr ? noEntries : source->fieldAnnotations,
+                     attach == nullptr ? nullptr : &attach->fields,
+                     eff.content.fieldAnnotations);
+        mergeEntries(source == nullptr ? noEntries : source->methodAnnotations,
+                     attach == nullptr ? nullptr : &attach->methods,
+                     eff.content.methodAnnotations);
+
+        for (const AnnotationsDirectoryEntry& entry :
+             source == nullptr ? noEntries : source->parameterAnnotations) {
+            const bool overridden =
+                attach != nullptr && attach->parameters.count(entry.memberIdx) != 0;
+            if (!overridden) {
+                eff.content.parameterAnnotations.push_back(entry);
             }
         }
-        for (const AnnotationsDirectoryEntry& entry : dir->methodAnnotations) {
-            if (entry.annotationsOff != 0) {
-                setOffs.insert(entry.annotationsOff);
+        if (attach != nullptr) {
+            for (const auto& entry : attach->parameters) {
+                std::vector<ca::u32> setKeys;
+                setKeys.reserve(entry.second.size());
+                for (const std::vector<ca::u32>& items : entry.second) {
+                    if (items.empty()) {
+                        setKeys.push_back(0);
+                        continue;
+                    }
+                    const ca::u32 key = kOwnedSetKeyBase + ownedSetKeySeq++;
+                    setKeys.push_back(key);
+                    ownedSetItems.emplace(key, &items);
+                }
+                const ca::u32 refListKey = kOwnedRefListKeyBase + ownedRefListKeySeq++;
+                eff.content.parameterAnnotations.push_back(
+                    AnnotationsDirectoryEntry{entry.first, refListKey});
+                ownedRefListSets.emplace(refListKey, std::move(setKeys));
             }
         }
-        for (const AnnotationsDirectoryEntry& entry : dir->parameterAnnotations) {
-            if (entry.annotationsOff != 0) {
-                refListOffs.insert(entry.annotationsOff);
+
+        eff.effectivelyEmpty = eff.content.classAnnotationsOff == 0 &&
+                               eff.content.fieldAnnotations.empty() &&
+                               eff.content.methodAnnotations.empty() &&
+                               eff.content.parameterAnnotations.empty();
+    }
+
+    // 从生效目录发现源 set / ref_list；合成键不进发现集合。
+    std::set<ca::u32> setOffs;
+    std::set<ca::u32> refListOffs;
+    if (!options.stripAnnotations) {
+        for (const EffectiveDirectory& eff : effectiveDirs) {
+            if (eff.content.classAnnotationsOff != 0 &&
+                eff.content.classAnnotationsOff < kOwnedSetKeyBase) {
+                setOffs.insert(eff.content.classAnnotationsOff);
+            }
+            for (const AnnotationsDirectoryEntry& entry : eff.content.fieldAnnotations) {
+                if (entry.annotationsOff != 0 && entry.annotationsOff < kOwnedSetKeyBase) {
+                    setOffs.insert(entry.annotationsOff);
+                }
+            }
+            for (const AnnotationsDirectoryEntry& entry : eff.content.methodAnnotations) {
+                if (entry.annotationsOff != 0 && entry.annotationsOff < kOwnedSetKeyBase) {
+                    setOffs.insert(entry.annotationsOff);
+                }
+            }
+            for (const AnnotationsDirectoryEntry& entry : eff.content.parameterAnnotations) {
+                if (entry.annotationsOff != 0 && entry.annotationsOff < kOwnedRefListKeyBase) {
+                    refListOffs.insert(entry.annotationsOff);
+                }
             }
         }
     }
@@ -1336,6 +1530,11 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
     }
 
+    const auto encodeOwnedItem = [&](const AnnotationItem& item)
+        -> Result<std::vector<ca::u8>, WriteError> {
+        return indicesChanged ? encodeAnnotationItemRemapped(item, maps)
+                              : writeAnnotationItem(item);
+    };
     ItemTable annotationItems;
     for (ca::u32 off : annotationItemOffs) {
         const Result<const AnnotationItem*, WriteError> item =
@@ -1343,18 +1542,28 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         if (item.is_err()) {
             return Err(item.unwrap_err());
         }
-        Result<std::vector<ca::u8>, WriteError> encoded =
-            indicesChanged ? encodeAnnotationItemRemapped(*item.unwrap(), maps)
-                           : writeAnnotationItem(*item.unwrap());
+        Result<std::vector<ca::u8>, WriteError> encoded = encodeOwnedItem(*item.unwrap());
         if (encoded.is_err()) {
             return Err(encoded.unwrap_err());
         }
         annotationItems.add(off, std::move(encoded).unwrap());
     }
+    // 自有注解项按 set 键升序（即分配顺序）追加；池下标即键，重复引用自动去重。
+    for (const auto& entry : ownedSetItems) {
+        for (ca::u32 handle : *entry.second) {
+            const AnnotationItem* item = dex.ownedAnnotationItem(handle);
+            if (item == nullptr) {
+                return Err(WriteError::InvalidModel);  // 池下标悬垂
+            }
+            Result<std::vector<ca::u8>, WriteError> encoded = encodeOwnedItem(*item);
+            if (encoded.is_err()) {
+                return Err(encoded.unwrap_err());
+            }
+            annotationItems.add(kOwnedItemKeyBase + handle, std::move(encoded).unwrap());
+        }
+    }
 
     // ---- type_list：按新的 type 索引重新编码 ----
-    // 自有列表用合成键（0x40000000 起）挂在同一张表里；源偏移不可能触达该区间。
-    constexpr ca::u32 kOwnedTypeListKeyBase = 0x40000000u;
     ItemTable typeLists;
     const auto addTypeList = [&](ca::u32 oldOff) -> Result<void, WriteError> {
         if (oldOff == 0 || typeLists.contains(oldOff)) {
@@ -1590,6 +1799,19 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
         annotationSets.add(entry.first, std::move(bytes));
     }
+    // 自有 set 按分配顺序（键升序）追加，条目指向自有注解项的新偏移。
+    for (const auto& entry : ownedSetItems) {
+        std::vector<ca::u8> bytes;
+        appendU32(bytes, static_cast<ca::u32>(entry.second->size()));
+        for (ca::u32 handle : *entry.second) {
+            ca::u32 newOff = 0;
+            if (!remap(annotationItems, kOwnedItemKeyBase + handle, &newOff)) {
+                return Err(WriteError::InvalidModel);
+            }
+            appendU32(bytes, newOff);
+        }
+        annotationSets.add(entry.first, std::move(bytes));
+    }
     place(annotationSets, 4, MapType::AnnotationSetItem);
 
     ItemTable annotationRefLists;
@@ -1605,6 +1827,19 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
         annotationRefLists.add(entry.first, std::move(bytes));
     }
+    // 自有参数 ref_list：每参数一个 set 键（0 表示该参数无注解）。
+    for (const auto& entry : ownedRefListSets) {
+        std::vector<ca::u8> bytes;
+        appendU32(bytes, static_cast<ca::u32>(entry.second.size()));
+        for (ca::u32 setKey : entry.second) {
+            ca::u32 newOff = 0;
+            if (!remap(annotationSets, setKey, &newOff)) {
+                return Err(WriteError::InvalidModel);
+            }
+            appendU32(bytes, newOff);
+        }
+        annotationRefLists.add(entry.first, std::move(bytes));
+    }
     place(annotationRefLists, 4, MapType::AnnotationSetRefList);
 
     const std::vector<ca::u32>* fieldMembers =
@@ -1612,9 +1847,19 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     const std::vector<ca::u32>* methodMembers =
         methodOrder.identity ? nullptr : &methodOrder.remap;
 
+    // 目录按 class_def 顺序发射：未覆盖的类沿用源偏移作键（共享目录自动去重），
+    // 覆盖的类用合成键且内容为合并后的生效目录；内容全空则不发射。
     ItemTable annotationDirectories;
-    for (const auto& entry : directories) {
-        const AnnotationsDirectory& dir = *entry.second;
+    for (ca::u32 i = 0; i < effectiveDirs.size(); ++i) {
+        const EffectiveDirectory& eff = effectiveDirs[i];
+        const bool emit = eff.overridden ? !eff.effectivelyEmpty
+                                         : dex.classDefs[i].annotationsOff != 0;
+        if (!emit) {
+            continue;
+        }
+        const ca::u32 key = eff.overridden ? kOwnedDirectoryKeyBase + i
+                                           : dex.classDefs[i].annotationsOff;
+        const AnnotationsDirectory& dir = eff.content;
         Result<std::vector<AnnotationsDirectoryEntry>, WriteError> fieldEntries =
             remapDirectoryEntries(dir.fieldAnnotations, fieldMembers);
         Result<std::vector<AnnotationsDirectoryEntry>, WriteError> methodEntries =
@@ -1662,7 +1907,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             appendU32(bytes, e.memberIdx);
             appendU32(bytes, newOff);
         }
-        annotationDirectories.add(entry.first, std::move(bytes));
+        annotationDirectories.add(key, std::move(bytes));
     }
     place(annotationDirectories, 4, MapType::AnnotationsDirectoryItem);
 
@@ -1925,9 +2170,19 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         } else if (!remap(arrays, def.staticValuesOff, &staticValues)) {
             return Err(WriteError::InvalidModel);
         }
+        // 注解目录键：覆盖类指向合成目录，未覆盖类沿用源偏移；覆盖后内容
+        // 全空的类不发射目录，annotations_off 写 0。
+        ca::u32 directoryKey = 0;
+        if (!options.stripAnnotations) {
+            const EffectiveDirectory& eff = effectiveDirs[oldClassIdx];
+            if (eff.overridden) {
+                directoryKey = eff.effectivelyEmpty ? 0 : kOwnedDirectoryKeyBase + oldClassIdx;
+            } else {
+                directoryKey = def.annotationsOff;
+            }
+        }
         if (!remap(typeLists, interfaceListKey(def), &interfaces) ||
-            (!options.stripAnnotations &&
-             !remap(annotationDirectories, def.annotationsOff, &annotations))) {
+            !remap(annotationDirectories, directoryKey, &annotations)) {
             return Err(WriteError::InvalidModel);
         }
         const ca::u32 base = classDefsOff + i * 32u;
