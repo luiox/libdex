@@ -666,10 +666,68 @@ ca::u64 indexLimitOf(EncodedValueType type, const DexFile& dex) noexcept
     }
 }
 
-/// 校验注解引用的表索引并把索引型载荷的宽度改到最小可用。
-Result<void, ReadError> normalizeAnnotationValue(EncodedValue& value, const DexFile& dex)
+/// 有符号数值的最小编码字节数（1..8）。
+ca::u8 minimalSignedWidth(ca::i64 v) noexcept
+{
+    for (ca::u8 w = 1; w < 8; ++w) {
+        const ca::i64 bound = static_cast<ca::i64>(ca::u64{1} << (8u * w - 1u));
+        if (v >= -bound && v < bound) {
+            return w;
+        }
+    }
+    return 8;
+}
+
+/// 无符号数值的最小编码字节数（1..8）。
+ca::u8 minimalUnsignedWidth(ca::u64 v) noexcept
+{
+    ca::u8 w = 1;
+    while ((v >> (8u * w)) != 0) {
+        ++w;
+    }
+    return w;
+}
+
+/// 浮点/双精度的最小编码字节数：尾部低零字节可省（1..maxBytes）。
+ca::u8 minimalFloatWidth(ca::u64 bits, ca::u8 maxBytes) noexcept
+{
+    ca::u8 width = maxBytes;
+    while (width > 1u && (bits & 0xFFu) == 0) {
+        bits >>= 8u;
+        --width;
+    }
+    return width;
+}
+
+/// 校验新建 encoded_value 引用的表索引，并把载荷宽度归一到最小可用。
+/// 布尔按真值置位，Null/Array/Annotation 的 valueArg 清零，数值按最小
+/// 有/无符号宽度，浮点按尾部零字节；宽度归一后仍放不下（如 Byte 放大数）
+/// 由 writeEncodedValue 拒绝，不做静默截断。
+Result<void, ReadError> normalizeEncodedValue(EncodedValue& value, const DexFile& dex)
 {
     switch (value.type) {
+        case EncodedValueType::Boolean:
+            value.valueArg = value.boolean ? 1 : 0;
+            return Ok();
+        case EncodedValueType::Null:
+            value.valueArg = 0;
+            return Ok();
+        case EncodedValueType::Byte:
+        case EncodedValueType::Short:
+        case EncodedValueType::Int:
+        case EncodedValueType::Long:
+            value.valueArg = static_cast<ca::u8>(minimalSignedWidth(value.integer) - 1u);
+            return Ok();
+        case EncodedValueType::Char:
+            value.valueArg =
+                static_cast<ca::u8>(minimalUnsignedWidth(value.bits & 0xFFFFu) - 1u);
+            return Ok();
+        case EncodedValueType::Float:
+        case EncodedValueType::Double: {
+            const ca::u8 maxBytes = value.type == EncodedValueType::Float ? 4 : 8;
+            value.valueArg = static_cast<ca::u8>(minimalFloatWidth(value.bits, maxBytes) - 1u);
+            return Ok();
+        }
         case EncodedValueType::String:
         case EncodedValueType::Type:
         case EncodedValueType::Field:
@@ -680,15 +738,13 @@ Result<void, ReadError> normalizeAnnotationValue(EncodedValue& value, const DexF
             if (value.index >= indexLimitOf(value.type, dex)) {
                 return Err(ReadError::BadIndex);
             }
-            const ca::u8 width = minimalIndexWidth(value.index);
-            if (static_cast<ca::u32>(value.valueArg) + 1u < width) {
-                value.valueArg = static_cast<ca::u8>(width - 1u);
-            }
+            value.valueArg = static_cast<ca::u8>(minimalIndexWidth(value.index) - 1u);
             return Ok();
         }
         case EncodedValueType::Array: {
+            value.valueArg = 0;
             for (EncodedValue& element : value.array) {
-                const Result<void, ReadError> normalized = normalizeAnnotationValue(element, dex);
+                const Result<void, ReadError> normalized = normalizeEncodedValue(element, dex);
                 if (normalized.is_err()) {
                     return normalized;
                 }
@@ -696,6 +752,7 @@ Result<void, ReadError> normalizeAnnotationValue(EncodedValue& value, const DexF
             return Ok();
         }
         case EncodedValueType::Annotation: {
+            value.valueArg = 0;
             if (value.annotation == nullptr) {
                 return Ok();
             }
@@ -707,7 +764,7 @@ Result<void, ReadError> normalizeAnnotationValue(EncodedValue& value, const DexF
                     return Err(ReadError::BadIndex);
                 }
                 const Result<void, ReadError> normalized =
-                    normalizeAnnotationValue(element.value, dex);
+                    normalizeEncodedValue(element.value, dex);
                 if (normalized.is_err()) {
                     return normalized;
                 }
@@ -731,7 +788,7 @@ Result<ca::u32, ReadError> DexFile::addAnnotationItem(const AnnotationItem& item
         if (element.nameIdx >= stringIds.size()) {
             return Err(ReadError::BadIndex);
         }
-        const Result<void, ReadError> value = normalizeAnnotationValue(element.value, *this);
+        const Result<void, ReadError> value = normalizeEncodedValue(element.value, *this);
         if (value.is_err()) {
             return Err(value.unwrap_err());
         }
@@ -821,6 +878,62 @@ Result<void, ReadError> DexFile::setParameterAnnotations(
         }
     }
     ownedAnnotations_[classDefIdx].parameters[methodIdx] = perParameter;
+    return Ok();
+}
+
+Result<void, ReadError> DexFile::setStaticFieldValue(ca::u32 classDefIdx, ca::u32 fieldIdx,
+                                                     const EncodedValue& value)
+{
+    if (classDefIdx >= classDefs.size() || fieldIdx >= fieldIds.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    const Result<jstr::MUtf8StringRef, ReadError> descriptor = fieldTypeDescriptor(fieldIdx);
+    if (descriptor.is_err()) {
+        return Err(descriptor.unwrap_err());
+    }
+    const std::string_view text = descriptor.unwrap().as_std_view();
+    bool kindOk = false;
+    switch (text.empty() ? '\0' : text[0]) {
+        case 'Z': kindOk = value.type == EncodedValueType::Boolean; break;
+        case 'B': kindOk = value.type == EncodedValueType::Byte; break;
+        case 'S': kindOk = value.type == EncodedValueType::Short; break;
+        case 'C': kindOk = value.type == EncodedValueType::Char; break;
+        case 'I': kindOk = value.type == EncodedValueType::Int; break;
+        case 'J': kindOk = value.type == EncodedValueType::Long; break;
+        case 'F': kindOk = value.type == EncodedValueType::Float; break;
+        case 'D': kindOk = value.type == EncodedValueType::Double; break;
+        case 'L':
+        case '[':
+            switch (value.type) {
+                case EncodedValueType::Null:
+                case EncodedValueType::String:
+                case EncodedValueType::Type:
+                case EncodedValueType::Field:
+                case EncodedValueType::Method:
+                case EncodedValueType::Enum:
+                case EncodedValueType::MethodType:
+                case EncodedValueType::MethodHandle:
+                case EncodedValueType::Array:
+                case EncodedValueType::Annotation:
+                    kindOk = true;
+                    break;
+                default:
+                    break;
+            }
+            break;
+        default:
+            return Err(ReadError::BadIndex);  // 字段描述符不是合法类型
+    }
+    if (!kindOk) {
+        return Err(ReadError::BadIndex);  // 值类别与字段类型不匹配
+    }
+
+    EncodedValue normalized = value;
+    const Result<void, ReadError> done = normalizeEncodedValue(normalized, *this);
+    if (done.is_err()) {
+        return Err(done.unwrap_err());
+    }
+    staticValueEdits_[classDefIdx][fieldIdx] = std::move(normalized);
     return Ok();
 }
 

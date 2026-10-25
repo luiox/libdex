@@ -990,11 +990,10 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     };
 
     std::unordered_map<ca::u32, std::vector<ca::u8>> staticValueOverrides;
+    const std::map<ca::u32, std::map<ca::u32, EncodedValue>>& valueEdits =
+        dex.staticFieldValueEdits();
     for (ca::u32 classDefIdx = 0; classDefIdx < dex.classCount(); ++classDefIdx) {
         const ca::u32 valuesOff = dex.classDefs[classDefIdx].staticValuesOff;
-        if (valuesOff == 0) {
-            continue;
-        }
         const ca::u32 dataOff = dex.classDefs[classDefIdx].classDataOff;
         const ClassData* original = nullptr;
         if (dataOff != 0) {
@@ -1014,7 +1013,12 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                 }
             }
         }
-        bool changed = !addedStatic.empty();
+        const std::map<ca::u32, EncodedValue>* edits = nullptr;
+        const auto editBucket = valueEdits.find(classDefIdx);
+        if (editBucket != valueEdits.end()) {
+            edits = &editBucket->second;
+        }
+        bool changed = !addedStatic.empty() || edits != nullptr;
         if (!changed && original != nullptr) {
             for (const EncodedField& field : original->staticFields) {
                 if (removedFields.count(field.fieldIndex) != 0) {
@@ -1026,13 +1030,22 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         if (!changed) {
             continue;
         }
-
-        Result<const EncodedArrayItem*, WriteError> fetched =
-            requireDecoded(dex.encodedArray(valuesOff));
-        if (fetched.is_err()) {
-            return Err(fetched.unwrap_err());
+        // 只有编辑触发时才允许无源数组：等价于全部槽位按尾部默认值省略。
+        if (valuesOff == 0 && addedStatic.empty() && edits == nullptr) {
+            continue;
         }
-        const EncodedArrayItem& array = *fetched.unwrap();
+
+        EncodedArrayItem synthesizedEmpty;
+        const EncodedArrayItem* arrayPtr = &synthesizedEmpty;
+        if (valuesOff != 0) {
+            Result<const EncodedArrayItem*, WriteError> fetched =
+                requireDecoded(dex.encodedArray(valuesOff));
+            if (fetched.is_err()) {
+                return Err(fetched.unwrap_err());
+            }
+            arrayPtr = fetched.unwrap();
+        }
+        const EncodedArrayItem& array = *arrayPtr;
         const ca::usize originalCount = original == nullptr ? 0 : original->staticFields.size();
         // 规范允许省略尾部的默认值槽位；数组比静态字段还长才是模型不自洽。
         if (array.values.size() > originalCount) {
@@ -1063,9 +1076,32 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                       return fieldOrder.remap[a.fieldIdx] < fieldOrder.remap[b.fieldIdx];
                   });
 
+        // 编辑目标必须落在最终静态字段集合里（实例字段、删除字段、未定义字段都拒绝）。
+        if (edits != nullptr) {
+            for (const auto& entry : *edits) {
+                bool found = false;
+                for (const StaticSlot& slot : slots) {
+                    if (slot.fieldIdx == entry.first) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    return Err(WriteError::InvalidModel);
+                }
+            }
+        }
+
         EncodedArrayItem synthesized;
         synthesized.values.reserve(slots.size());
         for (const StaticSlot& slot : slots) {
+            if (edits != nullptr) {
+                const auto edited = edits->find(slot.fieldIdx);
+                if (edited != edits->end()) {
+                    synthesized.values.push_back(edited->second);
+                    continue;
+                }
+            }
             if (slot.fromOriginal && slot.valuePos < array.values.size()) {
                 synthesized.values.push_back(array.values[slot.valuePos]);
                 continue;
