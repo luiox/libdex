@@ -1659,3 +1659,4 @@ TEST(DexBuilder, SetsClassInterfacesWithOwnedList)
     ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
     EXPECT_EQ(again.unwrap(), rebuilt);
 }
+

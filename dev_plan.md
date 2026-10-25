@@ -18,6 +18,7 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 - 新增类：追加 `classDefs` 后用成员注入填 class_data；接口可复用已有 type_list。
 - 删除：类直接从 `classDefs` erase；`removedFields`/`removedMethods` 把成员移出 class_data，ID 表条目保留。
 - 剥离：`stripDebugInfo` 丢弃 debug_info，`stripAnnotations` 丢弃注解族；两者都不动 ID 表与指令。
+- 可写注解层：`addAnnotationItem` 把注解项按内容去重入池；`setClassAnnotations`/`setFieldAnnotations`/`setMethodAnnotations`/`setParameterAnnotations` 按成员覆盖（空集即清空）。重建把覆盖与源 annotations_directory 合并成生效目录，未覆盖成员沿用源条目，孤儿 set/ref_list 不发射；目标必须在生效 class_data 中有定义，参数个数须与 proto 一致，与 `stripAnnotations` 互斥。
 - access_flags 覆盖：`fieldAccessFlags`/`methodAccessFlags` 按索引改已有成员；方法自动切换直接/虚方法分组，字段不允许改 static 位。
 - 任何表索引移动与保留的未建模 section 冲突返回 `UnmappedRawSection`。
 - `buildDex` 入口检查 ID 表容量与表内索引；悬垂索引、非法 method_handle 与零 call_site 返回 `InvalidModel`。
@@ -30,7 +31,7 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 
 - 041 container 语义未冻结，`buildDex` 明确拒绝；非空 link 区同样拒绝。
 - 没有条目级 dirty 状态；重建总是全量 canonical。
-- ID 表条目不回收：删除成员/类只移除定义，索引与字符串仍占位。新增类/成员没有注解与参数注解创建入口。
+- ID 表条目不回收：删除成员/类只移除定义，索引与字符串仍占位。静态初值没有显式赋值入口（只能按类型默认值重建）。
 - ID 表索引重排不能跨未建模 section：保留 section 时只要旧索引移动就拒绝重建。
 - `buildDex` 丢弃不可达的建模条目；未建模 section 内部的绝对偏移不回填。
 - 源字符串的 MUTF-8 在重建时校验 UTF-16 长度；type_list 元素索引越界返回 `InvalidModel`。
@@ -40,7 +41,6 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 ## 下一批
 
 - 条目级 dirty 状态：只重编码被改条目，避免全量 canonical。
-- 可写注解层：新增/删除/编辑注解族，并为新增成员补注解；当前只能整体剥离。
 - adapter 原语继续补齐：寄存器域、payload 重建与批量编辑辅助。
 - oracle 扩展：ReDex 与 ART 实机；先定 oracle 不一致时的仲裁规则。
 - 语料矩阵：补齐 035/037/038/039/040/041 样本与哈希清单。
