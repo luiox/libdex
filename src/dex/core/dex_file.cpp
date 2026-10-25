@@ -268,6 +268,118 @@ Result<ca::u32, ReadError> DexFile::internUtf8(std::string_view utf8)
     return internString(mutf8.view());
 }
 
+Result<ca::u32, ReadError> DexFile::addType(std::string_view descriptor)
+{
+    Result<ca::u32, ReadError> interned = internUtf8(descriptor);
+    if (interned.is_err()) {
+        return Err(interned.unwrap_err());
+    }
+    const ca::u32 descriptorIdx = interned.unwrap();
+    for (ca::u32 i = 0; i < typeIds.size(); ++i) {
+        if (typeIds[i].descriptorIdx == descriptorIdx) {
+            return Ok(i);
+        }
+    }
+    if (typeIds.size() >= kIdTableLimit) {
+        return Err(ReadError::IdTableFull);
+    }
+    typeIds.push_back(TypeId{descriptorIdx});
+    return Ok(static_cast<ca::u32>(typeIds.size() - 1));
+}
+
+Result<ca::u32, ReadError> DexFile::addProto(ca::u32 shortyIdx, ca::u32 returnTypeIdx,
+                                             ca::u32 parametersOff)
+{
+    if (shortyIdx >= stringIds.size() || returnTypeIdx >= typeIds.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    Result<TypeListSpan, ReadError> fetched = typeList(parametersOff);
+    if (fetched.is_err()) {
+        return Err(fetched.unwrap_err());
+    }
+    const TypeListSpan params = fetched.unwrap();
+    for (ca::u32 i = 0; i < params.size; ++i) {
+        if (params.at(i) >= typeIds.size()) {
+            return Err(ReadError::BadIndex);
+        }
+    }
+
+    for (ca::u32 i = 0; i < protoIds.size(); ++i) {
+        const ProtoId& existing = protoIds[i];
+        if (existing.shortyIdx != shortyIdx || existing.returnTypeIdx != returnTypeIdx) {
+            continue;
+        }
+        Result<TypeListSpan, ReadError> other = typeList(existing.parametersOff);
+        if (other.is_err()) {
+            continue;  // 源条目损坏时不作为复用目标
+        }
+        const TypeListSpan candidate = other.unwrap();
+        if (candidate.size != params.size) {
+            continue;
+        }
+        bool same = true;
+        for (ca::u32 j = 0; j < params.size; ++j) {
+            if (candidate.at(j) != params.at(j)) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            return Ok(i);
+        }
+    }
+
+    if (protoIds.size() >= kIdTableLimit) {
+        return Err(ReadError::IdTableFull);
+    }
+    protoIds.push_back(ProtoId{shortyIdx, returnTypeIdx, parametersOff});
+    return Ok(static_cast<ca::u32>(protoIds.size() - 1));
+}
+
+Result<ca::u32, ReadError> DexFile::addField(ca::u32 classIdx, ca::u32 typeIdx,
+                                             ca::u32 nameIdx)
+{
+    if (classIdx >= typeIds.size() || typeIdx >= typeIds.size() ||
+        nameIdx >= stringIds.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    for (ca::u32 i = 0; i < fieldIds.size(); ++i) {
+        const FieldId& field = fieldIds[i];
+        if (field.classIdx == classIdx && field.typeIdx == typeIdx &&
+            field.nameIdx == nameIdx) {
+            return Ok(i);
+        }
+    }
+    if (fieldIds.size() >= kIdTableLimit) {
+        return Err(ReadError::IdTableFull);
+    }
+    fieldIds.push_back(FieldId{static_cast<ca::u16>(classIdx),
+                               static_cast<ca::u16>(typeIdx), nameIdx});
+    return Ok(static_cast<ca::u32>(fieldIds.size() - 1));
+}
+
+Result<ca::u32, ReadError> DexFile::addMethod(ca::u32 classIdx, ca::u32 protoIdx,
+                                              ca::u32 nameIdx)
+{
+    if (classIdx >= typeIds.size() || protoIdx >= protoIds.size() ||
+        nameIdx >= stringIds.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    for (ca::u32 i = 0; i < methodIds.size(); ++i) {
+        const MethodId& method = methodIds[i];
+        if (method.classIdx == classIdx && method.protoIdx == protoIdx &&
+            method.nameIdx == nameIdx) {
+            return Ok(i);
+        }
+    }
+    if (methodIds.size() >= kIdTableLimit) {
+        return Err(ReadError::IdTableFull);
+    }
+    methodIds.push_back(MethodId{static_cast<ca::u16>(classIdx),
+                                 static_cast<ca::u16>(protoIdx), nameIdx});
+    return Ok(static_cast<ca::u32>(methodIds.size() - 1));
+}
+
 void DexFile::refreshInternIndex()
 {
     internIndex_.clear();

@@ -327,6 +327,9 @@ public:
     /// @brief DEX 的「无索引」哨兵（superclass_idx / source_file_idx）。
     static constexpr ca::u32 kNoIndex = 0xFFFFFFFFu;
 
+    /// @brief type/proto/field/method 表的最大条目数（16 位索引）。
+    static constexpr ca::u32 kIdTableLimit = 0x10000u;
+
     DexFile() = default;
     DexFile(const DexFile&) = delete;
     DexFile& operator=(const DexFile&) = delete;
@@ -423,6 +426,32 @@ public:
 
     /// @brief 把标准 UTF-8 转成 MUTF-8 后追加；语义同 @ref internString。
     Result<ca::u32, ReadError> internUtf8(std::string_view utf8);
+
+    // ---- ID 表条目追加 ----
+    //
+    // 只追加或复用条目，不保证表内顺序；@ref buildDex 重建时会按 DEX 排序键
+    // 重排并重写全部索引。成员索引（class/proto/name/type）必须已存在；
+    // 表达到 @ref kIdTableLimit 时返回 @ref ReadError::IdTableFull。
+
+    /// @brief 追加或复用 type_ids 条目，返回 type 索引。
+    ///
+    /// @p descriptor 按标准 UTF-8 转入 MUTF-8；内容相同的字符串与 type 复用。
+    Result<ca::u32, ReadError> addType(std::string_view descriptor);
+
+    /// @brief 追加或复用 proto_ids 条目。
+    ///
+    /// @p parametersOff 为 0（无参数）或指向本文件内可解析的 type_list；
+    /// 参数列表按内容比较，相同参数列表的不同偏移视为同一条目。
+    Result<ca::u32, ReadError> addProto(ca::u32 shortyIdx, ca::u32 returnTypeIdx,
+                                        ca::u32 parametersOff);
+
+    /// @brief 追加或复用 field_ids 条目；参数顺序与 @ref FieldId 一致。
+    Result<ca::u32, ReadError> addField(ca::u32 classIdx, ca::u32 typeIdx,
+                                        ca::u32 nameIdx);
+
+    /// @brief 追加或复用 method_ids 条目；参数顺序与 @ref MethodId 一致。
+    Result<ca::u32, ReadError> addMethod(ca::u32 classIdx, ca::u32 protoIdx,
+                                         ca::u32 nameIdx);
 
     // ---- lazy 解码：类型与列表 ----
 

@@ -12,6 +12,7 @@
 #include <iterator>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -25,6 +26,75 @@ std::vector<ca::u8> readFile(const std::filesystem::path& path)
     std::ifstream in(path, std::ios::binary);
     std::vector<char> raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     return std::vector<ca::u8>(raw.begin(), raw.end());
+}
+
+/// @brief 与索引无关的方法摘要：名称+签名、标志、code_item 形状与 opcode 序列。
+///
+/// canonical 重建会重排 ID 表，方法索引与指令里的索引操作数都会变；
+/// 比较语义摘要而不是字节，逐字节等价由 baksmali 对拍负责。
+std::string summarizeMethod(dex::core::DexFile& dex,
+                            const dex::core::EncodedMethod& method)
+{
+    std::string out;
+    const auto name = dex.methodName(method.methodIndex);
+    if (name.is_ok()) {
+        out.append(name.unwrap().data(), name.unwrap().size());
+    }
+    out.push_back('(');
+    const dex::core::ProtoId& proto = dex.protoIds[dex.methodIds[method.methodIndex].protoIdx];
+    const auto returnType = dex.typeDescriptor(proto.returnTypeIdx);
+    if (returnType.is_ok()) {
+        out.append(returnType.unwrap().data(), returnType.unwrap().size());
+    }
+    if (proto.parametersOff != 0) {
+        const auto params = dex.typeList(proto.parametersOff);
+        if (params.is_ok()) {
+            for (ca::u32 i = 0; i < params.unwrap().size; ++i) {
+                const auto param = dex.typeDescriptor(params.unwrap().at(i));
+                if (param.is_ok()) {
+                    out.append(param.unwrap().data(), param.unwrap().size());
+                }
+            }
+        }
+    }
+    out.push_back(')');
+    out.append(" flags=");
+    out.append(std::to_string(method.accessFlags));
+
+    if (method.codeOff == 0) {
+        out.append(" nocode");
+        return out;
+    }
+    const auto code = dex.codeItem(method.codeOff);
+    if (code.is_err() || code.unwrap() == nullptr) {
+        out.append(" badcode");
+        return out;
+    }
+    out.append(" regs=");
+    out.append(std::to_string(code.unwrap()->registersSize));
+    out.append(" ins=");
+    out.append(std::to_string(code.unwrap()->insSize));
+    out.append(" outs=");
+    out.append(std::to_string(code.unwrap()->outsSize));
+    out.append(" tries=");
+    out.append(std::to_string(code.unwrap()->triesSize));
+    out.append(" dbg=");
+    out.append(code.unwrap()->debugInfoOff == 0 ? "0" : "1");
+
+    const dex::core::ByteSlice insns = dex::core::subOrEmpty(
+        dex.source(), code.unwrap()->insns.offset, code.unwrap()->insns.length);
+    const auto decoded = dex::core::decodeInsns(insns);
+    if (decoded.is_err()) {
+        out.append(" badinsns");
+        return out;
+    }
+    out.append(" [");
+    for (const dex::core::Insn& insn : decoded.unwrap()) {
+        out.append(std::to_string(insn.opcode));
+        out.push_back(',');
+    }
+    out.push_back(']');
+    return out;
 }
 
 std::vector<std::filesystem::path> corpusFiles()
@@ -470,9 +540,25 @@ TEST(DexRealCorpus, RebuildsCanonical)
         EXPECT_EQ(second->methodCount(), file->methodCount()) << path.string();
         EXPECT_EQ(second->classCount(), file->classCount()) << path.string();
 
+        // class_defs 会按 class_idx 重排，比较时以描述符对齐新旧类。
+        std::unordered_map<std::string, ca::u32> firstClassByDescriptor;
         for (ca::u32 classIdx = 0; classIdx < file->classCount(); ++classIdx) {
+            const auto descriptor = file->classDescriptor(classIdx);
+            ASSERT_TRUE(descriptor.is_ok()) << path.string() << " class " << classIdx;
+            firstClassByDescriptor.emplace(
+                std::string(descriptor.unwrap().as_std_view()), classIdx);
+        }
+
+        for (ca::u32 secondIdx = 0; secondIdx < second->classCount(); ++secondIdx) {
+            const auto descriptor = second->classDescriptor(secondIdx);
+            ASSERT_TRUE(descriptor.is_ok()) << path.string() << " class " << secondIdx;
+            const auto mapped =
+                firstClassByDescriptor.find(std::string(descriptor.unwrap().as_std_view()));
+            ASSERT_NE(mapped, firstClassByDescriptor.end())
+                << path.string() << " class " << secondIdx;
+            const ca::u32 classIdx = mapped->second;
             const auto firstData = file->classData(classIdx);
-            const auto secondData = second->classData(classIdx);
+            const auto secondData = second->classData(secondIdx);
             ASSERT_TRUE(firstData.is_ok()) << path.string() << " class " << classIdx;
             ASSERT_TRUE(secondData.is_ok()) << path.string() << " class " << classIdx;
             if (firstData.unwrap() == nullptr) {
@@ -490,47 +576,22 @@ TEST(DexRealCorpus, RebuildsCanonical)
                 &secondData.unwrap()->directMethods,
                 &secondData.unwrap()->virtualMethods,
             };
-            for (ca::u32 listIdx = 0; listIdx < 2; ++listIdx) {
-                ASSERT_EQ(secondLists[listIdx]->size(), firstLists[listIdx]->size())
-                    << path.string() << " class " << classIdx;
-                for (ca::usize i = 0; i < firstLists[listIdx]->size(); ++i) {
-                    const dex::core::EncodedMethod& firstMethod = (*firstLists[listIdx])[i];
-                    const dex::core::EncodedMethod& secondMethod = (*secondLists[listIdx])[i];
-                    EXPECT_EQ(secondMethod.methodIndex, firstMethod.methodIndex);
-                    EXPECT_EQ(secondMethod.accessFlags, firstMethod.accessFlags);
-                    EXPECT_EQ(secondMethod.codeOff == 0, firstMethod.codeOff == 0);
-                    if (firstMethod.codeOff == 0) {
-                        continue;
-                    }
-
-                    const auto firstCode = file->codeItem(firstMethod.codeOff);
-                    const auto secondCode = second->codeItem(secondMethod.codeOff);
-                    ASSERT_TRUE(firstCode.is_ok());
-                    ASSERT_TRUE(secondCode.is_ok());
-                    ASSERT_NE(firstCode.unwrap(), nullptr);
-                    ASSERT_NE(secondCode.unwrap(), nullptr);
-
-                    const dex::core::ByteSlice firstInsns = dex::core::subOrEmpty(
-                        file->source(), firstCode.unwrap()->insns.offset,
-                        firstCode.unwrap()->insns.length);
-                    const dex::core::ByteSlice secondInsns = dex::core::subOrEmpty(
-                        second->source(), secondCode.unwrap()->insns.offset,
-                        secondCode.unwrap()->insns.length);
-                    ASSERT_EQ(secondInsns.size(), firstInsns.size())
-                        << path.string() << " method " << firstMethod.methodIndex;
-                    EXPECT_EQ(std::memcmp(secondInsns.data(), firstInsns.data(),
-                                          firstInsns.size()),
-                              0)
-                        << path.string() << " method " << firstMethod.methodIndex;
-                    EXPECT_EQ(secondCode.unwrap()->registersSize,
-                              firstCode.unwrap()->registersSize);
-                    EXPECT_EQ(secondCode.unwrap()->insSize, firstCode.unwrap()->insSize);
-                    EXPECT_EQ(secondCode.unwrap()->outsSize, firstCode.unwrap()->outsSize);
-                    EXPECT_EQ(secondCode.unwrap()->triesSize,
-                              firstCode.unwrap()->triesSize);
-                    EXPECT_EQ(secondCode.unwrap()->debugInfoOff == 0,
-                              firstCode.unwrap()->debugInfoOff == 0);
+            const auto summarize = [](dex::core::DexFile& source,
+                                      const std::vector<dex::core::EncodedMethod>& methods) {
+                std::vector<std::string> out;
+                out.reserve(methods.size());
+                for (const dex::core::EncodedMethod& method : methods) {
+                    out.push_back(summarizeMethod(source, method));
                 }
+                std::sort(out.begin(), out.end());
+                return out;
+            };
+            for (ca::u32 listIdx = 0; listIdx < 2; ++listIdx) {
+                const std::vector<std::string> expected =
+                    summarize(*file, *firstLists[listIdx]);
+                const std::vector<std::string> actual =
+                    summarize(*second, *secondLists[listIdx]);
+                EXPECT_EQ(actual, expected) << path.string() << " class " << classIdx;
             }
         }
 
@@ -601,6 +662,733 @@ TEST(DexRealCorpus, RebuildsCanonical)
         }
 
         auto builtAgain = dex::core::buildDex(*second);
+        ASSERT_TRUE(builtAgain.is_ok())
+            << path.string() << ": " << dex::core::to_string(builtAgain.unwrap_err());
+        EXPECT_EQ(builtAgain.unwrap(), rebuilt) << path.string();
+    }
+}
+
+TEST(DexRealCorpus, RebuildsAfterMethodAndFieldRenames)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has no .dex files";
+    }
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        auto parsed = dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+        ASSERT_TRUE(parsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+
+        std::unordered_map<std::string, ca::u32> renamedMethodsPerClass;
+        std::unordered_map<std::string, ca::u32> renamedFieldsPerClass;
+        std::unordered_set<ca::u32> seenMethods;
+        std::unordered_set<ca::u32> seenFields;
+        std::unordered_set<std::string> renamedMethodNames;
+        std::unordered_set<std::string> renamedFieldNames;
+
+        for (ca::u32 classIdx = 0; classIdx < file->classCount(); ++classIdx) {
+            const auto data = file->classData(classIdx);
+            ASSERT_TRUE(data.is_ok()) << path.string() << " class " << classIdx;
+            if (data.unwrap() == nullptr) {
+                continue;
+            }
+
+            const auto descriptor = file->classDescriptor(classIdx);
+            ASSERT_TRUE(descriptor.is_ok()) << path.string() << " class " << classIdx;
+            const std::string classKey(descriptor.unwrap().as_std_view());
+
+            const std::vector<dex::core::EncodedMethod>* methodLists[2] = {
+                &data.unwrap()->directMethods,
+                &data.unwrap()->virtualMethods,
+            };
+            for (const std::vector<dex::core::EncodedMethod>* list : methodLists) {
+                for (ca::usize i = list->size() / 2; i < list->size(); ++i) {
+                    const ca::u32 methodIdx = (*list)[i].methodIndex;
+                    if (!seenMethods.insert(methodIdx).second) {
+                        continue;
+                    }
+                    const auto oldName = file->methodName(methodIdx);
+                    ASSERT_TRUE(oldName.is_ok()) << path.string() << " method " << methodIdx;
+                    std::string newName = "!renamed!";
+                    newName.append(oldName.unwrap().data(), oldName.unwrap().size());
+                    const auto interned = file->internUtf8(newName);
+                    ASSERT_TRUE(interned.is_ok()) << path.string() << " method " << methodIdx;
+                    file->methodIds[methodIdx].nameIdx = interned.unwrap();
+                    renamedMethodNames.insert(newName);
+                    ++renamedMethodsPerClass[classKey];
+                }
+            }
+
+            const std::vector<dex::core::EncodedField>* fieldLists[2] = {
+                &data.unwrap()->staticFields,
+                &data.unwrap()->instanceFields,
+            };
+            for (const std::vector<dex::core::EncodedField>* list : fieldLists) {
+                for (ca::usize i = list->size() / 2; i < list->size(); ++i) {
+                    const ca::u32 fieldIdx = (*list)[i].fieldIndex;
+                    if (!seenFields.insert(fieldIdx).second) {
+                        continue;
+                    }
+                    const auto oldName = file->fieldName(fieldIdx);
+                    ASSERT_TRUE(oldName.is_ok()) << path.string() << " field " << fieldIdx;
+                    std::string newName = "!renamed!";
+                    newName.append(oldName.unwrap().data(), oldName.unwrap().size());
+                    const auto interned = file->internUtf8(newName);
+                    ASSERT_TRUE(interned.is_ok()) << path.string() << " field " << fieldIdx;
+                    file->fieldIds[fieldIdx].nameIdx = interned.unwrap();
+                    renamedFieldNames.insert(newName);
+                    ++renamedFieldsPerClass[classKey];
+                }
+            }
+        }
+
+        dex::core::BuildOptions options;
+        options.keepUnknownSections = false;
+        auto built = dex::core::buildDex(*file, options);
+        ASSERT_TRUE(built.is_ok())
+            << path.string() << ": " << dex::core::to_string(built.unwrap_err());
+        const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+        auto reparsed = dex::core::readDex(
+            dex::core::ByteSlice{rebuilt.data(), rebuilt.size()});
+        ASSERT_TRUE(reparsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(reparsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> second = std::move(reparsed).unwrap();
+
+        EXPECT_EQ(second->state(), dex::core::ParseState::Validated) << path.string();
+        const dex::core::Integrity integrity = dex::core::verifyIntegrity(
+            second->source(), second->header.checksum, second->header.signature);
+        EXPECT_TRUE(integrity.checksumOk) << path.string();
+        EXPECT_TRUE(integrity.signatureOk) << path.string();
+        EXPECT_EQ(second->typeCount(), file->typeCount()) << path.string();
+        EXPECT_EQ(second->protoCount(), file->protoCount()) << path.string();
+        EXPECT_EQ(second->fieldCount(), file->fieldCount()) << path.string();
+        EXPECT_EQ(second->methodCount(), file->methodCount()) << path.string();
+        EXPECT_EQ(second->classCount(), file->classCount()) << path.string();
+        EXPECT_GE(second->stringCount(), file->stringCount()) << path.string();
+
+        for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+            const auto descriptor = second->classDescriptor(classIdx);
+            ASSERT_TRUE(descriptor.is_ok()) << path.string() << " class " << classIdx;
+            const std::string classKey(descriptor.unwrap().as_std_view());
+            const ca::u32 expectedMethods = renamedMethodsPerClass.count(classKey) != 0
+                                                ? renamedMethodsPerClass.at(classKey)
+                                                : 0u;
+            const ca::u32 expectedFields = renamedFieldsPerClass.count(classKey) != 0
+                                               ? renamedFieldsPerClass.at(classKey)
+                                               : 0u;
+
+            const auto data = second->classData(classIdx);
+            ASSERT_TRUE(data.is_ok()) << path.string() << " class " << classIdx;
+            if (data.unwrap() == nullptr) {
+                EXPECT_EQ(expectedMethods, 0u);
+                EXPECT_EQ(expectedFields, 0u);
+                continue;
+            }
+
+            ca::u32 methodHits = 0;
+            const std::vector<dex::core::EncodedMethod>* methodLists[2] = {
+                &data.unwrap()->directMethods,
+                &data.unwrap()->virtualMethods,
+            };
+            for (const std::vector<dex::core::EncodedMethod>* list : methodLists) {
+                for (const dex::core::EncodedMethod& method : *list) {
+                    ASSERT_LT(method.methodIndex, second->methodCount());
+                    const auto name = second->methodName(method.methodIndex);
+                    ASSERT_TRUE(name.is_ok());
+                    if (renamedMethodNames.count(std::string(name.unwrap().as_std_view())) != 0) {
+                        ++methodHits;
+                    }
+                    if (method.codeOff == 0) {
+                        continue;
+                    }
+                    const auto code = second->codeItem(method.codeOff);
+                    ASSERT_TRUE(code.is_ok());
+                    ASSERT_NE(code.unwrap(), nullptr);
+                    const dex::core::ByteSlice insns = dex::core::subOrEmpty(
+                        second->source(), code.unwrap()->insns.offset,
+                        code.unwrap()->insns.length);
+                    const auto decoded = dex::core::decodeInsns(insns);
+                    ASSERT_TRUE(decoded.is_ok())
+                        << path.string() << " method " << method.methodIndex;
+                    for (const dex::core::Insn& insn : decoded.unwrap()) {
+                        switch (insn.indexKind) {
+                            case dex::core::IndexKind::String:
+                                EXPECT_LT(insn.index, second->stringCount());
+                                break;
+                            case dex::core::IndexKind::Type:
+                                EXPECT_LT(insn.index, second->typeCount());
+                                break;
+                            case dex::core::IndexKind::Field:
+                                EXPECT_LT(insn.index, second->fieldCount());
+                                break;
+                            case dex::core::IndexKind::Method:
+                                EXPECT_LT(insn.index, second->methodCount());
+                                break;
+                            case dex::core::IndexKind::Proto:
+                                EXPECT_LT(insn.index, second->protoCount());
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                }
+            }
+            EXPECT_EQ(methodHits, expectedMethods)
+                << path.string() << " class " << classIdx;
+
+            ca::u32 fieldHits = 0;
+            const std::vector<dex::core::EncodedField>* fieldLists[2] = {
+                &data.unwrap()->staticFields,
+                &data.unwrap()->instanceFields,
+            };
+            for (const std::vector<dex::core::EncodedField>* list : fieldLists) {
+                for (const dex::core::EncodedField& field : *list) {
+                    ASSERT_LT(field.fieldIndex, second->fieldCount());
+                    const auto name = second->fieldName(field.fieldIndex);
+                    ASSERT_TRUE(name.is_ok());
+                    if (renamedFieldNames.count(std::string(name.unwrap().as_std_view())) != 0) {
+                        ++fieldHits;
+                    }
+                }
+            }
+            EXPECT_EQ(fieldHits, expectedFields)
+                << path.string() << " class " << classIdx;
+        }
+
+        auto builtAgain = dex::core::buildDex(*second, options);
+        ASSERT_TRUE(builtAgain.is_ok())
+            << path.string() << ": " << dex::core::to_string(builtAgain.unwrap_err());
+        EXPECT_EQ(builtAgain.unwrap(), rebuilt) << path.string();
+    }
+}
+
+TEST(DexRealCorpus, StripsMetadata)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has no .dex files";
+    }
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        auto parsed = dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+        ASSERT_TRUE(parsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+
+        dex::core::BuildOptions options;
+        options.keepUnknownSections = false;
+        options.stripDebugInfo = true;
+        options.stripAnnotations = true;
+
+        auto built = dex::core::buildDex(*file, options);
+        ASSERT_TRUE(built.is_ok())
+            << path.string() << ": " << dex::core::to_string(built.unwrap_err());
+        const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+        auto reparsed = dex::core::readDex(
+            dex::core::ByteSlice{rebuilt.data(), rebuilt.size()});
+        ASSERT_TRUE(reparsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(reparsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> second = std::move(reparsed).unwrap();
+
+        EXPECT_EQ(second->state(), dex::core::ParseState::Validated) << path.string();
+        const dex::core::Integrity integrity = dex::core::verifyIntegrity(
+            second->source(), second->header.checksum, second->header.signature);
+        EXPECT_TRUE(integrity.checksumOk) << path.string();
+        EXPECT_TRUE(integrity.signatureOk) << path.string();
+
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::DebugInfoItem), nullptr)
+            << path.string();
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::AnnotationItem), nullptr)
+            << path.string();
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::AnnotationSetItem), nullptr)
+            << path.string();
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::AnnotationSetRefList), nullptr)
+            << path.string();
+        EXPECT_EQ(second->findMapItem(dex::core::MapType::AnnotationsDirectoryItem), nullptr)
+            << path.string();
+
+        for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+            const auto annotations = second->classAnnotations(classIdx);
+            ASSERT_TRUE(annotations.is_ok()) << path.string() << " class " << classIdx;
+            EXPECT_EQ(annotations.unwrap(), nullptr) << path.string();
+            const auto data = second->classData(classIdx);
+            ASSERT_TRUE(data.is_ok()) << path.string() << " class " << classIdx;
+            if (data.unwrap() == nullptr) {
+                continue;
+            }
+            const std::vector<dex::core::EncodedMethod>* lists[2] = {
+                &data.unwrap()->directMethods,
+                &data.unwrap()->virtualMethods,
+            };
+            for (const std::vector<dex::core::EncodedMethod>* list : lists) {
+                for (const dex::core::EncodedMethod& method : *list) {
+                    if (method.codeOff == 0) {
+                        continue;
+                    }
+                    const auto code = second->codeItem(method.codeOff);
+                    ASSERT_TRUE(code.is_ok()) << path.string();
+                    ASSERT_NE(code.unwrap(), nullptr) << path.string();
+                    EXPECT_EQ(code.unwrap()->debugInfoOff, 0u) << path.string();
+                }
+            }
+        }
+
+        dex::core::BuildOptions plain;
+        plain.keepUnknownSections = false;
+        auto builtAgain = dex::core::buildDex(*second, plain);
+        ASSERT_TRUE(builtAgain.is_ok())
+            << path.string() << ": " << dex::core::to_string(builtAgain.unwrap_err());
+        EXPECT_EQ(builtAgain.unwrap(), rebuilt) << path.string();
+    }
+}
+
+TEST(DexRealCorpus, RebuildsAfterRemovingMembers)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has no .dex files";
+    }
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        auto parsed = dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+        ASSERT_TRUE(parsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+
+        ca::u32 target = dex::core::DexFile::kNoIndex;
+        ca::u32 removedMethod = dex::core::DexFile::kNoIndex;
+        ca::u32 removedField = dex::core::DexFile::kNoIndex;
+        for (ca::u32 classIdx = 0; classIdx < file->classCount(); ++classIdx) {
+            const auto data = file->classData(classIdx);
+            ASSERT_TRUE(data.is_ok()) << path.string() << " class " << classIdx;
+            if (data.unwrap() == nullptr) {
+                continue;
+            }
+            const std::vector<dex::core::EncodedMethod>* methodLists[2] = {
+                &data.unwrap()->directMethods,
+                &data.unwrap()->virtualMethods,
+            };
+            for (const std::vector<dex::core::EncodedMethod>* list : methodLists) {
+                for (const dex::core::EncodedMethod& method : *list) {
+                    if (method.codeOff != 0) {
+                        target = classIdx;
+                        removedMethod = method.methodIndex;
+                        break;
+                    }
+                }
+                if (target != dex::core::DexFile::kNoIndex) {
+                    break;
+                }
+            }
+            if (target != dex::core::DexFile::kNoIndex) {
+                break;
+            }
+        }
+        if (target == dex::core::DexFile::kNoIndex) {
+            continue;
+        }
+
+        const auto data = file->classData(target);
+        ASSERT_TRUE(data.is_ok());
+        if (!data.unwrap()->staticFields.empty()) {
+            removedField = data.unwrap()->staticFields.front().fieldIndex;
+        } else if (!data.unwrap()->instanceFields.empty()) {
+            removedField = data.unwrap()->instanceFields.front().fieldIndex;
+        }
+        const auto targetDescriptor = file->classDescriptor(target);
+        ASSERT_TRUE(targetDescriptor.is_ok()) << path.string();
+        const std::string targetName(targetDescriptor.unwrap().as_std_view());
+
+        dex::core::BuildOptions options;
+        options.keepUnknownSections = false;
+        options.removedMethods.push_back(removedMethod);
+        if (removedField != dex::core::DexFile::kNoIndex) {
+            options.removedFields.push_back(removedField);
+        }
+
+        auto built = dex::core::buildDex(*file, options);
+        ASSERT_TRUE(built.is_ok())
+            << path.string() << ": " << dex::core::to_string(built.unwrap_err());
+        const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+        auto reparsed = dex::core::readDex(
+            dex::core::ByteSlice{rebuilt.data(), rebuilt.size()});
+        ASSERT_TRUE(reparsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(reparsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> second = std::move(reparsed).unwrap();
+
+        EXPECT_EQ(second->state(), dex::core::ParseState::Validated) << path.string();
+        const dex::core::Integrity integrity = dex::core::verifyIntegrity(
+            second->source(), second->header.checksum, second->header.signature);
+        EXPECT_TRUE(integrity.checksumOk) << path.string();
+        EXPECT_TRUE(integrity.signatureOk) << path.string();
+        EXPECT_EQ(second->fieldCount(), file->fieldCount()) << path.string();
+        EXPECT_EQ(second->methodCount(), file->methodCount()) << path.string();
+        EXPECT_EQ(second->classCount(), file->classCount()) << path.string();
+
+        ca::u32 secondTarget = dex::core::DexFile::kNoIndex;
+        for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+            const auto descriptor = second->classDescriptor(classIdx);
+            ASSERT_TRUE(descriptor.is_ok());
+            if (descriptor.unwrap().as_std_view() == targetName) {
+                secondTarget = classIdx;
+                break;
+            }
+        }
+        ASSERT_NE(secondTarget, dex::core::DexFile::kNoIndex) << path.string();
+
+        const auto secondData = second->classData(secondTarget);
+        ASSERT_TRUE(secondData.is_ok());
+        ASSERT_NE(secondData.unwrap(), nullptr) << path.string();
+
+        const std::vector<dex::core::EncodedMethod>* methodLists[2] = {
+            &secondData.unwrap()->directMethods,
+            &secondData.unwrap()->virtualMethods,
+        };
+        for (const std::vector<dex::core::EncodedMethod>* list : methodLists) {
+            for (const dex::core::EncodedMethod& method : *list) {
+                EXPECT_NE(method.methodIndex, removedMethod) << path.string();
+            }
+        }
+        if (removedField != dex::core::DexFile::kNoIndex) {
+            const std::vector<dex::core::EncodedField>* fieldLists[2] = {
+                &secondData.unwrap()->staticFields,
+                &secondData.unwrap()->instanceFields,
+            };
+            for (const std::vector<dex::core::EncodedField>* list : fieldLists) {
+                for (const dex::core::EncodedField& field : *list) {
+                    EXPECT_NE(field.fieldIndex, removedField) << path.string();
+                }
+            }
+        }
+
+        // static_values 与 static_fields 必须保持同长。
+        const auto values = second->staticValues(secondTarget);
+        ASSERT_TRUE(values.is_ok()) << path.string();
+        if (values.unwrap() != nullptr) {
+            EXPECT_EQ(values.unwrap()->values.size(),
+                      secondData.unwrap()->staticFields.size())
+                << path.string();
+        }
+
+        dex::core::BuildOptions plain;
+        plain.keepUnknownSections = false;
+        auto builtAgain = dex::core::buildDex(*second, plain);
+        ASSERT_TRUE(builtAgain.is_ok())
+            << path.string() << ": " << dex::core::to_string(builtAgain.unwrap_err());
+        EXPECT_EQ(builtAgain.unwrap(), rebuilt) << path.string();
+    }
+}
+
+TEST(DexRealCorpus, RebuildsAfterAddingMembers)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has no .dex files";
+    }
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        auto parsed = dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+        ASSERT_TRUE(parsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+
+        ca::u32 target = dex::core::DexFile::kNoIndex;
+        for (ca::u32 classIdx = 0; classIdx < file->classCount(); ++classIdx) {
+            const auto data = file->classData(classIdx);
+            ASSERT_TRUE(data.is_ok()) << path.string() << " class " << classIdx;
+            if (data.unwrap() != nullptr) {
+                target = classIdx;
+                break;
+            }
+        }
+        if (target == dex::core::DexFile::kNoIndex) {
+            continue;
+        }
+
+        ca::u32 voidType = dex::core::DexFile::kNoIndex;
+        for (ca::u32 typeIdx = 0; typeIdx < file->typeCount(); ++typeIdx) {
+            const auto descriptor = file->typeDescriptor(typeIdx);
+            ASSERT_TRUE(descriptor.is_ok());
+            if (descriptor.unwrap().as_std_view() == "V") {
+                voidType = typeIdx;
+                break;
+            }
+        }
+        ASSERT_NE(voidType, dex::core::DexFile::kNoIndex) << path.string();
+
+        ca::u32 voidProto = dex::core::DexFile::kNoIndex;
+        for (ca::u32 protoIdx = 0; protoIdx < file->protoCount(); ++protoIdx) {
+            if (file->protoIds[protoIdx].returnTypeIdx == voidType &&
+                file->protoIds[protoIdx].parametersOff == 0) {
+                voidProto = protoIdx;
+                break;
+            }
+        }
+        if (voidProto == dex::core::DexFile::kNoIndex) {
+            const auto addedProto = file->addProto(file->typeIds[voidType].descriptorIdx,
+                                                   voidType, 0);
+            ASSERT_TRUE(addedProto.is_ok()) << path.string();
+            voidProto = addedProto.unwrap();
+        }
+
+        const ca::u32 classType = file->classDefs[target].classIdx;
+        const auto fieldName = file->internUtf8("!addedField!");
+        ASSERT_TRUE(fieldName.is_ok()) << path.string();
+        const auto methodName = file->internUtf8("!addedMethod!");
+        ASSERT_TRUE(methodName.is_ok()) << path.string();
+
+        const auto fieldIdx = file->addField(classType, classType, fieldName.unwrap());
+        ASSERT_TRUE(fieldIdx.is_ok()) << path.string();
+        const auto methodIdx = file->addMethod(classType, voidProto, methodName.unwrap());
+        ASSERT_TRUE(methodIdx.is_ok()) << path.string();
+
+        dex::core::FieldAddition field;
+        field.classDefIdx = target;
+        field.fieldIdx = fieldIdx.unwrap();
+        field.accessFlags = 0x1;  // public instance，避免动 static_values 槽位
+
+        dex::core::MethodAddition method;
+        method.classDefIdx = target;
+        method.methodIdx = methodIdx.unwrap();
+        method.accessFlags = 0x9;  // public static
+        method.item.insnsSize = 1;
+        method.insns = {0x0e, 0x00};  // return-void
+
+        dex::core::BuildOptions options;
+        options.keepUnknownSections = false;
+        options.fieldAdditions.push_back(field);
+        options.methodAdditions.push_back(method);
+
+        auto built = dex::core::buildDex(*file, options);
+        ASSERT_TRUE(built.is_ok())
+            << path.string() << ": " << dex::core::to_string(built.unwrap_err());
+        const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+        auto reparsed = dex::core::readDex(
+            dex::core::ByteSlice{rebuilt.data(), rebuilt.size()});
+        ASSERT_TRUE(reparsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(reparsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> second = std::move(reparsed).unwrap();
+
+        EXPECT_EQ(second->state(), dex::core::ParseState::Validated) << path.string();
+        const dex::core::Integrity integrity = dex::core::verifyIntegrity(
+            second->source(), second->header.checksum, second->header.signature);
+        EXPECT_TRUE(integrity.checksumOk) << path.string();
+        EXPECT_TRUE(integrity.signatureOk) << path.string();
+        EXPECT_EQ(second->classCount(), file->classCount()) << path.string();
+        EXPECT_EQ(second->fieldCount(), file->fieldCount()) << path.string();
+        EXPECT_EQ(second->methodCount(), file->methodCount()) << path.string();
+
+        const auto targetDescriptor = file->classDescriptor(target);
+        ASSERT_TRUE(targetDescriptor.is_ok()) << path.string();
+        const std::string targetName(targetDescriptor.unwrap().as_std_view());
+        ca::u32 secondTarget = dex::core::DexFile::kNoIndex;
+        for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+            const auto descriptor = second->classDescriptor(classIdx);
+            ASSERT_TRUE(descriptor.is_ok());
+            if (descriptor.unwrap().as_std_view() == targetName) {
+                secondTarget = classIdx;
+                break;
+            }
+        }
+        ASSERT_NE(secondTarget, dex::core::DexFile::kNoIndex) << path.string();
+
+        const auto data = second->classData(secondTarget);
+        ASSERT_TRUE(data.is_ok()) << path.string();
+        ASSERT_NE(data.unwrap(), nullptr) << path.string();
+
+        ca::u32 methodHits = 0;
+        const std::vector<dex::core::EncodedMethod>* methodLists[2] = {
+            &data.unwrap()->directMethods,
+            &data.unwrap()->virtualMethods,
+        };
+        for (const std::vector<dex::core::EncodedMethod>* list : methodLists) {
+            for (const dex::core::EncodedMethod& item : *list) {
+                const auto name = second->methodName(item.methodIndex);
+                ASSERT_TRUE(name.is_ok());
+                if (name.unwrap().as_std_view() != "!addedMethod!") {
+                    continue;
+                }
+                ++methodHits;
+                const auto code = second->codeItem(item.codeOff);
+                ASSERT_TRUE(code.is_ok());
+                ASSERT_NE(code.unwrap(), nullptr);
+                const dex::core::ByteSlice insns = dex::core::subOrEmpty(
+                    second->source(), code.unwrap()->insns.offset,
+                    code.unwrap()->insns.length);
+                const auto decoded = dex::core::decodeInsns(insns);
+                ASSERT_TRUE(decoded.is_ok());
+                ASSERT_EQ(decoded.unwrap().size(), 1u);
+                EXPECT_EQ(decoded.unwrap()[0].opcode, 0x0e);
+            }
+        }
+        EXPECT_EQ(methodHits, 1u) << path.string();
+
+        ca::u32 fieldHits = 0;
+        const std::vector<dex::core::EncodedField>* fieldLists[2] = {
+            &data.unwrap()->staticFields,
+            &data.unwrap()->instanceFields,
+        };
+        for (const std::vector<dex::core::EncodedField>* list : fieldLists) {
+            for (const dex::core::EncodedField& item : *list) {
+                const auto name = second->fieldName(item.fieldIndex);
+                ASSERT_TRUE(name.is_ok());
+                if (name.unwrap().as_std_view() == "!addedField!") {
+                    ++fieldHits;
+                }
+            }
+        }
+        EXPECT_EQ(fieldHits, 1u) << path.string();
+
+        dex::core::BuildOptions plain;
+        plain.keepUnknownSections = false;
+        auto builtAgain = dex::core::buildDex(*second, plain);
+        ASSERT_TRUE(builtAgain.is_ok())
+            << path.string() << ": " << dex::core::to_string(builtAgain.unwrap_err());
+        EXPECT_EQ(builtAgain.unwrap(), rebuilt) << path.string();
+    }
+}
+
+TEST(DexRealCorpus, RebuildsAfterTypeRenames)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has no .dex files";
+    }
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        auto parsed = dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+        ASSERT_TRUE(parsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(parsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+
+        // 全表改名：type/proto/field/method/class_defs 与指令、调试信息、
+        // 注解、静态初值里的 type 索引都要跟着重排。
+        for (ca::u32 typeIdx = 0; typeIdx < file->typeCount(); ++typeIdx) {
+            std::string descriptor = "L!retyped!";
+            descriptor.append(std::to_string(typeIdx));
+            descriptor.push_back(';');
+            const auto interned = file->internUtf8(descriptor);
+            ASSERT_TRUE(interned.is_ok())
+                << path.string() << " type " << typeIdx << ": "
+                << dex::core::to_string(interned.unwrap_err());
+            file->typeIds[typeIdx].descriptorIdx = interned.unwrap();
+        }
+
+        dex::core::BuildOptions options;
+        options.keepUnknownSections = false;
+        auto built = dex::core::buildDex(*file, options);
+        ASSERT_TRUE(built.is_ok())
+            << path.string() << ": " << dex::core::to_string(built.unwrap_err());
+        const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+        auto reparsed = dex::core::readDex(
+            dex::core::ByteSlice{rebuilt.data(), rebuilt.size()});
+        ASSERT_TRUE(reparsed.is_ok())
+            << path.string() << ": " << dex::core::to_string(reparsed.unwrap_err());
+        std::unique_ptr<dex::core::DexFile> second = std::move(reparsed).unwrap();
+
+        EXPECT_EQ(second->state(), dex::core::ParseState::Validated) << path.string();
+        const dex::core::Integrity integrity = dex::core::verifyIntegrity(
+            second->source(), second->header.checksum, second->header.signature);
+        EXPECT_TRUE(integrity.checksumOk) << path.string();
+        EXPECT_TRUE(integrity.signatureOk) << path.string();
+        EXPECT_EQ(second->typeCount(), file->typeCount()) << path.string();
+        EXPECT_EQ(second->protoCount(), file->protoCount()) << path.string();
+        EXPECT_EQ(second->fieldCount(), file->fieldCount()) << path.string();
+        EXPECT_EQ(second->methodCount(), file->methodCount()) << path.string();
+        EXPECT_EQ(second->classCount(), file->classCount()) << path.string();
+
+        std::unordered_set<std::string> seenTypes;
+        for (ca::u32 typeIdx = 0; typeIdx < second->typeCount(); ++typeIdx) {
+            const auto descriptor = second->typeDescriptor(typeIdx);
+            ASSERT_TRUE(descriptor.is_ok()) << path.string() << " type " << typeIdx;
+            const std::string name(descriptor.unwrap().as_std_view());
+            EXPECT_EQ(name.rfind("L!retyped!", 0), 0u) << path.string() << " type " << typeIdx;
+            EXPECT_TRUE(seenTypes.insert(name).second) << path.string() << " type " << typeIdx;
+        }
+        EXPECT_EQ(seenTypes.size(), second->typeCount()) << path.string();
+
+        for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+            const auto descriptor = second->classDescriptor(classIdx);
+            ASSERT_TRUE(descriptor.is_ok()) << path.string() << " class " << classIdx;
+            EXPECT_EQ(std::string(descriptor.unwrap().as_std_view()).rfind("L!retyped!", 0), 0u)
+                << path.string() << " class " << classIdx;
+            const ca::u32 superIdx = second->classDefs[classIdx].superclassIdx;
+            if (superIdx != dex::core::DexFile::kNoIndex) {
+                EXPECT_LT(superIdx, second->typeCount()) << path.string();
+            }
+        }
+
+        for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+            const auto data = second->classData(classIdx);
+            ASSERT_TRUE(data.is_ok()) << path.string() << " class " << classIdx;
+            if (data.unwrap() == nullptr) {
+                continue;
+            }
+
+            const std::vector<dex::core::EncodedMethod>* methodLists[2] = {
+                &data.unwrap()->directMethods,
+                &data.unwrap()->virtualMethods,
+            };
+            for (const std::vector<dex::core::EncodedMethod>* list : methodLists) {
+                for (const dex::core::EncodedMethod& method : *list) {
+                    if (method.codeOff == 0) {
+                        continue;
+                    }
+                    const auto code = second->codeItem(method.codeOff);
+                    ASSERT_TRUE(code.is_ok()) << path.string() << " method " << method.methodIndex;
+                    ASSERT_NE(code.unwrap(), nullptr);
+
+                    for (const dex::core::TryBlock& block : code.unwrap()->tryBlocks) {
+                        ASSERT_LT(block.handlerIndex, code.unwrap()->catchHandlers.size())
+                            << path.string() << " method " << method.methodIndex;
+                    }
+                    for (const dex::core::CatchHandler& handler :
+                         code.unwrap()->catchHandlers) {
+                        for (const dex::core::TypedCatch& typed : handler.typed) {
+                            EXPECT_LT(typed.typeIdx, second->typeCount())
+                                << path.string() << " method " << method.methodIndex;
+                        }
+                    }
+
+                    const dex::core::ByteSlice insns = dex::core::subOrEmpty(
+                        second->source(), code.unwrap()->insns.offset,
+                        code.unwrap()->insns.length);
+                    const auto decoded = dex::core::decodeInsns(insns);
+                    ASSERT_TRUE(decoded.is_ok()) << path.string() << " method "
+                                                 << method.methodIndex;
+                    for (const dex::core::Insn& insn : decoded.unwrap()) {
+                        if (insn.indexKind == dex::core::IndexKind::Type) {
+                            EXPECT_LT(insn.index, second->typeCount())
+                                << path.string() << " method " << method.methodIndex;
+                        }
+                    }
+                }
+            }
+        }
+
+        auto builtAgain = dex::core::buildDex(*second, options);
         ASSERT_TRUE(builtAgain.is_ok())
             << path.string() << ": " << dex::core::to_string(builtAgain.unwrap_err());
         EXPECT_EQ(builtAgain.unwrap(), rebuilt) << path.string();

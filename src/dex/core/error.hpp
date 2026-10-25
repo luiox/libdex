@@ -35,6 +35,7 @@ enum class ReadError {
     BadIndex,              ///< 索引悬垂或指向错误类型的条目（诊断）
     BadChecksum,           ///< adler32 校验和不符（诊断）
     BadSignature,          ///< SHA-1 签名不符（诊断）
+    IdTableFull,           ///< type/proto/field/method 表达到 65536 条上限
 };
 
 /// @brief 写出失败原因。
@@ -45,8 +46,7 @@ enum class WriteError {
     NotModeled,        ///< 版本或结构没有冻结语义（041 container、非空 link 区）
     SourceUnreadable,  ///< 重建需要再次解码源条目，但源字节不可读或自相矛盾
     InvalidModel,      ///< 模型引用缺失或替换项指向不存在/无方法体的方法
-    UnsortedTables,    ///< 字符串重排后 type/field/method 表不再满足 DEX 排序约定
-    UnmappedRawSection, ///< 字符串索引需要重排，但未建模 section 无法迁移内部引用
+    UnmappedRawSection, ///< 表索引需要重排，但未建模 section 无法迁移内部引用
 };
 
 /// @brief 模型的解析状态：描述能力，而非合法性。

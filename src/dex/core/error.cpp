@@ -24,6 +24,7 @@ const char* to_string(ReadError e) noexcept
         case ReadError::BadIndex: return "bad_index";
         case ReadError::BadChecksum: return "bad_checksum";
         case ReadError::BadSignature: return "bad_signature";
+        case ReadError::IdTableFull: return "id_table_full";
     }
     return "unknown";
 }
@@ -37,7 +38,6 @@ const char* to_string(WriteError e) noexcept
         case WriteError::NotModeled: return "not_modeled";
         case WriteError::SourceUnreadable: return "source_unreadable";
         case WriteError::InvalidModel: return "invalid_model";
-        case WriteError::UnsortedTables: return "unsorted_tables";
         case WriteError::UnmappedRawSection: return "unmapped_raw_section";
     }
     return "unknown";

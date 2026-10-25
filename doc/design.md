@@ -34,17 +34,31 @@ lazy：string_data、class_data、code_item、type_list、注解族、encoded_ar
 
 未修改写回用 `writeDex` 原字节透传，连 checksum/signature 都不重算。`buildDex` 是修改后的唯一写回路径：按 canonical 布局重排，回填文件偏移，重建 map_list，重算 adler32 与 SHA-1。
 
-`buildDex` 只输出可达条目，不可达的建模条目会丢弃；string_data 与 type_list 原字节复制，其余条目精确重编码。未建模 section 默认透传，可选择丢弃；其中若含绝对偏移不会回填。041 与非空 link 区返回 `NotModeled`。
+`buildDex` 只输出可达条目，不可达的建模条目会丢弃；string_data 原字节复制，其余条目精确重编码。未建模 section 默认透传，可选择丢弃；其中若含绝对偏移不会回填。041 与非空 link 区返回 `NotModeled`。
 
 ## ID 表与字符串池
 
 DEX 要求 string_ids 按 UTF-16 排序，type/proto/field/method 按各自键排序。新增或重命名不能只追加，必须重排序并重写所有内嵌索引。
 
-字符串这一层已经接通：`internString` 接受 MUTF-8，`internUtf8` 接受标准 UTF-8，返回可写入 `nameIdx`/`sourceFileIdx`/指令索引的 string 索引。`buildDex` 把所有源字符串与自有字符串合成 canonical 池：按 UTF-16 code unit 排序、去重、建立旧→新映射，再重写 type/proto/field/method 的字符串索引、class_def 的 source_file_idx、const-string/const-string/jumbo、debug_info 的参数名与 SET_FILE、encoded_value 的 String、注解元素名。旧索引全部不动时跳过指令与值重编码，保持原字节。
+字符串层：`internString` 接受 MUTF-8，`internUtf8` 接受标准 UTF-8，返回可写入 `nameIdx`/`sourceFileIdx`/指令索引的 string 索引。`buildDex` 把所有源字符串与自有字符串合成 canonical 池：按 UTF-16 code unit 排序、去重、建立旧→新映射，再重写 type/proto/field/method 的字符串索引、class_def 的 source_file_idx、const-string/const-string/jumbo、debug_info 的参数名与 SET_FILE、encoded_value 的 String、注解元素名。
 
-重排后 type/field/method 表仍须满足排序约定；重命名如果破坏顺序返回 `UnsortedTables`，不做表级重编号。字符串索引发生变化而仍保留未建模 section 时返回 `UnmappedRawSection`，因为无法迁移其中可能存在的索引；显式关闭 `keepUnknownSections` 才能继续。const-string 不自动提升为 jumbo，新索引超出 16 位返回 `Unencodable`，形态选择仍归 adapter。
+类型与成员层：type_ids 按描述符重排，proto_ids 按返回类型、参数个数与逐参数（AOSP 规则）重排，field_ids/method_ids 按 (class, name, type/proto) 重排，class_defs 按 class_idx 重排。type_list 重新编码；class_data 的成员索引按新索引重排四个列表，注解目录的成员索引、指令、catch handler、debug_info 的局部变量类型、method_handle 与 encoded_value 的索引全部重写。重命名不再要求保持原表顺序。
 
-type/proto/field/method 的新增与重排尚未提供：那需要同样的全量索引重写，范围覆盖指令、class_data、注解目录与 method_handle。class_defs 可以删除与重排；删类不回收 ID 表条目。容量：type/proto/field/method 各 65536，string 是 u32；`buildDex` 在入口检查容量与表内索引，越界返回 `InvalidModel`。
+表索引发生变化而仍保留未建模 section 时返回 `UnmappedRawSection`，因为无法迁移其中可能存在的索引；显式关闭 `keepUnknownSections` 才能继续。const-string 不自动提升为 jumbo，新索引超出 16 位返回 `Unencodable`，形态选择仍归 adapter。
+
+class_defs 可以删除与重排；删类不回收 ID 表条目。容量：type/proto/field/method 各 65536，string 是 u32；`buildDex` 在入口检查容量与表内索引，越界返回 `InvalidModel`。
+
+ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已有条目，返回索引，表满返回 `IdTableFull`。
+
+成员注入走 `BuildOptions::fieldAdditions`/`methodAdditions`：成员追加到目标 classDef 的 class_data 副本（类没有 class_data 时新建），新增方法体与替换体一起进入统一 code 单元，按新方法索引排序后落位，保证二次重建固定。静态字段增删会按新的字段顺序重建 static_values：新增字段填类型默认值，删除字段去掉对应槽位。新增成员的注解与参数注解暂不支持。
+
+新增类不需要额外 API：向 `classDefs` 追加 ClassDef，再用成员注入填 class_data。类上的注解、静态初值与新的接口 type_list 没有创建入口，只能复用已有条目。
+
+删除类直接 erase `classDefs`；删除成员走 `removedFields`/`removedMethods`，只从 class_data 移除，ID 表条目不回收。删除静态字段会同步重建 static_values。删除后仍被指令引用的条目按 DEX 的外部引用处理，调用方负责一致性。
+
+已有成员的 access_flags 可用 `fieldAccessFlags`/`methodAccessFlags` 覆盖：方法按新标志在直接/虚方法列表间搬移；字段禁止改变 ACC_STATIC，因为分组与 static_values 槽位按静态性固定。
+
+元数据可以用 `stripDebugInfo` 与 `stripAnnotations` 整体剥离：前者不产出 debug_info 并把 code_item 的 debug_info_off 置 0，后者不产出注解族并把 class_def 的 annotations_off 置 0。剥离不影响 ID 表与指令。
 
 ## 错误
 
@@ -70,7 +84,7 @@ type 层只解析字段类型与方法描述符，不查 ID 表、不解析泛�
 
 ## 对拍
 
-文本 oracle 是 baksmali 2.5.2（dexlib2）：原文件与 `buildDex` 产物分别反汇编，smali 文本必须一致。它覆盖指令、try/catch、注解、静态初值、debug 行号与访问标志。
+文本 oracle 是 baksmali 2.5.2（dexlib2）：原文件与 `buildDex` 产物分别反汇编，smali 文本必须一致。canonical 重建按规范重排 method_ids 后，class_data 的方法顺序会变；方法块顺序不是语义，脚本按块排序后再 diff，字段、注解与指令文本仍逐字节比较。它覆盖指令、try/catch、注解、静态初值、debug 行号与访问标志。
 
 baksmali 不覆盖未建模 section，也不等于 ART 接受；与 AOSP DEX 规范冲突时以规范为准。ReDex 与 ART 实机验证尚未接线。
 
@@ -80,7 +94,7 @@ baksmali 不覆盖未建模 section，也不等于 ART 接受；与 AOSP DEX 规
 
 - odex / vdex / art / compact dex。
 - APK、resources.arsc、AXML 与多 dex 模型。
-- type/proto/field/method 表的重编号与条目增删；压缩与 vacuum。
+- ID 表条目新增与删除（字符串 intern 除外）；压缩与 vacuum。
 - visitor 形状与库内方法体 AST。
 - opcode 形态合并或自动提升。
 - 修改后字节 diff 最小化。

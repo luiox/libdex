@@ -395,7 +395,7 @@ TEST(DexBuilder, RemapsStringIndexInReplacementInsns)
     EXPECT_EQ(text.unwrap().as_std_view(), "Hello2.java");
 }
 
-TEST(DexBuilder, RejectsRenamesThatBreakTableOrder)
+TEST(DexBuilder, ReordersMethodTableAfterRename)
 {
     std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
     ASSERT_NE(file, nullptr);
@@ -405,18 +405,1057 @@ TEST(DexBuilder, RejectsRenamesThatBreakTableOrder)
     file->methodIds.push_back(
         MethodId{file->methodIds[0].classIdx, file->methodIds[0].protoIdx, zzz.unwrap()});
 
-    BuildOptions options;
-    options.keepUnknownSections = false;
-    auto built = buildDex(*file, options);
-    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const auto data = file->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    const EncodedMethod& original = data.unwrap()->directMethods[0];
+    const auto code = file->codeItem(original.codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+
+    CodeReplacement replacement;
+    replacement.methodIdx = original.methodIndex;
+    replacement.item = *code.unwrap();
+    replacement.item.insnsSize = 4;
+    replacement.item.debugInfoOff = 0;
+    replacement.item.triesSize = 0;
+    replacement.item.tryBlocks.clear();
+    replacement.item.catchHandlers.clear();
+    // invoke-static {}, method@0 ; return-void
+    replacement.insns = {0x71, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00};
 
     const auto aaa = file->internUtf8("aaa");
     ASSERT_TRUE(aaa.is_ok());
     file->methodIds[1].nameIdx = aaa.unwrap();
 
-    const auto broken = buildDex(*file, options);
-    ASSERT_TRUE(broken.is_err());
-    EXPECT_EQ(broken.unwrap_err(), WriteError::UnsortedTables);
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.codeReplacements.push_back(replacement);
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto firstName = second->methodName(0);
+    const auto secondName = second->methodName(1);
+    ASSERT_TRUE(firstName.is_ok());
+    ASSERT_TRUE(secondName.is_ok());
+    EXPECT_EQ(firstName.unwrap().as_std_view(), "aaa");
+    EXPECT_EQ(secondName.unwrap().as_std_view(), "foo");
+
+    const auto newData = second->classData(0);
+    ASSERT_TRUE(newData.is_ok());
+    ASSERT_NE(newData.unwrap(), nullptr);
+    const EncodedMethod& newMethod = newData.unwrap()->directMethods[0];
+    EXPECT_EQ(newMethod.methodIndex, 1u);  // 旧 foo 排到 aaa 之后
+    ASSERT_NE(newMethod.codeOff, 0u);
+
+    const auto newCode = second->codeItem(newMethod.codeOff);
+    ASSERT_TRUE(newCode.is_ok());
+    ASSERT_NE(newCode.unwrap(), nullptr);
+    const ByteSlice insns = subOrEmpty(second->source(), newCode.unwrap()->insns.offset,
+                                       newCode.unwrap()->insns.length);
+    auto decoded = decodeInsns(insns);
+    ASSERT_TRUE(decoded.is_ok());
+    const std::vector<Insn> list = std::move(decoded).unwrap();
+    ASSERT_EQ(list.size(), 2u);
+    EXPECT_EQ(list[0].opcode, 0x71);
+    EXPECT_EQ(list[0].indexKind, IndexKind::Method);
+    EXPECT_EQ(list[0].index, 1u);
+
+    ASSERT_EQ(second->methodHandles.size(), 1u);
+    EXPECT_EQ(second->methodHandles[0].targetIdx, 1u);
+}
+
+TEST(DexBuilder, ReordersFieldTableAndRemapsReferences)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto zzz = file->internUtf8("zzz");
+    ASSERT_TRUE(zzz.is_ok());
+    FieldId extra = file->fieldIds[0];
+    extra.nameIdx = zzz.unwrap();
+    file->fieldIds.push_back(extra);
+
+    const auto data = file->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    const EncodedMethod& original = data.unwrap()->directMethods[0];
+    const auto code = file->codeItem(original.codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+
+    CodeReplacement replacement;
+    replacement.methodIdx = original.methodIndex;
+    replacement.item = *code.unwrap();
+    replacement.item.registersSize = 1;
+    replacement.item.insnsSize = 3;
+    replacement.item.debugInfoOff = 0;
+    replacement.item.triesSize = 0;
+    replacement.item.tryBlocks.clear();
+    replacement.item.catchHandlers.clear();
+    // sget-object v0, field@0 ; return-void
+    replacement.insns = {0x62, 0x00, 0x00, 0x00, 0x0e, 0x00};
+
+    const auto aaa = file->internUtf8("aaa");
+    ASSERT_TRUE(aaa.is_ok());
+    file->fieldIds[1].nameIdx = aaa.unwrap();
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.codeReplacements.push_back(replacement);
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto firstName = second->fieldName(0);
+    const auto secondName = second->fieldName(1);
+    ASSERT_TRUE(firstName.is_ok());
+    ASSERT_TRUE(secondName.is_ok());
+    EXPECT_EQ(firstName.unwrap().as_std_view(), "aaa");
+    EXPECT_EQ(secondName.unwrap().as_std_view(), "bar");
+
+    const auto newData = second->classData(0);
+    ASSERT_TRUE(newData.is_ok());
+    ASSERT_NE(newData.unwrap(), nullptr);
+    ASSERT_EQ(newData.unwrap()->instanceFields.size(), 1u);
+    EXPECT_EQ(newData.unwrap()->instanceFields[0].fieldIndex, 1u);
+
+    const EncodedMethod& newMethod = newData.unwrap()->directMethods[0];
+    const auto newCode = second->codeItem(newMethod.codeOff);
+    ASSERT_TRUE(newCode.is_ok());
+    ASSERT_NE(newCode.unwrap(), nullptr);
+    const ByteSlice insns = subOrEmpty(second->source(), newCode.unwrap()->insns.offset,
+                                       newCode.unwrap()->insns.length);
+    auto decoded = decodeInsns(insns);
+    ASSERT_TRUE(decoded.is_ok());
+    const std::vector<Insn> list = std::move(decoded).unwrap();
+    ASSERT_EQ(list.size(), 2u);
+    EXPECT_EQ(list[0].opcode, 0x62);
+    EXPECT_EQ(list[0].indexKind, IndexKind::Field);
+    EXPECT_EQ(list[0].index, 1u);
+}
+
+TEST(DexBuilder, ReordersTypeProtoAndClassTablesAfterDescriptorRename)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    // 把 I 改名为 Z：type_ids 重排，proto 返回类型顺序随之翻转，
+    // field 的类型、class_def 的 class/superclass 索引全部要跟着改写。
+    const auto zed = file->internUtf8("Z");
+    ASSERT_TRUE(zed.is_ok());
+    file->typeIds[0].descriptorIdx = zed.unwrap();
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    EXPECT_EQ(second->state(), ParseState::Validated);
+
+    const char* expectedTypes[] = {"LHello;", "Ljava/lang/Object;", "V", "Z"};
+    ASSERT_EQ(second->typeCount(), 4u);
+    for (ca::u32 i = 0; i < 4; ++i) {
+        const auto descriptor = second->typeDescriptor(i);
+        ASSERT_TRUE(descriptor.is_ok());
+        EXPECT_EQ(descriptor.unwrap().as_std_view(), expectedTypes[i]);
+    }
+
+    ASSERT_EQ(second->protoCount(), 2u);
+    EXPECT_EQ(second->protoIds[0].returnTypeIdx, 2u);  // ()V 排到前面
+    EXPECT_EQ(second->protoIds[1].returnTypeIdx, 3u);  // ()Z
+    ASSERT_EQ(second->methodCount(), 1u);
+    EXPECT_EQ(second->methodIds[0].protoIdx, 0u);
+
+    ASSERT_EQ(second->fieldCount(), 1u);
+    EXPECT_EQ(second->fieldIds[0].classIdx, 0u);
+    EXPECT_EQ(second->fieldIds[0].typeIdx, 3u);
+
+    ASSERT_EQ(second->classCount(), 1u);
+    EXPECT_EQ(second->classDefs[0].classIdx, 0u);
+    EXPECT_EQ(second->classDefs[0].superclassIdx, 1u);
+
+    // 表重排后的布局必须是固定点。
+    auto again = buildDex(*second, options);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RemapsTypeIndicesInInsnsAndCatchHandlers)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto zed = file->internUtf8("Z");
+    ASSERT_TRUE(zed.is_ok());
+    file->typeIds[0].descriptorIdx = zed.unwrap();
+
+    // const-class v0, type 1（LHello;）+ return-void；catch 也指向 LHello;。
+    CodeReplacement replacement;
+    replacement.methodIdx = 0;
+    replacement.item.registersSize = 1;
+    replacement.item.triesSize = 1;
+    replacement.item.insnsSize = 3;
+    replacement.item.tryBlocks.push_back(TryBlock{0, 2, 0, 0});
+    CatchHandler handler;
+    handler.typed.push_back(TypedCatch{1, 2});
+    replacement.item.catchHandlers.push_back(std::move(handler));
+    replacement.insns = {0x1c, 0x00, 0x01, 0x00, 0x0e, 0x00};
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.codeReplacements.push_back(std::move(replacement));
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->directMethods.size(), 1u);
+    const auto code = second->codeItem(data.unwrap()->directMethods[0].codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+
+    const ByteSlice insns = subOrEmpty(second->source(), code.unwrap()->insns.offset,
+                                       code.unwrap()->insns.length);
+    auto decoded = decodeInsns(insns);
+    ASSERT_TRUE(decoded.is_ok());
+    const std::vector<Insn> list = std::move(decoded).unwrap();
+    ASSERT_EQ(list.size(), 2u);
+    EXPECT_EQ(list[0].opcode, 0x1c);
+    EXPECT_EQ(list[0].indexKind, IndexKind::Type);
+    EXPECT_EQ(list[0].index, 0u);  // LHello; 的新 type 索引
+    EXPECT_EQ(list[1].opcode, 0x0e);
+
+    ASSERT_EQ(code.unwrap()->catchHandlers.size(), 1u);
+    ASSERT_EQ(code.unwrap()->catchHandlers[0].typed.size(), 1u);
+    EXPECT_EQ(code.unwrap()->catchHandlers[0].typed[0].typeIdx, 0u);
+}
+
+TEST(DexBuilder, RejectsDuplicateTypeDescriptors)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    // type 0 改成与 type 3 相同的 V，type_ids 无法形成严格排序。
+    file->typeIds[0].descriptorIdx = 4;
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    const auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_err());
+    EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
+}
+
+TEST(DexBuilder, AddsAndReusesIdTableEntries)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto sameType = file->addType("I");
+    ASSERT_TRUE(sameType.is_ok());
+    EXPECT_EQ(sameType.unwrap(), 0u);
+
+    const auto stringType = file->addType("Ljava/lang/String;");
+    ASSERT_TRUE(stringType.is_ok());
+    EXPECT_EQ(stringType.unwrap(), 4u);
+    const auto stringTypeAgain = file->addType("Ljava/lang/String;");
+    ASSERT_TRUE(stringTypeAgain.is_ok());
+    EXPECT_EQ(stringTypeAgain.unwrap(), stringType.unwrap());
+
+    const auto sameProto = file->addProto(1, 0, 0);  // ()I
+    ASSERT_TRUE(sameProto.is_ok());
+    EXPECT_EQ(sameProto.unwrap(), 0u);
+    const auto objectShorty = file->internUtf8("L");
+    ASSERT_TRUE(objectShorty.is_ok());
+    const auto stringProto = file->addProto(objectShorty.unwrap(), stringType.unwrap(), 0);
+    ASSERT_TRUE(stringProto.is_ok());
+    EXPECT_EQ(stringProto.unwrap(), 2u);
+
+    const auto name = file->internUtf8("baz");
+    ASSERT_TRUE(name.is_ok());
+    const auto field = file->addField(stringType.unwrap(), stringType.unwrap(), name.unwrap());
+    ASSERT_TRUE(field.is_ok());
+    EXPECT_EQ(field.unwrap(), 1u);
+    const auto fieldAgain =
+        file->addField(stringType.unwrap(), stringType.unwrap(), name.unwrap());
+    ASSERT_TRUE(fieldAgain.is_ok());
+    EXPECT_EQ(fieldAgain.unwrap(), field.unwrap());
+
+    const auto method = file->addMethod(stringType.unwrap(), stringProto.unwrap(), name.unwrap());
+    ASSERT_TRUE(method.is_ok());
+    EXPECT_EQ(method.unwrap(), 1u);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    EXPECT_EQ(second->typeCount(), 5u);
+    EXPECT_EQ(second->protoCount(), 3u);
+    EXPECT_EQ(second->fieldCount(), 2u);
+    EXPECT_EQ(second->methodCount(), 2u);
+
+    const auto newType = second->typeDescriptor(3);
+    ASSERT_TRUE(newType.is_ok());
+    EXPECT_EQ(newType.unwrap().as_std_view(), "Ljava/lang/String;");
+    EXPECT_EQ(second->protoIds[1].returnTypeIdx, 3u);
+
+    ASSERT_EQ(second->fieldCount(), 2u);
+    EXPECT_EQ(second->fieldName(1).unwrap().as_std_view(), "baz");
+    EXPECT_EQ(second->fieldClassDescriptor(1).unwrap().as_std_view(),
+              "Ljava/lang/String;");
+    EXPECT_EQ(second->fieldTypeDescriptor(1).unwrap().as_std_view(),
+              "Ljava/lang/String;");
+
+    ASSERT_EQ(second->methodCount(), 2u);
+    EXPECT_EQ(second->methodName(1).unwrap().as_std_view(), "baz");
+    EXPECT_EQ(second->methodClassDescriptor(1).unwrap().as_std_view(),
+              "Ljava/lang/String;");
+    EXPECT_EQ(second->methodIds[1].protoIdx, 1u);
+
+    auto again = buildDex(*second, options);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RejectsDanglingIdTableAdds)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto badProtoShorty = file->addProto(99, 0, 0);
+    ASSERT_TRUE(badProtoShorty.is_err());
+    EXPECT_EQ(badProtoShorty.unwrap_err(), ReadError::BadIndex);
+
+    const auto badProtoReturn = file->addProto(1, 99, 0);
+    ASSERT_TRUE(badProtoReturn.is_err());
+    EXPECT_EQ(badProtoReturn.unwrap_err(), ReadError::BadIndex);
+
+    const auto badTypeList = file->addProto(1, 0, 0xFFFFFFF0u);
+    ASSERT_TRUE(badTypeList.is_err());
+    EXPECT_EQ(badTypeList.unwrap_err(), ReadError::BadTableSpan);
+
+    const auto badFieldClass = file->addField(99, 0, 5);
+    ASSERT_TRUE(badFieldClass.is_err());
+    EXPECT_EQ(badFieldClass.unwrap_err(), ReadError::BadIndex);
+
+    const auto badFieldName = file->addField(0, 0, 99);
+    ASSERT_TRUE(badFieldName.is_err());
+    EXPECT_EQ(badFieldName.unwrap_err(), ReadError::BadIndex);
+
+    const auto badMethodProto = file->addMethod(0, 99, 5);
+    ASSERT_TRUE(badMethodProto.is_err());
+    EXPECT_EQ(badMethodProto.unwrap_err(), ReadError::BadIndex);
+}
+
+TEST(DexBuilder, RejectsIdTableAddsAtCapacity)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    file->fieldIds.resize(DexFile::kIdTableLimit);
+    const auto added = file->addField(1, 1, 1);
+    ASSERT_TRUE(added.is_err());
+    EXPECT_EQ(added.unwrap_err(), ReadError::IdTableFull);
+}
+
+TEST(DexBuilder, AddsClassMembersAndCodeItems)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto name = file->internUtf8("gen");
+    ASSERT_TRUE(name.is_ok());
+    const auto stringType = file->addType("Ljava/lang/String;");
+    ASSERT_TRUE(stringType.is_ok());
+    const auto fieldIdx = file->addField(1, stringType.unwrap(), name.unwrap());
+    ASSERT_TRUE(fieldIdx.is_ok());
+    const auto methodIdx = file->addMethod(1, 1, name.unwrap());
+    ASSERT_TRUE(methodIdx.is_ok());
+
+    FieldAddition field;
+    field.classDefIdx = 0;
+    field.fieldIdx = fieldIdx.unwrap();
+    field.accessFlags = 0x1;  // public instance
+
+    MethodAddition method;
+    method.classDefIdx = 0;
+    method.methodIdx = methodIdx.unwrap();
+    method.accessFlags = 0x9;  // public static -> direct
+    method.item.registersSize = 1;
+    method.item.insnsSize = 3;
+    // const-class v0, Ljava/lang/String; + return-void
+    method.insns = {0x1c, 0x00, static_cast<ca::u8>(stringType.unwrap() & 0xFFu),
+                    static_cast<ca::u8>(stringType.unwrap() >> 8), 0x0e, 0x00};
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(field);
+    options.methodAdditions.push_back(method);
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    EXPECT_EQ(second->state(), ParseState::Validated);
+
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    EXPECT_EQ(data.unwrap()->staticFields.size(), 0u);
+    ASSERT_EQ(data.unwrap()->instanceFields.size(), 2u);
+    ASSERT_EQ(data.unwrap()->directMethods.size(), 2u);
+    EXPECT_EQ(data.unwrap()->virtualMethods.size(), 0u);
+
+    ca::u32 fieldHits = 0;
+    for (const EncodedField& addedField : data.unwrap()->instanceFields) {
+        const auto addedName = second->fieldName(addedField.fieldIndex);
+        ASSERT_TRUE(addedName.is_ok());
+        if (addedName.unwrap().as_std_view() != "gen") {
+            continue;
+        }
+        ++fieldHits;
+        EXPECT_EQ(second->fieldTypeDescriptor(addedField.fieldIndex).unwrap().as_std_view(),
+                  "Ljava/lang/String;");
+        EXPECT_EQ(addedField.accessFlags, 0x1u);
+    }
+    EXPECT_EQ(fieldHits, 1u);
+
+    ca::u32 found = 0;
+    for (const EncodedMethod& added : data.unwrap()->directMethods) {
+        const auto addedName = second->methodName(added.methodIndex);
+        ASSERT_TRUE(addedName.is_ok());
+        if (addedName.unwrap().as_std_view() == "gen") {
+            ++found;
+            EXPECT_EQ(added.accessFlags, 0x9u);
+            const auto code = second->codeItem(added.codeOff);
+            ASSERT_TRUE(code.is_ok());
+            ASSERT_NE(code.unwrap(), nullptr);
+            EXPECT_EQ(code.unwrap()->registersSize, 1u);
+            const ByteSlice insns = subOrEmpty(second->source(), code.unwrap()->insns.offset,
+                                               code.unwrap()->insns.length);
+            auto decoded = decodeInsns(insns);
+            ASSERT_TRUE(decoded.is_ok());
+            const std::vector<Insn> list = std::move(decoded).unwrap();
+            ASSERT_EQ(list.size(), 2u);
+            EXPECT_EQ(list[0].opcode, 0x1c);
+            EXPECT_EQ(list[0].indexKind, IndexKind::Type);
+            const auto referenced = second->typeDescriptor(list[0].index);
+            ASSERT_TRUE(referenced.is_ok());
+            EXPECT_EQ(referenced.unwrap().as_std_view(), "Ljava/lang/String;");
+            EXPECT_EQ(list[1].opcode, 0x0e);
+        }
+    }
+    EXPECT_EQ(found, 1u);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, AddsMembersToClassWithoutClassData)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    file->classDefs[0].classDataOff = 0;
+    file->classDefs[0].staticValuesOff = 0;
+
+    const auto name = file->internUtf8("gen");
+    ASSERT_TRUE(name.is_ok());
+    const auto fieldIdx = file->addField(1, 0, name.unwrap());
+    ASSERT_TRUE(fieldIdx.is_ok());
+    const auto methodIdx = file->addMethod(1, 1, name.unwrap());
+    ASSERT_TRUE(methodIdx.is_ok());
+
+    FieldAddition field;
+    field.classDefIdx = 0;
+    field.fieldIdx = fieldIdx.unwrap();
+    field.accessFlags = 0x9;  // public static
+    field.isStatic = true;
+    MethodAddition method;
+    method.classDefIdx = 0;
+    method.methodIdx = methodIdx.unwrap();
+    method.accessFlags = 0x1;  // public -> virtual
+    method.item.registersSize = 0;
+    method.item.insnsSize = 1;
+    method.insns = {0x0e, 0x00};  // return-void
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(field);
+    options.methodAdditions.push_back(method);
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->staticFields.size(), 1u);
+    EXPECT_EQ(data.unwrap()->staticFields[0].fieldIndex, fieldIdx.unwrap());
+    EXPECT_EQ(data.unwrap()->instanceFields.size(), 0u);
+    EXPECT_EQ(data.unwrap()->directMethods.size(), 0u);
+    ASSERT_EQ(data.unwrap()->virtualMethods.size(), 1u);
+    EXPECT_EQ(data.unwrap()->virtualMethods[0].methodIndex, methodIdx.unwrap());
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, AddsClassDefWithMembers)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    const auto newType = file->addType("LNew;");
+    ASSERT_TRUE(newType.is_ok());
+    ClassDef def;
+    def.classIdx = newType.unwrap();
+    def.accessFlags = 0x1;  // public
+    def.superclassIdx = 2;  // Ljava/lang/Object;
+    file->classDefs.push_back(def);
+
+    const auto name = file->internUtf8("run");
+    ASSERT_TRUE(name.is_ok());
+    const auto methodIdx = file->addMethod(newType.unwrap(), 1, name.unwrap());
+    ASSERT_TRUE(methodIdx.is_ok());
+
+    MethodAddition method;
+    method.classDefIdx = 1;  // 新追加的 class_def
+    method.methodIdx = methodIdx.unwrap();
+    method.accessFlags = 0x9;  // public static
+    method.item.insnsSize = 1;
+    method.insns = {0x0e, 0x00};
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.methodAdditions.push_back(method);
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    ASSERT_EQ(second->classCount(), 2u);
+    ca::u32 newClassIdx = DexFile::kNoIndex;
+    for (ca::u32 classIdx = 0; classIdx < second->classCount(); ++classIdx) {
+        const auto descriptor = second->classDescriptor(classIdx);
+        ASSERT_TRUE(descriptor.is_ok());
+        if (descriptor.unwrap().as_std_view() == "LNew;") {
+            newClassIdx = classIdx;
+        }
+    }
+    ASSERT_NE(newClassIdx, DexFile::kNoIndex);
+    EXPECT_EQ(second->superclassDescriptor(newClassIdx).unwrap().as_std_view(),
+              "Ljava/lang/Object;");
+
+    const auto data = second->classData(newClassIdx);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->directMethods.size(), 1u);
+    const EncodedMethod& added = data.unwrap()->directMethods[0];
+    EXPECT_EQ(second->methodName(added.methodIndex).unwrap().as_std_view(), "run");
+    const auto code = second->codeItem(added.codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, AddsStaticFieldAndExtendsStaticValues)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    ASSERT_NE(file->classDefs[0].staticValuesOff, 0u);
+
+    const auto name = file->internUtf8("gen");
+    ASSERT_TRUE(name.is_ok());
+    const auto fieldIdx = file->addField(1, 0, name.unwrap());
+    ASSERT_TRUE(fieldIdx.is_ok());
+
+    FieldAddition add;
+    add.classDefIdx = 0;
+    add.fieldIdx = fieldIdx.unwrap();
+    add.accessFlags = 0x9;  // public static
+    add.isStatic = true;
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(add);
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->staticFields.size(), 1u);
+    EXPECT_EQ(data.unwrap()->staticFields[0].fieldIndex, fieldIdx.unwrap());
+
+    const auto values = second->staticValues(0);
+    ASSERT_TRUE(values.is_ok());
+    ASSERT_NE(values.unwrap(), nullptr);
+    ASSERT_EQ(values.unwrap()->values.size(), 1u);
+    EXPECT_EQ(values.unwrap()->values[0].type, EncodedValueType::Int);
+    EXPECT_EQ(values.unwrap()->values[0].integer, 0);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RejectsStaticFlagMismatchOnFieldAddition)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    const auto name = file->internUtf8("gen");
+    ASSERT_TRUE(name.is_ok());
+    const auto fieldIdx = file->addField(1, 0, name.unwrap());
+    ASSERT_TRUE(fieldIdx.is_ok());
+
+    FieldAddition add;
+    add.classDefIdx = 0;
+    add.fieldIdx = fieldIdx.unwrap();
+    add.accessFlags = 0x1;  // public：缺 ACC_STATIC，与 isStatic=true 矛盾
+    add.isStatic = true;
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(add);
+    const auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_err());
+    EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
+}
+
+namespace {
+
+/// 构造一个尾部默认值被省略的 static_values：先把静态字段建出来，
+/// 再把产物里 encoded_array_item 的 ULEB 长度改回 0（checksum 只告警）。
+std::unique_ptr<DexFile> makeShortStaticValuesDex(ca::u32* fieldIdx)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    if (file == nullptr) {
+        return nullptr;
+    }
+    const auto name = file->internUtf8("gen");
+    const auto added = file->addField(1, 0, name.unwrap());
+    if (name.is_err() || added.is_err()) {
+        return nullptr;
+    }
+
+    FieldAddition add;
+    add.classDefIdx = 0;
+    add.fieldIdx = added.unwrap();
+    add.accessFlags = 0x9;
+    add.isStatic = true;
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(add);
+    auto built = buildDex(*file, options);
+    if (built.is_err()) {
+        return nullptr;
+    }
+    std::vector<ca::u8> bytes = std::move(built).unwrap();
+    *fieldIdx = added.unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(bytes));
+    if (reparsed.is_err()) {
+        return nullptr;
+    }
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    const ca::u32 valuesOff = second->classDefs[0].staticValuesOff;
+    // encoded_array_item 的 size 从 1 压回 0：静态字段的初值按尾部默认值省略。
+    // 只改 ULEB 长度字节本身，不碰紧随其后的内容。
+    bytes[valuesOff] = 0;
+    // 重建后字符串/字段表已重排，需要重读才能拿到新 field 索引。
+    auto reread = readDex(dex_test::asSlice(bytes));
+    if (reread.is_err()) {
+        return nullptr;
+    }
+    std::unique_ptr<DexFile> third = std::move(reread).unwrap();
+    const auto data = third->classData(0);
+    if (data.is_err() || data.unwrap() == nullptr ||
+        data.unwrap()->staticFields.empty()) {
+        return nullptr;
+    }
+    *fieldIdx = data.unwrap()->staticFields[0].fieldIndex;
+    return third;
+}
+
+}   // namespace
+
+TEST(DexBuilder, RemovesTrailingStaticFieldOmittedFromValues)
+{
+    ca::u32 fieldIdx = 0;
+    std::unique_ptr<DexFile> file = makeShortStaticValuesDex(&fieldIdx);
+    ASSERT_NE(file, nullptr);
+    const auto values = file->staticValues(0);
+    ASSERT_TRUE(values.is_ok());
+    ASSERT_NE(values.unwrap(), nullptr);
+    ASSERT_EQ(values.unwrap()->values.size(), 0u);  // 尾部默认值已省略
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.removedFields.push_back(fieldIdx);
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    EXPECT_TRUE(data.unwrap()->staticFields.empty());
+}
+
+TEST(DexBuilder, ExtendsStaticValuesOmittingTrailingDefaults)
+{
+    ca::u32 fieldIdx = 0;
+    std::unique_ptr<DexFile> file = makeShortStaticValuesDex(&fieldIdx);
+    ASSERT_NE(file, nullptr);
+
+    const auto name = file->internUtf8("gen2");
+    ASSERT_TRUE(name.is_ok());
+    const auto added = file->addField(1, 0, name.unwrap());
+    ASSERT_TRUE(added.is_ok());
+
+    FieldAddition add;
+    add.classDefIdx = 0;
+    add.fieldIdx = added.unwrap();
+    add.accessFlags = 0x9;
+    add.isStatic = true;
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(add);
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->staticFields.size(), 2u);
+    const auto values = second->staticValues(0);
+    ASSERT_TRUE(values.is_ok());
+    ASSERT_NE(values.unwrap(), nullptr);
+    ASSERT_EQ(values.unwrap()->values.size(), 2u);
+    EXPECT_EQ(values.unwrap()->values[0].type, EncodedValueType::Int);
+    EXPECT_EQ(values.unwrap()->values[0].integer, 0);
+    EXPECT_EQ(values.unwrap()->values[1].type, EncodedValueType::Int);
+    EXPECT_EQ(values.unwrap()->values[1].integer, 0);
+}
+
+TEST(DexBuilder, RejectsInvalidMemberAdditions)
+{
+    const auto expectInvalid = [](std::unique_ptr<DexFile> file, BuildOptions options) {
+        const auto built = buildDex(*file, options);
+        ASSERT_TRUE(built.is_err());
+        EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
+    };
+
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        FieldAddition add;
+        add.classDefIdx = 0;
+        add.fieldIdx = 0;  // 已由现有 class_data 定义
+        BuildOptions options;
+        options.keepUnknownSections = false;
+        options.fieldAdditions.push_back(add);
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        FieldAddition add;
+        add.classDefIdx = 99;
+        add.fieldIdx = 0;
+        BuildOptions options;
+        options.keepUnknownSections = false;
+        options.fieldAdditions.push_back(add);
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        MethodAddition first;
+        first.classDefIdx = 0;
+        first.methodIdx = 0;  // 已有定义
+        first.item.insnsSize = 1;
+        first.insns = {0x0e, 0x00};
+        BuildOptions options;
+        options.keepUnknownSections = false;
+        options.methodAdditions.push_back(first);
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        const auto name = file->internUtf8("gen");
+        ASSERT_TRUE(name.is_ok());
+        const auto methodIdx = file->addMethod(1, 1, name.unwrap());
+        ASSERT_TRUE(methodIdx.is_ok());
+
+        MethodAddition add;
+        add.classDefIdx = 0;
+        add.methodIdx = methodIdx.unwrap();
+        add.item.insnsSize = 1;
+        add.insns = {0x0e, 0x00};
+
+        CodeReplacement replacement;
+        replacement.methodIdx = methodIdx.unwrap();  // 新增方法不能同时替换
+        replacement.item.insnsSize = 1;
+        replacement.insns = {0x0e, 0x00};
+
+        BuildOptions options;
+        options.keepUnknownSections = false;
+        options.methodAdditions.push_back(add);
+        options.codeReplacements.push_back(replacement);
+        expectInvalid(std::move(file), std::move(options));
+    }
+}
+
+TEST(DexBuilder, RemovesMembersButKeepsIdTables)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.removedFields = {0};
+    options.removedMethods = {0};
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    EXPECT_EQ(second->fieldCount(), 1u);
+    EXPECT_EQ(second->methodCount(), 1u);
+    ASSERT_EQ(second->classCount(), 1u);
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    EXPECT_TRUE(data.unwrap()->staticFields.empty());
+    EXPECT_TRUE(data.unwrap()->instanceFields.empty());
+    EXPECT_TRUE(data.unwrap()->directMethods.empty());
+    EXPECT_TRUE(data.unwrap()->virtualMethods.empty());
+    EXPECT_EQ(second->findMapItem(MapType::CodeItem), nullptr);
+    EXPECT_EQ(second->findMapItem(MapType::DebugInfoItem), nullptr);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RemovesClassDef)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    file->classDefs.clear();
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    EXPECT_EQ(second->classCount(), 0u);
+    EXPECT_EQ(second->methodCount(), 1u);  // ID 表条目保留
+    EXPECT_EQ(second->findMapItem(MapType::ClassDataItem), nullptr);
+    EXPECT_EQ(second->findMapItem(MapType::CodeItem), nullptr);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RejectsRemovingReplacedMethod)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.removedMethods = {0};
+    CodeReplacement replacement;
+    replacement.methodIdx = 0;
+    replacement.item.insnsSize = 1;
+    replacement.insns = {0x0e, 0x00};
+    options.codeReplacements.push_back(replacement);
+
+    const auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_err());
+    EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
+}
+
+TEST(DexBuilder, OverridesMemberAccessFlags)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAccessFlags.push_back(AccessFlagEdit{0, 0x1});   // public
+    options.methodAccessFlags.push_back(AccessFlagEdit{0, 0x1});  // public，转虚方法
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    EXPECT_EQ(data.unwrap()->staticFields.size(), 0u);
+    ASSERT_EQ(data.unwrap()->instanceFields.size(), 1u);
+    EXPECT_EQ(data.unwrap()->instanceFields[0].accessFlags, 0x1u);
+    EXPECT_EQ(data.unwrap()->directMethods.size(), 0u);
+    ASSERT_EQ(data.unwrap()->virtualMethods.size(), 1u);
+    EXPECT_EQ(data.unwrap()->virtualMethods[0].accessFlags, 0x1u);
+    EXPECT_NE(data.unwrap()->virtualMethods[0].codeOff, 0u);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
+}
+
+TEST(DexBuilder, RejectsInvalidAccessFlagEdits)
+{
+    const auto expectInvalid = [](std::unique_ptr<DexFile> file, BuildOptions options) {
+        const auto built = buildDex(*file, options);
+        ASSERT_TRUE(built.is_err());
+        EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
+    };
+
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.fieldAccessFlags.push_back(AccessFlagEdit{99, 0x1});
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        // 不能借 access_flags 把实例字段改成静态字段。
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.fieldAccessFlags.push_back(AccessFlagEdit{0, 0xA});
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.methodAccessFlags.push_back(AccessFlagEdit{99, 0x1});
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.methodAccessFlags.push_back(AccessFlagEdit{0, 0x1});
+        options.methodAccessFlags.push_back(AccessFlagEdit{0, 0x1});
+        expectInvalid(std::move(file), std::move(options));
+    }
+    {
+        std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+        BuildOptions options;
+        options.removedFields = {0};
+        options.fieldAccessFlags.push_back(AccessFlagEdit{0, 0x1});
+        expectInvalid(std::move(file), std::move(options));
+    }
+}
+
+TEST(DexBuilder, StripsDebugInfo)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.stripDebugInfo = true;
+
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+    const std::vector<ca::u8> rebuilt = std::move(built).unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(rebuilt));
+    ASSERT_TRUE(reparsed.is_ok()) << to_string(reparsed.unwrap_err());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+
+    EXPECT_EQ(second->findMapItem(MapType::DebugInfoItem), nullptr);
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->directMethods.size(), 1u);
+    const auto code = second->codeItem(data.unwrap()->directMethods[0].codeOff);
+    ASSERT_TRUE(code.is_ok());
+    ASSERT_NE(code.unwrap(), nullptr);
+    EXPECT_EQ(code.unwrap()->debugInfoOff, 0u);
+
+    BuildOptions plain;
+    plain.keepUnknownSections = false;
+    auto again = buildDex(*second, plain);
+    ASSERT_TRUE(again.is_ok()) << to_string(again.unwrap_err());
+    EXPECT_EQ(again.unwrap(), rebuilt);
 }
 
 TEST(DexBuilder, RejectsRemapWithOpaqueRawSections)
