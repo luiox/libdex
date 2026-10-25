@@ -24,6 +24,8 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 - 任何表索引移动与保留的未建模 section 冲突返回 `UnmappedRawSection`。
 - `buildDex` 入口检查 ID 表容量与表内索引；悬垂索引、非法 method_handle 与零 call_site 返回 `InvalidModel`。
 - adapter 原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`。
+- adapter 原语（第二批）：寄存器域读写（`insnRegisterLayout`/`insnRegisterAt`/`setInsnRegister`/`setInsnRegisterRange`/`insnRegisterCeiling`）、批量平移与重映射（`shiftInsnRegisters`/`remapInsnRegisters`）、payload 构造器（`makePackedSwitchPayload`/`makeSparseSwitchPayload`/`makeFillArrayDataPayload`）。
+- payload 标识修正为规范值：packed-switch 0x0101、sparse-switch 0x0202（此前误用 0x0100/0x0200，产物会被 ART 拒收，真实文件按未定义操作码报错）。
 - baksmali 2.5.2 文本对拍：合成 fixture、level1（5528 B）与 level2（719560 B）在方法块顺序规范化后 diff 均为空。
 - CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍；真实语料不提交。
 - 本地带真实语料 122 个用例全绿；真实语料的成员/类型改名、成员增删、元数据剥离与二次重建固定点通过。
@@ -42,6 +44,5 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 ## 下一批
 
 - 条目级 dirty 状态：只重编码被改条目，避免全量 canonical。
-- adapter 原语继续补齐：寄存器域、payload 重建与批量编辑辅助。
 - oracle 扩展：ReDex 与 ART 实机；先定 oracle 不一致时的仲裁规则。
 - 语料矩阵：补齐 035/037/038/039/040/041 样本与哈希清单。

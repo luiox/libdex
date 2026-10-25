@@ -212,7 +212,7 @@ TEST(DexInsn, DecodesPackedSwitchPayload)
     const std::vector<ca::u8> bytes = codeUnits({
         0x002b, 0x0004, 0x0000,  // 0: packed-switch v0, +4
         0x0000,                  // 3: nop（保证 payload 落在偶数地址）
-        0x0100, 0x0002,          // 4: packed-switch-payload, size=2
+        0x0101, 0x0002,          // 4: packed-switch-payload, size=2
         0x000a, 0x0000,          // 6: first_key=10
         0xfffe, 0xffff,          // 8: target 0 = -2
         0x0003, 0x0000,          // 10: target 1 = +3
@@ -246,7 +246,7 @@ TEST(DexInsn, DecodesSparseSwitchPayload)
     const std::vector<ca::u8> bytes = codeUnits({
         0x002c, 0x0004, 0x0000,  // 0: sparse-switch v0, +4
         0x0000,                  // 3: nop
-        0x0200, 0x0002,          // 4: sparse-switch-payload, size=2
+        0x0202, 0x0002,          // 4: sparse-switch-payload, size=2
         0x0005, 0x0000,          // 6: key 0 = 5
         0x0009, 0x0000,          // 8: key 1 = 9
         0xfffe, 0xffff,          // 10: target 0 = -2
@@ -333,14 +333,14 @@ TEST(DexInsn, RejectsBadPayload)
 {
     const std::vector<ca::u8> misaligned = codeUnits({
         0x0000,  // 0: nop
-        0x0100,  // 1: payload 标识落在奇地址
+        0x0101,  // 1: payload 标识落在奇地址
     });
     const auto misalignedResult = decodeInsns(viewOf(misaligned));
     ASSERT_TRUE(misalignedResult.is_err());
     EXPECT_EQ(misalignedResult.unwrap_err(), InsnError::BadPayload);
 
     const std::vector<ca::u8> truncated = codeUnits({
-        0x0100, 0x0002,  // size=2，但后面没有 target
+        0x0101, 0x0002,  // size=2，但后面没有 target
     });
     const auto truncatedResult = decodeInsns(viewOf(truncated));
     ASSERT_TRUE(truncatedResult.is_err());
