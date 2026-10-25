@@ -22,7 +22,7 @@ DEX（Android 字节码）读写库。保真 DOM 加逐条目 codec，返回值�
 - 新建/编辑注解：`addAnnotationItem` 入池去重，`setClassAnnotations`/`setFieldAnnotations`/`setMethodAnnotations`/`setParameterAnnotations` 按成员覆盖；重建时与源注解目录合并成生效目录后重新发射，未覆盖的成员沿用源条目。
 - 重命名类型、字段或方法：重建时按 DEX 排序键重排五张 ID 表与 class_defs，重新编码 type_list，并同步重写 class_data、指令、catch、debug_info、注解与 encoded_value 中的全部索引。
 - 指令与 encoded_value 精确编码：保留原始宽度与指令形态，不合并 `const` 变体。
-- 给 adapter 提供 const 取值域、索引上限、分支目标与地址重算原语。
+- 给 adapter 提供 const 取值域、索引上限、分支目标与地址重算原语，以及寄存器域读写（按格式校验 4/8/16 位）、寄存器批量平移/重映射、payload 构造器（packed/sparse-switch 与 fill-array-data，自包含存储）。
 - 未建模 map section 按原字节保留，可选择在重建时丢弃。
 
 041 的 container 字段只解析不重建；非空 link 区、APK 容器与 smali 文本层不在当前范围。索引移动而仍保留未建模 section 时，重建返回 `UnmappedRawSection`，需显式丢弃这些 section。

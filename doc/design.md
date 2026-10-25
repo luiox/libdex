@@ -74,7 +74,7 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 `encodeInsn`/`encodeInsns` 按 opcode 的定长格式写回，域宽溢出返回 `OperandOverflow`，payload 错位返回 `MisalignedPayload`。不自动插 nop、不改变形态。
 
-库还给 adapter 提供编辑原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`。label、CFG 与 const 形态选择仍归 adapter。
+库还给 adapter 提供编辑原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`，寄存器域的 `insnRegisterLayout`/`insnRegisterAt`/`setInsnRegister`/`setInsnRegisterRange`/`insnRegisterCeiling` 与批量 `shiftInsnRegisters`/`remapInsnRegisters`，以及 payload 构造器 `makePackedSwitchPayload`/`makeSparseSwitchPayload`/`makeFillArrayDataPayload`（返回自包含的 `PayloadInsn`，storage 移动不失效）。寄存器写入按格式域宽校验（4/8/16 位）；重映射对 range 格式要求映射在区间上是平移，不平移的重排需要改成 35c 形态，归 adapter。sparse 构造器要求 key 严格递增（ART 按二分查找解释）。payload 标识取规范值 0x0101/0x0202/0x0300。label、CFG 与 const 形态选择仍归 adapter。
 
 payload 不展开成 target 数组，保留源字节视图；switch target 相对 switch 指令地址。
 

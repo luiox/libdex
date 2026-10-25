@@ -124,8 +124,9 @@ struct Insn
 
 /// @brief 解码整个 insns 区。
 ///
-/// 0x0100/0x0200/0x0300 开头的偶数地址 code unit 识别为 payload；低字节为 0、
-/// 高字节非 payload 标识的 code unit 按 ART 的宽容度当作 nop（宽度 1）。
+/// 规范标识 0x0101/0x0202/0x0300 的偶数地址 code unit 识别为 payload；
+/// 低字节为 0、高字节非 payload 标识的 code unit 按 ART 的宽容度当作 nop
+/// （宽度 1）。
 Result<std::vector<Insn>, InsnError> decodeInsns(ByteSlice insns);
 
 /// @brief 按 opcode 的定长格式精确编码一条指令，追加到 @p out。
@@ -179,5 +180,85 @@ Result<void, InsnEncodeError> setInsnBranchTarget(Insn& insn, ca::i64 target) no
 /// 不修改 branchOffset：编辑指令后先记录目标下标，重算地址，再用
 /// @ref setInsnBranchTarget 逐条恢复。总长度超出 u32 返回 OperandOverflow。
 Result<void, InsnEncodeError> recomputeInsnAddresses(std::vector<Insn>& insns);
+
+/// @brief 指令的寄存器布局形态。
+enum class RegisterLayout : ca::u8 {
+    None,   ///< 不含寄存器（分支、payload 等）
+    List,   ///< @ref Insn::registers 前 registerCount 个逐个给出
+    Range,  ///< @ref Insn::startRegister 起连续 registerCount 个
+};
+
+/// @brief 指令的寄存器布局；按格式静态决定，不依赖解码出的值。
+RegisterLayout insnRegisterLayout(const Insn& insn) noexcept;
+
+/// @brief 布局内的寄存器个数（None 为 0）。
+ca::u32 insnRegisterTotal(const Insn& insn) noexcept;
+
+/// @brief 第 i 个寄存器编号（i < @ref insnRegisterTotal；Range 返回 startRegister+i）。
+ca::u16 insnRegisterAt(const Insn& insn, ca::u32 i) noexcept;
+
+/// @brief 改 List 布局的第 i 个寄存器，按格式域宽校验。
+///
+/// 非 List 布局或 i 越界返回 BadFormat；reg 超出该槽的 4/8/16 位域宽返回
+/// OperandOverflow。
+Result<void, InsnEncodeError> setInsnRegister(Insn& insn, ca::u32 i, ca::u16 reg) noexcept;
+
+/// @brief 改 Range 布局（3rc/4rcc）的寄存器区间。
+///
+/// start 占 16 位；count 占 8 位，超出返回 OperandOverflow。非 Range 布局
+/// 返回 BadFormat。
+Result<void, InsnEncodeError> setInsnRegisterRange(Insn& insn, ca::u16 start,
+                                                   ca::u16 count) noexcept;
+
+/// @brief 指令流占用的最大寄存器编号 +1；不含寄存器返回 0。
+///
+/// 改小 code_item.registers_size 前用它检查下界；不含对寄存器宽表
+/// （payload 等）的语义校验。
+ca::u32 insnRegisterCeiling(const std::vector<Insn>& insns) noexcept;
+
+/// @brief 全部寄存器编号加 delta（插入/删除低位寄存器时平移）。
+///
+/// 结果越出 0..65535 或所在槽的格式域宽返回 OperandOverflow，流保持已改到
+/// 出错处的状态。registers_size 不在此改，归调用方。
+Result<void, InsnEncodeError> shiftInsnRegisters(std::vector<Insn>& insns,
+                                                 ca::i32 delta) noexcept;
+
+/// @brief 按 mapping[旧编号] = 新编号 重排全部寄存器。
+///
+/// List 布局逐槽查表；Range 布局要求映射在区间上是平移（mapping[start+k]
+/// == mapping[start]+k），否则返回 BadFormat——不平移的重排需要改成 35c
+/// 形态，归 adapter。旧编号超出 mapping 长度返回 OperandOverflow。
+Result<void, InsnEncodeError> remapInsnRegisters(
+    std::vector<Insn>& insns, const std::vector<ca::u16>& mapping) noexcept;
+
+/// @brief 自包含的 payload 伪指令：storage 持有条目字节，insn.payloadData 指向其内部。
+///
+/// 把 insn 拼进指令流后须保持 storage 存活到编码完成；移动本结构不失效
+/// （vector 移动保持分配）。
+struct PayloadInsn
+{
+    std::vector<ca::u8> storage;
+    Insn insn;
+};
+
+/// @brief 构造 packed-switch payload；targets 相对 switch 指令的 code unit 偏移。
+///
+/// 条目数超过 size 域宽（宽度 4+2n 个 unit ≤ 65535）返回 OperandOverflow。
+Result<PayloadInsn, InsnEncodeError> makePackedSwitchPayload(
+    ca::i32 firstKey, const std::vector<ca::i32>& targets);
+
+/// @brief 构造 sparse-switch payload；keys 须严格递增（ART 按二分查找解释）。
+///
+/// keys 与 targets 个数不等返回 BadPayload，不递增返回 BadPayload，超宽返回
+/// OperandOverflow。
+Result<PayloadInsn, InsnEncodeError> makeSparseSwitchPayload(
+    const std::vector<ca::i32>& keys, const std::vector<ca::i32>& targets);
+
+/// @brief 构造 fill-array-data payload；data 长度必须是 elementWidth 的倍数。
+///
+/// elementWidth 为 0 且 data 非空返回 BadPayload；总宽度超出 size 域宽返回
+/// OperandOverflow。
+Result<PayloadInsn, InsnEncodeError> makeFillArrayDataPayload(
+    ca::u16 elementWidth, std::vector<ca::u8> data);
 
 }   // namespace dex::core
