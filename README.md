@@ -14,8 +14,8 @@ DEX（Android 字节码）读写库。保真 DOM 加逐条目 codec，返回值�
 - 追加或复用字符串（`internString`/`internUtf8`）；重建时按 UTF-16 重排字符串池并去重。
 - 追加或复用 type/proto/field/method 条目（`addType`/`addProto`/`addField`/`addMethod`）；proto 可按参数列表直建（`addProtoWithParams`，shorty 自动推导）。
 - 新建 type_list：`addTypeList` 入池去重，`setClassInterfaces` 覆盖类接口；重建时发射为新 type_list 并回填偏移。
-- 往已有类注入字段/方法（`BuildOptions::fieldAdditions`/`methodAdditions`）：成员写进 class_data，新增方法体参与 code 布局；static_values 按新字段顺序重建。
-- 新增类：向 `classDefs` 追加条目，再用成员注入填 class_data；接口列表用 `setClassInterfaces` 新建，注解可用覆盖 API 挂上，静态初值暂不支持显式赋值。
+- 往已有类注入字段/方法（`BuildOptions::fieldAdditions`/`methodAdditions`）：成员写进 class_data，新增方法体参与 code 布局；static_values 按新字段顺序重建，`setStaticFieldValue` 可给静态字段显式赋初值（宽度归一到最小，类别须匹配字段类型）。
+- 新增类：向 `classDefs` 追加条目，再用成员注入填 class_data；接口列表用 `setClassInterfaces` 新建，注解与静态初值都有覆盖 API。
 - 删除成员或类：`removedFields`/`removedMethods` 把成员移出 class_data（静态字段同时重建 static_values），类则直接从 `classDefs` erase；ID 表条目保留，被引用的条目变成外部引用。
 - 覆盖成员 access_flags（`fieldAccessFlags`/`methodAccessFlags`）：方法可切换直接/虚方法分组；字段不能改 static 位。
 - 剥离元数据：`stripDebugInfo` 丢弃全部 debug_info，`stripAnnotations` 丢弃注解族并清零 class_def 的 annotations_off。

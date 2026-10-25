@@ -564,6 +564,24 @@ public:
         return ownedAnnotations_;
     }
 
+    /// @brief 覆盖一个静态字段的初值；重建时替换源数组槽位或新增字段的默认值。
+    ///
+    /// 值的类别必须匹配字段类型：原始类型（Z/B/S/C/I/J/F/D）要求同类别值，
+    /// 引用类型（L/[）接受 Null/String/Type/Field/Method/Enum/MethodType/
+    /// MethodHandle/Array/Annotation；不匹配或索引悬垂返回
+    /// @ref ReadError::BadIndex。载荷宽度一律归一到最小可用（含布尔位）。
+    /// 目标必须是该类生效 class_data 中的静态字段（含注入字段、扣除删除），
+    /// 否则重建返回 `InvalidModel`；重复设置覆盖旧值。
+    Result<void, ReadError> setStaticFieldValue(ca::u32 classDefIdx, ca::u32 fieldIdx,
+                                                const EncodedValue& value);
+
+    /// @brief 逐类静态初值覆盖表（classDefIdx → fieldIdx → 值），供 builder 用。
+    const std::map<ca::u32, std::map<ca::u32, EncodedValue>>& staticFieldValueEdits()
+        const noexcept
+    {
+        return staticValueEdits_;
+    }
+
     /// @brief 自有 type_list 的零拷贝视图；下标越界返回 size=0、entries=nullptr。
     ///
     /// 视图指向模型自有字节，在模型存活且不再 addTypeList 期间有效；
@@ -699,6 +717,8 @@ private:
     /// 自有注解项池（按内容去重）与逐类覆盖表。
     std::deque<AnnotationItem> ownedAnnotationItems_;
     std::map<ca::u32, AnnotationAttachments> ownedAnnotations_;
+    /// 静态初值覆盖：classDefIdx → fieldIdx → 值（已归一化）。
+    std::map<ca::u32, std::map<ca::u32, EncodedValue>> staticValueEdits_;
     ParseState state_ = ParseState::Validated;
     Diagnostics diag_;
 
