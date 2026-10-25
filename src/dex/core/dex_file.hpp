@@ -148,11 +148,17 @@ struct TypeId
 };
 
 /// @brief proto_id_item：shorty + 返回类型 + 参数 type_list 偏移。
+///
+/// @ref ownedParameters 为 true 时参数取 @ref DexFile 自有 type_list 池的
+/// @ref ownedParametersIdx 条目，@ref parametersOff 被忽略；@ref buildDex 会把
+/// 自有列表发射为新 type_list 并回填真实偏移。
 struct ProtoId
 {
     ca::u32 shortyIdx = 0;
     ca::u32 returnTypeIdx = 0;
     ca::u32 parametersOff = 0;
+    ca::u32 ownedParametersIdx = 0;  ///< 自有 type_list 池下标；ownedParameters 为 false 时忽略
+    bool ownedParameters = false;    ///< 参数是否来自自有池而非源文件偏移
 };
 
 /// @brief field_id_item：声明类 + 类型 + 名字。
@@ -172,6 +178,10 @@ struct MethodId
 };
 
 /// @brief class_def_item：类身份绑定 class_idx（type 索引）。
+///
+/// @ref ownedInterfaces 为 true 时接口列表取 @ref DexFile 自有 type_list 池的
+/// @ref ownedInterfacesIdx 条目，@ref interfacesOff 被忽略；@ref buildDex 会把
+/// 自有列表发射为新 type_list 并回填真实偏移。
 struct ClassDef
 {
     ca::u32 classIdx = 0;
@@ -182,6 +192,8 @@ struct ClassDef
     ca::u32 annotationsOff = 0;  ///< 0 表示无注解目录
     ca::u32 classDataOff = 0;    ///< 0 表示无类数据（标记接口）
     ca::u32 staticValuesOff = 0; ///< 0 表示无静态初值
+    ca::u32 ownedInterfacesIdx = 0;  ///< 自有 type_list 池下标；ownedInterfaces 为 false 时忽略
+    bool ownedInterfaces = false;    ///< 接口列表是否来自自有池而非源文件偏移
 };
 
 /// @brief call_site_id_item：指向一个 encoded_array_item。
@@ -453,6 +465,38 @@ public:
     Result<ca::u32, ReadError> addMethod(ca::u32 classIdx, ca::u32 protoIdx,
                                          ca::u32 nameIdx);
 
+    // ---- 自有 type_list ----
+    //
+    // @ref addProto 与类接口原本只能引用源文件已有的 type_list 偏移；自有池
+    // 允许新建参数列表与接口列表，@ref buildDex 发射为新的 type_list 条目并
+    // 回填真实偏移。池内按内容去重；与源列表内容相同时仍会各自发射（规范
+    // 允许重复条目，二次重建保持固定点）。
+
+    /// @brief 追加自有 type_list 并返回池下标；内容重复时复用已有下标。
+    ///
+    /// @p typeIdxs 每项必须是当前 type_ids 的合法索引，越界返回
+    /// @ref ReadError::BadIndex。空列表不占池位，返回 @ref kNoIndex。
+    Result<ca::u32, ReadError> addTypeList(const std::vector<ca::u32>& typeIdxs);
+
+    /// @brief 按返回类型与参数列表追加或复用 proto，shorty 自动推导并 intern。
+    ///
+    /// 与既有 proto 按（返回类型，参数内容）比较，相同则复用。参数类型不能
+    /// 是 void；shorty 里对象与数组都记 'L'。
+    Result<ca::u32, ReadError> addProtoWithParams(ca::u32 returnTypeIdx,
+                                                  const std::vector<ca::u32>& parameters);
+
+    /// @brief 覆盖 class_def 的接口列表；重建时生成新 type_list。
+    ///
+    /// 覆盖后 @ref ClassDef::interfacesOff 被忽略；空列表等价于无接口。
+    Result<void, ReadError> setClassInterfaces(ca::u32 classDefIdx,
+                                               const std::vector<ca::u32>& interfaces);
+
+    /// @brief 自有 type_list 的零拷贝视图；下标越界返回 size=0、entries=nullptr。
+    ///
+    /// 视图指向模型自有字节，在模型存活且不再 addTypeList 期间有效；
+    /// @ref protoParameters 与 @ref interfaces 的 owned 分支也走这里。
+    TypeListSpan ownedTypeListSpan(ca::u32 index) const noexcept;
+
     // ---- lazy 解码：类型与列表 ----
 
     /// @brief 类型描述符（type_id → string_id → string_data）。
@@ -572,10 +616,13 @@ private:
     void refreshInternIndex();
 
     ca::core::Bytes sourceBytes_;  ///< 源字节存储（自有 copy 或静态借用）
-    /// 自有 string_data_item 块；deque 保证追加时既有视图地址不变。
+    /// 自有 string_data_item 块；deque保证追加时既有视图地址不变。
     std::deque<std::vector<ca::u8>> ownedStrings_;
     std::unordered_map<std::string, ca::u32> internIndex_;
     ca::usize internIndexedCount_ = 0;
+    /// 自有 type_list 池：已编码的 type_list 字节（u32 计数 + u16 LE 条目），
+    /// 由 addTypeList/addProtoWithParams/setClassInterfaces 填充。
+    std::deque<std::vector<ca::u8>> ownedTypeLists_;
     ParseState state_ = ParseState::Validated;
     Diagnostics diag_;
 

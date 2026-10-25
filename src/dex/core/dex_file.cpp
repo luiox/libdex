@@ -380,6 +380,193 @@ Result<ca::u32, ReadError> DexFile::addMethod(ca::u32 classIdx, ca::u32 protoIdx
     return Ok(static_cast<ca::u32>(methodIds.size() - 1));
 }
 
+namespace {
+
+/// shorty 字符：对象与数组都记 'L'；描述符非法返回 0。
+char shortyCharOf(std::string_view descriptor) noexcept
+{
+    switch (descriptor.empty() ? '\0' : descriptor[0]) {
+        case 'Z':
+        case 'B':
+        case 'S':
+        case 'C':
+        case 'I':
+        case 'J':
+        case 'F':
+        case 'D':
+        case 'V':
+        case 'L':
+        case '[':
+            return descriptor[0] == '[' ? 'L' : descriptor[0];
+        default:
+            return '\0';
+    }
+}
+
+void appendU16Le(std::vector<ca::u8>& out, ca::u16 value)
+{
+    out.push_back(static_cast<ca::u8>(value & 0xFFu));
+    out.push_back(static_cast<ca::u8>(value >> 8));
+}
+
+ca::u32 readU32Le(const ca::u8* p) noexcept
+{
+    return static_cast<ca::u32>(p[0]) | (static_cast<ca::u32>(p[1]) << 8) |
+           (static_cast<ca::u32>(p[2]) << 16) | (static_cast<ca::u32>(p[3]) << 24);
+}
+
+}   // namespace
+
+Result<ca::u32, ReadError> DexFile::addTypeList(const std::vector<ca::u32>& typeIdxs)
+{
+    if (typeIdxs.empty()) {
+        return Ok(kNoIndex);
+    }
+    std::vector<ca::u8> encoded;
+    encoded.reserve(4u + typeIdxs.size() * 2u);
+    encoded.push_back(0);
+    encoded.push_back(0);
+    encoded.push_back(0);
+    encoded.push_back(0);
+    for (ca::u32 typeIdx : typeIdxs) {
+        if (typeIdx >= typeIds.size()) {
+            return Err(ReadError::BadIndex);
+        }
+        appendU16Le(encoded, static_cast<ca::u16>(typeIdx));
+    }
+    encoded[0] = static_cast<ca::u8>(typeIdxs.size() & 0xFFu);
+    encoded[1] = static_cast<ca::u8>((typeIdxs.size() >> 8) & 0xFFu);
+    encoded[2] = static_cast<ca::u8>((typeIdxs.size() >> 16) & 0xFFu);
+    encoded[3] = static_cast<ca::u8>((typeIdxs.size() >> 24) & 0xFFu);
+    for (ca::u32 i = 0; i < ownedTypeLists_.size(); ++i) {
+        if (ownedTypeLists_[i] == encoded) {
+            return Ok(i);
+        }
+    }
+    ownedTypeLists_.push_back(std::move(encoded));
+    return Ok(static_cast<ca::u32>(ownedTypeLists_.size() - 1));
+}
+
+TypeListSpan DexFile::ownedTypeListSpan(ca::u32 index) const noexcept
+{
+    if (index >= ownedTypeLists_.size() || ownedTypeLists_[index].size() < 4u) {
+        return TypeListSpan{};
+    }
+    const std::vector<ca::u8>& bytes = ownedTypeLists_[index];
+    TypeListSpan out;
+    out.size = readU32Le(bytes.data());
+    out.entries = bytes.data() + 4u;
+    return out;
+}
+
+Result<ca::u32, ReadError> DexFile::addProtoWithParams(ca::u32 returnTypeIdx,
+                                                       const std::vector<ca::u32>& parameters)
+{
+    if (returnTypeIdx >= typeIds.size()) {
+        return Err(ReadError::BadIndex);
+    }
+
+    const auto shortyOf = [&](ca::u32 typeIdx,
+                              bool allowVoid) -> Result<char, ReadError> {
+        Result<jstr::MUtf8StringRef, ReadError> descriptor = typeDescriptor(typeIdx);
+        if (descriptor.is_err()) {
+            return Err(descriptor.unwrap_err());
+        }
+        const char ch = shortyCharOf(descriptor.unwrap().as_std_view());
+        if (ch == '\0' || (ch == 'V' && !allowVoid)) {
+            return Err(ReadError::BadIndex);  // 描述符不是合法类型或参数为 void
+        }
+        return Ok(ch);
+    };
+
+    std::string shorty;
+    const Result<char, ReadError> returnChar = shortyOf(returnTypeIdx, true);
+    if (returnChar.is_err()) {
+        return Err(returnChar.unwrap_err());
+    }
+    shorty.push_back(returnChar.unwrap());
+    for (ca::u32 param : parameters) {
+        if (param >= typeIds.size()) {
+            return Err(ReadError::BadIndex);
+        }
+        const Result<char, ReadError> ch = shortyOf(param, false);
+        if (ch.is_err()) {
+            return Err(ch.unwrap_err());
+        }
+        shorty.push_back(ch.unwrap());
+    }
+
+    // 与全部既有 proto 按（返回类型，参数内容）比较；自有与源参数都参与。
+    const auto matchesExisting = [&](const ProtoId& proto) -> bool {
+        if (proto.returnTypeIdx != returnTypeIdx) {
+            return false;
+        }
+        TypeListSpan span;
+        if (proto.ownedParameters) {
+            // 池内不存在空列表；entries 为空说明池下标悬垂。
+            span = ownedTypeListSpan(proto.ownedParametersIdx);
+            if (span.entries == nullptr) {
+                return false;
+            }
+        } else {
+            Result<TypeListSpan, ReadError> list = typeList(proto.parametersOff);
+            if (list.is_err()) {
+                return false;  // 源条目损坏时不作为复用目标
+            }
+            span = list.unwrap();
+        }
+        if (span.size != parameters.size()) {
+            return false;
+        }
+        for (ca::u32 i = 0; i < span.size; ++i) {
+            if (span.at(i) != parameters[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    for (ca::u32 i = 0; i < protoIds.size(); ++i) {
+        if (matchesExisting(protoIds[i])) {
+            return Ok(i);
+        }
+    }
+
+    const Result<ca::u32, ReadError> interned = internUtf8(shorty);
+    if (interned.is_err()) {
+        return Err(interned.unwrap_err());
+    }
+    Result<ca::u32, ReadError> ownedIdx = Ok(kNoIndex);
+    if (!parameters.empty()) {
+        ownedIdx = addTypeList(parameters);
+        if (ownedIdx.is_err()) {
+            return Err(ownedIdx.unwrap_err());
+        }
+    }
+    if (protoIds.size() >= kIdTableLimit) {
+        return Err(ReadError::IdTableFull);
+    }
+    protoIds.push_back(ProtoId{interned.unwrap(), returnTypeIdx, 0, ownedIdx.unwrap(),
+                               ownedIdx.unwrap() != kNoIndex});
+    return Ok(static_cast<ca::u32>(protoIds.size() - 1));
+}
+
+Result<void, ReadError> DexFile::setClassInterfaces(ca::u32 classDefIdx,
+                                                    const std::vector<ca::u32>& interfaces)
+{
+    if (classDefIdx >= classDefs.size()) {
+        return Err(ReadError::BadIndex);
+    }
+    const Result<ca::u32, ReadError> owned = addTypeList(interfaces);
+    if (owned.is_err()) {
+        return Err(owned.unwrap_err());
+    }
+    ClassDef& def = classDefs[classDefIdx];
+    def.ownedInterfacesIdx = owned.unwrap();
+    def.ownedInterfaces = def.ownedInterfacesIdx != kNoIndex;
+    return Ok();
+}
+
 void DexFile::refreshInternIndex()
 {
     internIndex_.clear();
@@ -479,7 +666,15 @@ Result<TypeListSpan, ReadError> DexFile::protoParameters(ca::u32 protoIdx)
     if (protoIdx >= protoIds.size()) {
         return Err(ReadError::BadIndex);
     }
-    return typeList(protoIds[protoIdx].parametersOff);
+    const ProtoId& proto = protoIds[protoIdx];
+    if (proto.ownedParameters) {
+        const TypeListSpan span = ownedTypeListSpan(proto.ownedParametersIdx);
+        if (span.entries == nullptr) {
+            return Err(ReadError::BadIndex);  // 池下标悬垂
+        }
+        return Ok(span);
+    }
+    return typeList(proto.parametersOff);
 }
 
 Result<TypeListSpan, ReadError> DexFile::interfaces(ca::u32 classDefIdx)
@@ -487,7 +682,15 @@ Result<TypeListSpan, ReadError> DexFile::interfaces(ca::u32 classDefIdx)
     if (classDefIdx >= classDefs.size()) {
         return Err(ReadError::BadIndex);
     }
-    return typeList(classDefs[classDefIdx].interfacesOff);
+    const ClassDef& def = classDefs[classDefIdx];
+    if (def.ownedInterfaces) {
+        const TypeListSpan span = ownedTypeListSpan(def.ownedInterfacesIdx);
+        if (span.entries == nullptr) {
+            return Err(ReadError::BadIndex);  // 池下标悬垂
+        }
+        return Ok(span);
+    }
+    return typeList(def.interfacesOff);
 }
 
 Result<jstr::MUtf8StringRef, ReadError> DexFile::fieldClassDescriptor(ca::u32 fieldIdx)
