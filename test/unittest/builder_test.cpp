@@ -1050,6 +1050,150 @@ TEST(DexBuilder, AddsStaticFieldAndExtendsStaticValues)
     EXPECT_EQ(again.unwrap(), rebuilt);
 }
 
+TEST(DexBuilder, RejectsStaticFlagMismatchOnFieldAddition)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    ASSERT_NE(file, nullptr);
+    const auto name = file->internUtf8("gen");
+    ASSERT_TRUE(name.is_ok());
+    const auto fieldIdx = file->addField(1, 0, name.unwrap());
+    ASSERT_TRUE(fieldIdx.is_ok());
+
+    FieldAddition add;
+    add.classDefIdx = 0;
+    add.fieldIdx = fieldIdx.unwrap();
+    add.accessFlags = 0x1;  // public：缺 ACC_STATIC，与 isStatic=true 矛盾
+    add.isStatic = true;
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(add);
+    const auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_err());
+    EXPECT_EQ(built.unwrap_err(), WriteError::InvalidModel);
+}
+
+namespace {
+
+/// 构造一个尾部默认值被省略的 static_values：先把静态字段建出来，
+/// 再把产物里 encoded_array_item 的 ULEB 长度改回 0（checksum 只告警）。
+std::unique_ptr<DexFile> makeShortStaticValuesDex(ca::u32* fieldIdx)
+{
+    std::unique_ptr<DexFile> file = readFixture(dex_test::makeHelloDex());
+    if (file == nullptr) {
+        return nullptr;
+    }
+    const auto name = file->internUtf8("gen");
+    const auto added = file->addField(1, 0, name.unwrap());
+    if (name.is_err() || added.is_err()) {
+        return nullptr;
+    }
+
+    FieldAddition add;
+    add.classDefIdx = 0;
+    add.fieldIdx = added.unwrap();
+    add.accessFlags = 0x9;
+    add.isStatic = true;
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(add);
+    auto built = buildDex(*file, options);
+    if (built.is_err()) {
+        return nullptr;
+    }
+    std::vector<ca::u8> bytes = std::move(built).unwrap();
+    *fieldIdx = added.unwrap();
+
+    auto reparsed = readDex(dex_test::asSlice(bytes));
+    if (reparsed.is_err()) {
+        return nullptr;
+    }
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    const ca::u32 valuesOff = second->classDefs[0].staticValuesOff;
+    // encoded_array_item 的 size 从 1 压回 0：静态字段的初值按尾部默认值省略。
+    // 只改 ULEB 长度字节本身，不碰紧随其后的内容。
+    bytes[valuesOff] = 0;
+    // 重建后字符串/字段表已重排，需要重读才能拿到新 field 索引。
+    auto reread = readDex(dex_test::asSlice(bytes));
+    if (reread.is_err()) {
+        return nullptr;
+    }
+    std::unique_ptr<DexFile> third = std::move(reread).unwrap();
+    const auto data = third->classData(0);
+    if (data.is_err() || data.unwrap() == nullptr ||
+        data.unwrap()->staticFields.empty()) {
+        return nullptr;
+    }
+    *fieldIdx = data.unwrap()->staticFields[0].fieldIndex;
+    return third;
+}
+
+}   // namespace
+
+TEST(DexBuilder, RemovesTrailingStaticFieldOmittedFromValues)
+{
+    ca::u32 fieldIdx = 0;
+    std::unique_ptr<DexFile> file = makeShortStaticValuesDex(&fieldIdx);
+    ASSERT_NE(file, nullptr);
+    const auto values = file->staticValues(0);
+    ASSERT_TRUE(values.is_ok());
+    ASSERT_NE(values.unwrap(), nullptr);
+    ASSERT_EQ(values.unwrap()->values.size(), 0u);  // 尾部默认值已省略
+
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.removedFields.push_back(fieldIdx);
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    EXPECT_TRUE(data.unwrap()->staticFields.empty());
+}
+
+TEST(DexBuilder, ExtendsStaticValuesOmittingTrailingDefaults)
+{
+    ca::u32 fieldIdx = 0;
+    std::unique_ptr<DexFile> file = makeShortStaticValuesDex(&fieldIdx);
+    ASSERT_NE(file, nullptr);
+
+    const auto name = file->internUtf8("gen2");
+    ASSERT_TRUE(name.is_ok());
+    const auto added = file->addField(1, 0, name.unwrap());
+    ASSERT_TRUE(added.is_ok());
+
+    FieldAddition add;
+    add.classDefIdx = 0;
+    add.fieldIdx = added.unwrap();
+    add.accessFlags = 0x9;
+    add.isStatic = true;
+    BuildOptions options;
+    options.keepUnknownSections = false;
+    options.fieldAdditions.push_back(add);
+    auto built = buildDex(*file, options);
+    ASSERT_TRUE(built.is_ok()) << to_string(built.unwrap_err());
+
+    auto reparsed = readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> second = std::move(reparsed).unwrap();
+    const auto data = second->classData(0);
+    ASSERT_TRUE(data.is_ok());
+    ASSERT_NE(data.unwrap(), nullptr);
+    ASSERT_EQ(data.unwrap()->staticFields.size(), 2u);
+    const auto values = second->staticValues(0);
+    ASSERT_TRUE(values.is_ok());
+    ASSERT_NE(values.unwrap(), nullptr);
+    ASSERT_EQ(values.unwrap()->values.size(), 2u);
+    EXPECT_EQ(values.unwrap()->values[0].type, EncodedValueType::Int);
+    EXPECT_EQ(values.unwrap()->values[0].integer, 0);
+    EXPECT_EQ(values.unwrap()->values[1].type, EncodedValueType::Int);
+    EXPECT_EQ(values.unwrap()->values[1].integer, 0);
+}
+
 TEST(DexBuilder, RejectsInvalidMemberAdditions)
 {
     const auto expectInvalid = [](std::unique_ptr<DexFile> file, BuildOptions options) {

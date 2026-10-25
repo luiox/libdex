@@ -856,12 +856,19 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     }
 
     // ---- 新增成员：校验重复定义，挂到对应 class_data 的副本 ----
+    constexpr ca::u32 kAccPrivate = 0x2u;
+    constexpr ca::u32 kAccStatic = 0x8u;
+    constexpr ca::u32 kAccConstructor = 0x10000u;
     std::unordered_map<ca::u32, std::vector<const FieldAddition*>> fieldsByClass;
     std::unordered_map<ca::u32, std::vector<const MethodAddition*>> methodsByClass;
     std::unordered_set<ca::u32> addedFields;
     std::unordered_set<ca::u32> addedMethods;
     for (const FieldAddition& add : options.fieldAdditions) {
         if (add.classDefIdx >= dex.classCount() || add.fieldIdx >= dex.fieldCount()) {
+            return Err(WriteError::InvalidModel);
+        }
+        // static/instance 分组由 isStatic 决定，写入的标志位必须一致。
+        if (add.isStatic != ((add.accessFlags & kAccStatic) != 0)) {
             return Err(WriteError::InvalidModel);
         }
         if (definedFields.count(add.fieldIdx) != 0 ||
@@ -922,9 +929,6 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
         return edit;
     };
-    constexpr ca::u32 kAccPrivate = 0x2u;
-    constexpr ca::u32 kAccStatic = 0x8u;
-    constexpr ca::u32 kAccConstructor = 0x10000u;
     for (const auto& entry : fieldsByClass) {
         ClassData& edit = ensureEdit(entry.first);
         for (const FieldAddition* add : entry.second) {
@@ -1021,8 +1025,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
         const EncodedArrayItem& array = *fetched.unwrap();
         const ca::usize originalCount = original == nullptr ? 0 : original->staticFields.size();
-        if (array.values.size() != originalCount) {
-            return Err(WriteError::InvalidModel);  // 源数组与静态字段数不一致
+        // 规范允许省略尾部的默认值槽位；数组比静态字段还长才是模型不自洽。
+        if (array.values.size() > originalCount) {
+            return Err(WriteError::InvalidModel);
         }
 
         struct StaticSlot
@@ -1052,15 +1057,16 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         EncodedArrayItem synthesized;
         synthesized.values.reserve(slots.size());
         for (const StaticSlot& slot : slots) {
-            if (slot.fromOriginal) {
+            if (slot.fromOriginal && slot.valuePos < array.values.size()) {
                 synthesized.values.push_back(array.values[slot.valuePos]);
-            } else {
-                Result<EncodedValue, WriteError> value = defaultStaticValue(slot.fieldIdx);
-                if (value.is_err()) {
-                    return Err(value.unwrap_err());
-                }
-                synthesized.values.push_back(value.unwrap());
+                continue;
             }
+            // 新增字段与被省略的尾部槽位都填类型默认值。
+            Result<EncodedValue, WriteError> value = defaultStaticValue(slot.fieldIdx);
+            if (value.is_err()) {
+                return Err(value.unwrap_err());
+            }
+            synthesized.values.push_back(value.unwrap());
         }
         Result<std::vector<ca::u8>, WriteError> encoded =
             indicesChanged ? encodeArrayRemapped(synthesized, maps)
