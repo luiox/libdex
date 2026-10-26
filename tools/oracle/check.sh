@@ -20,6 +20,10 @@
 # 按版本缓存；baksmali 固定为 BAKSMALI_VERSION，避免上游漂移改变输出。
 set -eu
 
+# git-bash/MSYS 会把 /data/... 这类设备伪路径改写成宿主机路径；art 模式的
+# adb push/shell 参数全是设备侧路径，关闭改写。非 MSYS 环境该变量无效。
+export MSYS_NO_PATHCONV=1
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 BAKSMALI_VERSION=${BAKSMALI_VERSION:-2.5.2}
 MODE=${LIBDEX_ORACLE_MODE:-baksmali}
