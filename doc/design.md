@@ -8,7 +8,7 @@ libdex 是 DEX 字节核：输入单个 `.dex`，输出保真 DOM 与写回字�
 
 ## 分层
 
-库只有两层：保真 DOM 与逐条目 codec，不定义方法体 AST。
+库只有两层：保真 DOM 与逐条目 codec，不定义方法体 AST。条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；`dex_file` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
 
 `const/4`、`const/16`、`const-string/jumbo` 这类形态选择属于使用方 adapter。库按调用方给定的 opcode 精确编码，不做合并或提升；不同需求对应不同 adapter，库不绑定其中一种。
 
@@ -104,7 +104,9 @@ type 层只解析字段类型与方法描述符，不查 ID 表、不解析泛�
 
 baksmali 不覆盖未建模 section，也不等于 ART 接受。仲裁规则（ART 终审、规范裁决工具分歧、环境缺席明确 skip）见 [tools/oracle/README.md](../tools/oracle/README.md)；`check.sh` 按 `LIBDEX_ORACLE_MODE` 分派 baksmali/redex/art 三种模式，redex 与 art 在对应工具缺席时明确 skip。
 
-真实语料不入库，通过 `LIBDEX_REAL_DEX_DIR` 注入；第三方 APK 只允许哈希清单与复现脚本。
+redex 模式是双边管线对比：原文与重建产物走同一 ReDex 优化管线，管线自身的改写（内联、DCE 等）对两侧等价生效而抵消，两侧产物反汇编后必须一致——单边对比会被管线自身改写污染。CI（Linux）用 Homebrew bottle 装 redex，并用 runner 预装 Android SDK 的 d8 生成语料跑 baksmali/redex 对拍；art 的常驻设备配方见 oracle README。
+
+真实语料不入库，通过 `LIBDEX_REAL_DEX_DIR` 注入；第三方 APK 只允许哈希清单与复现脚本。040/041 由设备提取（`tools/corpus/extract_art.sh`），container 语义的评估与待决问题见 [corpus_040_041_notes](corpus_040_041_notes.md)。
 
 ## 不做
 

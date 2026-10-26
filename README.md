@@ -56,7 +56,11 @@ tools/oracle/check.sh /tmp/hello.dex
 for f in "$LIBDEX_REAL_DEX_DIR"/*.dex; do tools/oracle/check.sh "$f"; done
 ```
 
-CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍。baksmali 通过不等于 ART 接受，最终以 AOSP 规范为准。
+`check.sh` 另有两个环境依赖的 oracle 模式：`LIBDEX_ORACLE_MODE=redex` 让原文与重建产物走同一 ReDex 优化管线后反汇编比较（redex 可 `brew install redex` 或用 `LIBDEX_REDEX_BIN` 指定），`LIBDEX_ORACLE_MODE=art` 把两者推到 adb 设备由 dex2oat 验收（仲裁规则见 [tools/oracle/README.md](tools/oracle/README.md)）。对应工具缺席时明确 skip。
+
+语料：`tools/corpus/gen_corpus.sh` 用本机 Android SDK 的 d8 生成 035–039 样本；040/041 由 root 可读设备提取（`tools/corpus/extract_art.sh`）。产物不入库，清单入库。
+
+CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍；Ubuntu 另跑 d8 语料上的 baksmali 对拍与 redex 对拍（观察期）。baksmali 通过不等于 ART 接受，最终以 AOSP 规范为准。
 
 ## 示例
 
