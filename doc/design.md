@@ -42,7 +42,7 @@ lazy：string_data、class_data、code_item、type_list、注解族、encoded_ar
 
 增量模式的前提是**编辑不触及 ID 表**：`stringIds`/`typeIds`/`protoIds`/`fieldIds`/`methodIds` 的条目数与内容必须和源一致。检测到表级编辑（intern 过字符串、`addType`/`addProto`/`addField`/`addMethod` 追加过条目、`addProtoWithParams` 用过自有参数表）返回 `NotIncremental`，调用方应改走 canonical。`classDefs` 允许 erase（类删除）；手工改写 ID 表字段值是调用方违约，产物未定义。
 
-- **发现**：从 DOM 引用图出发枚举全部源条目（含共享去重），按源偏移排序；条目之间的空隙作为 gap 原样保留——canonical 会丢弃的「不可达条目」与未知填充，增量模式不丢。
+- **发现**：从 DOM 引用图出发枚举全部源条目（含共享去重），再对六类自描述段（type_list、annotation set/ref list、annotation_item、encoded_array、debug_info）按 map 声明的段范围逐项走查补齐——工具会发射无人引用的孤儿条目（如 d8 为无注解类生成的空 annotation_set_item），漏掉它们会改变 map 计数与 checksum；条目间按 kind 对齐（如 type_list 的 4 字节），段尾对齐 padding 交给 gap。按源偏移排序；条目之间的空隙作为 gap 原样保留——canonical 会丢弃的「不可达条目」与未知填充，增量模式不丢。
 - **发射集合**：编辑后引用图仍可达的条目。被编辑断开引用的源条目删除（成员删除后无人引用的 code_item、类删除、`stripDebugInfo`/`stripAnnotations`、注解清空后的孤儿 set）。
 - **透传判定**：未被编辑且内部引用的偏移映射不变的条目按源字节透传，不解码内容、不重编码。string_data、debug_info、指令区、annotation_item、encoded_array 与三张纯索引 ID 表天然没有偏移引用，永远透传（除非删除）；含偏移引用的定长条目（string_ids、proto_ids、class_defs、call_site_ids、注解 set/ref_list/directory、code_item 的 debug_info_off）按新映射重发射；class_data 的 code_off 是 ULEB 变长，偏移变化触发重编码。
 - **布局**：条目与 gap 按源偏移顺序线性平移；新条目（替换方法体、注入方法体、自有 type_list、注解覆盖、物化静态初值）追加在同类源条目之后，无同类时落在 map_list 之前；4 对齐条目在前导 gap 尾补零。ULEB 宽度随偏移变化会再次改变 class_data 大小，布局迭代至多 4 轮求固定点，不收敛返回 `Unencodable`。
@@ -88,7 +88,7 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 `encodeInsn`/`encodeInsns` 按 opcode 的定长格式写回，域宽溢出返回 `OperandOverflow`，payload 错位返回 `MisalignedPayload`。不自动插 nop、不改变形态。
 
-库还给 adapter 提供编辑原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`，寄存器域的 `insnRegisterLayout`/`insnRegisterAt`/`setInsnRegister`/`setInsnRegisterRange`/`insnRegisterCeiling` 与批量 `shiftInsnRegisters`/`remapInsnRegisters`，以及 payload 构造器 `makePackedSwitchPayload`/`makeSparseSwitchPayload`/`makeFillArrayDataPayload`（返回自包含的 `PayloadInsn`，storage 移动不失效）。寄存器写入按格式域宽校验（4/8/16 位）；重映射对 range 格式要求映射在区间上是平移，不平移的重排需要改成 35c 形态，归 adapter。sparse 构造器要求 key 严格递增（ART 按二分查找解释）。payload 标识取规范值 0x0101/0x0202/0x0300。label、CFG 与 const 形态选择仍归 adapter。
+库还给 adapter 提供编辑原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`，寄存器域的 `insnRegisterLayout`/`insnRegisterAt`/`setInsnRegister`/`setInsnRegisterRange`/`insnRegisterCeiling` 与批量 `shiftInsnRegisters`/`remapInsnRegisters`，以及 payload 构造器 `makePackedSwitchPayload`/`makeSparseSwitchPayload`/`makeFillArrayDataPayload`（返回自包含的 `PayloadInsn`，storage 移动不失效）。寄存器写入按格式域宽校验（4/8/16 位）；重映射对 range 格式要求映射在区间上是平移，不平移的重排需要改成 35c 形态，归 adapter。sparse 构造器要求 key 严格递增（ART 按二分查找解释）。payload 标识取规范值 0x0100/0x0200/0x0300——0x0101 是 `move vA,vB` 的合法编码，不能当 packed-switch 标识（此前版本曾写反，真实语料的 move 指令被误判 payload 而报错）。label、CFG 与 const 形态选择仍归 adapter。
 
 payload 不展开成 target 数组，保留源字节视图；switch target 相对 switch 指令地址。
 
@@ -102,7 +102,7 @@ type 层只解析字段类型与方法描述符，不查 ID 表、不解析泛�
 
 文本 oracle 是 baksmali 2.5.2（dexlib2）：原文件与 `buildDex` 产物分别反汇编，smali 文本必须一致。canonical 重建按规范重排 method_ids 后，class_data 的方法顺序会变；方法块顺序不是语义，脚本按块排序后再 diff，字段、注解与指令文本仍逐字节比较。它覆盖指令、try/catch、注解、静态初值、debug 行号与访问标志。
 
-baksmali 不覆盖未建模 section，也不等于 ART 接受；与 AOSP DEX 规范冲突时以规范为准。ReDex 与 ART 实机验证尚未接线。
+baksmali 不覆盖未建模 section，也不等于 ART 接受。仲裁规则（ART 终审、规范裁决工具分歧、环境缺席明确 skip）见 [tools/oracle/README.md](../tools/oracle/README.md)；`check.sh` 按 `LIBDEX_ORACLE_MODE` 分派 baksmali/redex/art 三种模式，redex 与 art 在对应工具缺席时明确 skip。
 
 真实语料不入库，通过 `LIBDEX_REAL_DEX_DIR` 注入；第三方 APK 只允许哈希清单与复现脚本。
 

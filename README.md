@@ -10,6 +10,7 @@ DEX（Android 字节码）读写库。保真 DOM 加逐条目 codec，返回值�
 
 - 读取 035–041：header、ID 表、class_data、code_item、try/catch、注解、静态初值、debug_info、call_site/method_handle。
 - 未修改写回原字节透传；`buildDex` 重新排布为 canonical 布局，回填偏移并重算 checksum/SHA-1。
+- 增量布局：`BuildOptions::incremental` 保留源布局、未编辑条目源字节透传，只重编码被改条目（编辑不得触及 ID 表，详见 `doc/design.md`「增量重建」）。
 - 按 method_idx 替换方法体，供反混淆、审计与重写使用。
 - 追加或复用字符串（`internString`/`internUtf8`）；重建时按 UTF-16 重排字符串池并去重。
 - 追加或复用 type/proto/field/method 条目（`addType`/`addProto`/`addField`/`addMethod`）；proto 可按参数列表直建（`addProtoWithParams`，shorty 自动推导）。

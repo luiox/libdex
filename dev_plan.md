@@ -25,24 +25,27 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 - `buildDex` 入口检查 ID 表容量与表内索引；悬垂索引、非法 method_handle 与零 call_site 返回 `InvalidModel`。
 - adapter 原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`。
 - adapter 原语（第二批）：寄存器域读写（`insnRegisterLayout`/`insnRegisterAt`/`setInsnRegister`/`setInsnRegisterRange`/`insnRegisterCeiling`）、批量平移与重映射（`shiftInsnRegisters`/`remapInsnRegisters`）、payload 构造器（`makePackedSwitchPayload`/`makeSparseSwitchPayload`/`makeFillArrayDataPayload`）。
-- payload 标识修正为规范值：packed-switch 0x0101、sparse-switch 0x0202（此前误用 0x0100/0x0200，产物会被 ART 拒收，真实文件按未定义操作码报错）。
-- baksmali 2.5.2 文本对拍：合成 fixture、level1（5528 B）与 level2（719560 B）在方法块顺序规范化后 diff 均为空。
+- payload 标识为规范值：packed-switch 0x0100、sparse-switch 0x0200、fill-array-data 0x0300（更正：此前记录的 0x0101/0x0202 本身才是错误值——0x0101 是 `move vA,vB` 的合法编码；真实语料中 move v1,v0 被误判 payload 的回归由此修复）。
+- 增量布局路径：`BuildOptions::incremental` 保留源布局，未编辑条目源字节透传，只重编码被改条目；无编辑时输出逐字节等于源。编辑不触及 ID 表，否则返回 `NotIncremental`。发现阶段按 map 段走查六类自描述段补齐孤儿条目（如 d8 的空 annotation_set_item），否则 map 计数漂移破坏字节恒等。
+- 语料矩阵：`tools/corpus/gen_corpus.sh` 用 d8 按 `--min-api 14/24/26/28` 产出 035/037/038/039 样本与 SHA-256 清单（产物不入库）；040/041 不在工具链产出范围，说明见脚本头注。
+- baksmali 2.5.2 文本对拍：合成 fixture、level1（5528 B）与 level2（719560 B）在方法块顺序规范化后 diff 均为空；真实语料 035–039 的 canonical 重建与增量产物对拍通过。
+- oracle 模式：`tools/oracle/check.sh` 按 `LIBDEX_ORACLE_MODE` 分派 baksmali（门槛）/redex/art（环境缺席明确 skip）；仲裁规则见 `tools/oracle/README.md`（ART 终审、规范裁决工具分歧）。
 - CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍；真实语料不提交。
-- 本地带真实语料 122 个用例全绿；真实语料的成员/类型改名、成员增删、元数据剥离与二次重建固定点通过。
+- 本地带 d8 语料 157 个用例全绿；语料上的成员/类型改名、成员增删、元数据剥离、增量-源字节恒等与二次重建固定点通过。
 
 ## 已知缺口
 
 - 041 container 语义未冻结，`buildDex` 明确拒绝；非空 link 区同样拒绝。
-- 没有条目级 dirty 状态；重建总是全量 canonical。
+- 增量路径不支持 ID 表级编辑（intern/addType/addMethod 等触发 `NotIncremental`）；跨 ID 表的大改仍走全量 canonical。
 - ID 表条目不回收：删除成员/类只移除定义，索引与字符串仍占位。
 - ID 表索引重排不能跨未建模 section：保留 section 时只要旧索引移动就拒绝重建。
 - `buildDex` 丢弃不可达的建模条目；未建模 section 内部的绝对偏移不回填。
 - 源字符串的 MUTF-8 在重建时校验 UTF-16 长度；type_list 元素索引越界返回 `InvalidModel`。
-- ReDex 写回参照与 ART 实机验证未接线；baksmali 不覆盖未建模 section。
+- redex/art 模式是接线骨架：redex 未进 CI，art 依赖本机设备，未常驻验证；baksmali 不覆盖未建模 section。
 - 没有 smali 文本层与 APK 容器语义。
 
 ## 下一批
 
-- 条目级 dirty 状态：只重编码被改条目，避免全量 canonical。
-- oracle 扩展：ReDex 与 ART 实机；先定 oracle 不一致时的仲裁规则。
-- 语料矩阵：补齐 035/037/038/039/040/041 样本与哈希清单。
+- redex/art oracle 常驻化：CI 里接 redex roundtrip；ART 侧沉淀一台常驻设备的 dex2oat 验收。
+- 架构整理：条目 writer（writeClassData/writeCodeItem 等）从 dex_file.cpp 挪到独立 codec 文件，对齐 libjbc 的 attr/insn codec 分层。
+- 040/041 语料：设备提取路径与哈希清单，041 container 语义评估。
