@@ -125,72 +125,6 @@ struct CodeUnit
     ca::u32 newOffset = 0;
 };
 
-/// @brief 重建前的 ID 表护栏：容量与表内索引。
-///
-/// DEX 的 type/proto/field/method 索引是 16 位；string 索引是 32 位。
-/// 这里只检查模型自洽，不检查排序（排序是 DEX 规范要求，reader 只做诊断）。
-bool validIdTables(const DexFile& dex) noexcept
-{
-    if (dex.stringIds.size() > 0xFFFFFFFFu ||
-        dex.typeIds.size() > DexFile::kIdTableLimit ||
-        dex.protoIds.size() > DexFile::kIdTableLimit ||
-        dex.fieldIds.size() > DexFile::kIdTableLimit ||
-        dex.methodIds.size() > DexFile::kIdTableLimit) {
-        return false;
-    }
-
-    const ca::u32 stringCount = dex.stringCount();
-    const ca::u32 typeCount = dex.typeCount();
-    const ca::u32 protoCount = dex.protoCount();
-    const ca::u32 fieldCount = dex.fieldCount();
-    const ca::u32 methodCount = dex.methodCount();
-
-    for (const TypeId& type : dex.typeIds) {
-        if (type.descriptorIdx >= stringCount) {
-            return false;
-        }
-    }
-    for (const ProtoId& proto : dex.protoIds) {
-        if (proto.shortyIdx >= stringCount || proto.returnTypeIdx >= typeCount) {
-            return false;
-        }
-    }
-    for (const FieldId& field : dex.fieldIds) {
-        if (field.classIdx >= typeCount || field.typeIdx >= typeCount ||
-            field.nameIdx >= stringCount) {
-            return false;
-        }
-    }
-    for (const MethodId& method : dex.methodIds) {
-        if (method.classIdx >= typeCount || method.protoIdx >= protoCount ||
-            method.nameIdx >= stringCount) {
-            return false;
-        }
-    }
-    for (const ClassDef& def : dex.classDefs) {
-        if (def.classIdx >= typeCount ||
-            (def.superclassIdx != DexFile::kNoIndex && def.superclassIdx >= typeCount) ||
-            (def.sourceFileIdx != DexFile::kNoIndex && def.sourceFileIdx >= stringCount)) {
-            return false;
-        }
-    }
-    for (const CallSiteId& site : dex.callSites) {
-        if (site.callSiteOff == 0) {
-            return false;
-        }
-    }
-    for (const MethodHandle& handle : dex.methodHandles) {
-        if (handle.handleType > 8) {
-            return false;
-        }
-        const ca::u32 limit = handle.handleType <= 3 ? fieldCount : methodCount;
-        if (handle.targetIdx >= limit) {
-            return false;
-        }
-    }
-    return true;
-}
-
 struct PoolString
 {
     std::u16string key;        ///< UTF-16 code unit 序列，DEX 排序键
@@ -622,6 +556,9 @@ Result<std::vector<AnnotationsDirectoryEntry>, WriteError> remapDirectoryEntries
 Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                                                  const BuildOptions& options)
 {
+    if (options.incremental) {
+        return buildDexIncremental(dex, options);
+    }
     if (!dex.hasSource()) {
         return Err(WriteError::MissingSource);
     }
@@ -1036,8 +973,6 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     // ---- 注解族：源目录与自有覆盖合并成生效目录，再按生效目录发现 ----
     // 自有条目用合成键挂进各 ItemTable；源偏移与合成键以 0x40000000 为界。
-    constexpr ca::u32 kOwnedTypeListKeyBase = 0x40000000u;
-
     Result<AnnotationPlan, WriteError> planned =
         planAnnotations(dex, options, memberEdits, classDataByOff);
     if (planned.is_err()) {
@@ -1427,18 +1362,25 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     const std::vector<ca::u32>* methodMembers =
         methodOrder.identity ? nullptr : &methodOrder.remap;
 
-    // 目录按 class_def 顺序发射：未覆盖的类沿用源偏移作键（共享目录自动去重），
-    // 覆盖的类用合成键且内容为合并后的生效目录；内容全空则不发射。
+    // 目录按新的 class_def 顺序发射：未覆盖的类沿用源偏移作键（共享目录自动去重），
+    // 覆盖的类用合成键且内容为合并后的生效目录；内容全空则不发射。发射序必须
+    // 取 classOrder 而非 DOM 序——重排后 DOM 序在两次重建间不同，会导致目录
+    // 落位漂移、破坏二次重建固定点。
     ItemTable annotationDirectories;
-    for (ca::u32 i = 0; i < effectiveDirs.size(); ++i) {
-        const EffectiveDirectory& eff = effectiveDirs[i];
-        const bool emit = eff.overridden ? !eff.effectivelyEmpty
-                                         : dex.classDefs[i].annotationsOff != 0;
+    for (ca::u32 i = 0; i < classOrder.oldIndexByNew.size(); ++i) {
+        const ca::u32 oldClassIdx = classOrder.oldIndexByNew[i];
+        const EffectiveDirectory& eff = effectiveDirs[oldClassIdx];
+        // strip 时目录一律不发射：class_def 的 annotations_off 已写 0，
+        // 发射目录只会制造无引用孤儿，破坏二次重建固定点。
+        const bool emit =
+            !options.stripAnnotations &&
+            (eff.overridden ? !eff.effectivelyEmpty
+                            : dex.classDefs[oldClassIdx].annotationsOff != 0);
         if (!emit) {
             continue;
         }
-        const ca::u32 key = eff.overridden ? kOwnedDirectoryKeyBase + i
-                                           : dex.classDefs[i].annotationsOff;
+        const ca::u32 key = eff.overridden ? kOwnedDirectoryKeyBase + oldClassIdx
+                                           : dex.classDefs[oldClassIdx].annotationsOff;
         const AnnotationsDirectory& dir = eff.content;
         Result<std::vector<AnnotationsDirectoryEntry>, WriteError> fieldEntries =
             remapDirectoryEntries(dir.fieldAnnotations, fieldMembers);

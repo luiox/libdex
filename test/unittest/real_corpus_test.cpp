@@ -668,6 +668,131 @@ TEST(DexRealCorpus, RebuildsCanonical)
     }
 }
 
+/// @brief 逐类摘要清单（类描述符 + 排序后的方法摘要），布局无关。
+std::vector<std::string> summarizeClasses(dex::core::DexFile& dex)
+{
+    std::vector<std::string> out;
+    out.reserve(dex.classCount());
+    for (ca::u32 classIdx = 0; classIdx < dex.classCount(); ++classIdx) {
+        const auto descriptor = dex.classDescriptor(classIdx);
+        if (descriptor.is_err()) {
+            out.push_back("<bad>");
+            continue;
+        }
+        std::string entry(descriptor.unwrap().as_std_view());
+        const auto data = dex.classData(classIdx);
+        if (data.is_err() || data.unwrap() == nullptr) {
+            out.push_back(std::move(entry));
+            continue;
+        }
+        const std::vector<dex::core::EncodedMethod>* lists[2] = {
+            &data.unwrap()->directMethods, &data.unwrap()->virtualMethods};
+        for (const std::vector<dex::core::EncodedMethod>* list : lists) {
+            std::vector<std::string> methods;
+            methods.reserve(list->size());
+            for (const dex::core::EncodedMethod& method : *list) {
+                methods.push_back(summarizeMethod(dex, method));
+            }
+            std::sort(methods.begin(), methods.end());
+            for (const std::string& method : methods) {
+                entry.push_back('|');
+                entry.append(method);
+            }
+        }
+        out.push_back(std::move(entry));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+TEST(DexRealCorpus, IncrementalRebuildReproducesAndAgrees)
+{
+    const std::vector<std::filesystem::path> files = corpusFiles();
+    if (files.empty()) {
+        GTEST_SKIP() << "LIBDEX_REAL_DEX_DIR is not set or has .dex files";
+    }
+
+    for (const std::filesystem::path& path : files) {
+        const std::vector<ca::u8> bytes = readFile(path);
+        ASSERT_FALSE(bytes.empty()) << path.string();
+
+        // 无编辑增量：全部条目未触碰，输出必须与源逐字节一致。
+        {
+            auto parsed =
+                dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+            ASSERT_TRUE(parsed.is_ok()) << path.string();
+            std::unique_ptr<dex::core::DexFile> file = std::move(parsed).unwrap();
+            dex::core::BuildOptions options;
+            options.incremental = true;
+            auto built = dex::core::buildDex(*file, options);
+            ASSERT_TRUE(built.is_ok())
+                << path.string() << ": " << dex::core::to_string(built.unwrap_err());
+            EXPECT_EQ(built.unwrap(), bytes) << path.string();
+        }
+
+        // 条目级编辑（剥离 debug）：增量产物 Validated、可二次稳定，且与
+        // canonical 同编辑产物逐类语义一致。
+        auto parse = [&]() {
+            auto parsed =
+                dex::core::readDex(dex::core::ByteSlice{bytes.data(), bytes.size()});
+            return parsed;
+        };
+        auto canonical = parse();
+        ASSERT_TRUE(canonical.is_ok()) << path.string();
+        std::unique_ptr<dex::core::DexFile> canonicalFile = std::move(canonical).unwrap();
+        dex::core::BuildOptions canonicalOptions;
+        canonicalOptions.stripDebugInfo = true;
+        auto canonicalBuilt = dex::core::buildDex(*canonicalFile, canonicalOptions);
+        ASSERT_TRUE(canonicalBuilt.is_ok())
+            << path.string() << ": " << dex::core::to_string(canonicalBuilt.unwrap_err());
+
+        auto incremental = parse();
+        ASSERT_TRUE(incremental.is_ok()) << path.string();
+        std::unique_ptr<dex::core::DexFile> incrementalFile = std::move(incremental).unwrap();
+        dex::core::BuildOptions incrementalOptions;
+        incrementalOptions.incremental = true;
+        incrementalOptions.stripDebugInfo = true;
+        auto incrementalBuilt = dex::core::buildDex(*incrementalFile, incrementalOptions);
+        ASSERT_TRUE(incrementalBuilt.is_ok())
+            << path.string() << ": " << dex::core::to_string(incrementalBuilt.unwrap_err());
+        const std::vector<ca::u8> incrementalBytes = std::move(incrementalBuilt).unwrap();
+
+        auto readBack = [&](const std::vector<ca::u8>& data) {
+            auto parsed = dex::core::readDex(dex::core::ByteSlice{data.data(), data.size()});
+            return parsed;
+        };
+        auto canonicalSecond = readBack(canonicalBuilt.unwrap());
+        ASSERT_TRUE(canonicalSecond.is_ok()) << path.string();
+        auto incrementalSecond = readBack(incrementalBytes);
+        ASSERT_TRUE(incrementalSecond.is_ok()) << path.string();
+        std::unique_ptr<dex::core::DexFile> canonicalModel = std::move(canonicalSecond).unwrap();
+        std::unique_ptr<dex::core::DexFile> incrementalModel =
+            std::move(incrementalSecond).unwrap();
+        ASSERT_EQ(incrementalModel->state(), dex::core::ParseState::Validated)
+            << path.string();
+        const dex::core::Integrity integrity = dex::core::verifyIntegrity(
+            incrementalModel->source(), incrementalModel->header.checksum,
+            incrementalModel->header.signature);
+        EXPECT_TRUE(integrity.checksumOk) << path.string();
+        EXPECT_TRUE(integrity.signatureOk) << path.string();
+        EXPECT_EQ(incrementalModel->classCount(), canonicalModel->classCount())
+            << path.string();
+        EXPECT_EQ(summarizeClasses(*incrementalModel), summarizeClasses(*canonicalModel))
+            << path.string();
+        // debug 条目应整体消失。
+        EXPECT_EQ(incrementalModel->findMapItem(dex::core::MapType::DebugInfoItem), nullptr)
+            << path.string();
+
+        // 无新编辑的二次增量：逐字节稳定。
+        dex::core::BuildOptions stable;
+        stable.incremental = true;
+        auto rebuilt = dex::core::buildDex(*incrementalModel, stable);
+        ASSERT_TRUE(rebuilt.is_ok())
+            << path.string() << ": " << dex::core::to_string(rebuilt.unwrap_err());
+        EXPECT_EQ(rebuilt.unwrap(), incrementalBytes) << path.string();
+    }
+}
+
 TEST(DexRealCorpus, RebuildsAfterMethodAndFieldRenames)
 {
     const std::vector<std::filesystem::path> files = corpusFiles();

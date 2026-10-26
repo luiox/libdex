@@ -100,6 +100,12 @@ struct BuildOptions
     bool keepUnknownSections = true;  ///< 保留未建模 map section 的原始字节
     bool stripDebugInfo = false;      ///< 丢弃全部 debug_info，code_item.debug_info_off 置 0
     bool stripAnnotations = false;    ///< 丢弃注解族，class_def.annotations_off 置 0
+    /// @brief 走增量布局：保留源布局，未编辑条目源字节透传，只重编码被改条目。
+    ///
+    /// 前提是编辑不触及 ID 表（无 intern、无 addType/addProto/addField/addMethod/
+    /// addProtoWithParams），违反返回 @ref WriteError::NotIncremental，调用方应
+    /// 改走 canonical。语义细节见 doc/design.md「增量重建」。
+    bool incremental = false;
 };
 
 /// @brief 把 DOM 重建为一份 canonical 布局的 .dex 字节。
@@ -121,5 +127,13 @@ struct BuildOptions
 /// @ref DexFile 的 lazy 缓存，因此入参是非 const 引用；语义上不修改文件内容。
 Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                                                  const BuildOptions& options = {});
+
+/// @brief buildDex 的增量布局路径；入口分派在 @ref buildDex，实现见 incremental.cpp。
+///
+/// 保留源布局：条目与 gap 按源偏移顺序平移，未编辑且引用偏移未变的条目
+/// 源字节透传。编辑集必须不触及 ID 表（调用方显式选择，护栏返回
+/// `NotIncremental`）。契约见 doc/design.md「增量重建」。
+Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
+                                                            const BuildOptions& options);
 
 }   // namespace dex::core

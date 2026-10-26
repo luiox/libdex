@@ -28,11 +28,18 @@ namespace dex::core {
 /// @{
 
 /// @brief 布局路径的合成键分配规则（见 @ref AnnotationPlan）。
+inline constexpr ca::u32 kOwnedTypeListKeyBase = 0x40000000u;
 inline constexpr ca::u32 kOwnedItemKeyBase = 0x50000000u;
 inline constexpr ca::u32 kOwnedSetKeyBase = 0x60000000u;
 inline constexpr ca::u32 kOwnedRefListKeyBase = 0x70000000u;
 inline constexpr ca::u32 kOwnedDirectoryKeyBase = 0x78000000u;
 /// @}
+
+/// @brief 重建前的 ID 表护栏：容量与表内索引（两条布局路径共用）。
+///
+/// DEX 的 type/proto/field/method 索引是 16 位；string 索引是 32 位。
+/// 这里只检查模型自洽，不检查排序（排序是 DEX 规范要求，reader 只做诊断）。
+bool validIdTables(const DexFile& dex) noexcept;
 
 /// @brief 成员编辑的校验结果与规范化集合。
 ///

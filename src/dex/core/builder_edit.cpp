@@ -32,6 +32,68 @@ Result<const T*, WriteError> requireDecoded(Result<const T*, ReadError> result)
 
 }   // namespace
 
+bool validIdTables(const DexFile& dex) noexcept
+{
+    if (dex.stringIds.size() > 0xFFFFFFFFu ||
+        dex.typeIds.size() > DexFile::kIdTableLimit ||
+        dex.protoIds.size() > DexFile::kIdTableLimit ||
+        dex.fieldIds.size() > DexFile::kIdTableLimit ||
+        dex.methodIds.size() > DexFile::kIdTableLimit) {
+        return false;
+    }
+
+    const ca::u32 stringCount = dex.stringCount();
+    const ca::u32 typeCount = dex.typeCount();
+    const ca::u32 protoCount = dex.protoCount();
+    const ca::u32 fieldCount = dex.fieldCount();
+    const ca::u32 methodCount = dex.methodCount();
+
+    for (const TypeId& type : dex.typeIds) {
+        if (type.descriptorIdx >= stringCount) {
+            return false;
+        }
+    }
+    for (const ProtoId& proto : dex.protoIds) {
+        if (proto.shortyIdx >= stringCount || proto.returnTypeIdx >= typeCount) {
+            return false;
+        }
+    }
+    for (const FieldId& field : dex.fieldIds) {
+        if (field.classIdx >= typeCount || field.typeIdx >= typeCount ||
+            field.nameIdx >= stringCount) {
+            return false;
+        }
+    }
+    for (const MethodId& method : dex.methodIds) {
+        if (method.classIdx >= typeCount || method.protoIdx >= protoCount ||
+            method.nameIdx >= stringCount) {
+            return false;
+        }
+    }
+    for (const ClassDef& def : dex.classDefs) {
+        if (def.classIdx >= typeCount ||
+            (def.superclassIdx != DexFile::kNoIndex && def.superclassIdx >= typeCount) ||
+            (def.sourceFileIdx != DexFile::kNoIndex && def.sourceFileIdx >= stringCount)) {
+            return false;
+        }
+    }
+    for (const CallSiteId& site : dex.callSites) {
+        if (site.callSiteOff == 0) {
+            return false;
+        }
+    }
+    for (const MethodHandle& handle : dex.methodHandles) {
+        if (handle.handleType > 8) {
+            return false;
+        }
+        const ca::u32 limit = handle.handleType <= 3 ? fieldCount : methodCount;
+        if (handle.targetIdx >= limit) {
+            return false;
+        }
+    }
+    return true;
+}
+
 Result<std::map<ca::u32, const ClassData*>, WriteError> collectSourceClassData(DexFile& dex)
 {
     std::map<ca::u32, const ClassData*> classDataByOff;
@@ -521,7 +583,12 @@ Result<AnnotationPlan, WriteError> planAnnotations(DexFile& dex,
         const ClassDef& def = dex.classDefs[i];
         const AnnotationsDirectory* source = nullptr;
         if (def.annotationsOff != 0) {
-            source = plan.directories.find(def.annotationsOff)->second;
+            // strip 下 plan.directories 为空；任何 find 落空都必须走
+            // end() 分支，解引用 end() 读到的是容器节点的堆填充值。
+            const auto found = plan.directories.find(def.annotationsOff);
+            if (found != plan.directories.end()) {
+                source = found->second;
+            }
         }
         const AnnotationAttachments* attach = nullptr;
         const auto found = attachments.find(i);

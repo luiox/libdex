@@ -304,6 +304,13 @@ Result<CodeItem, ReadError> parseCodeItem(ByteSlice source, ca::u32 offset,
 /// 与模型中的四处列表一致（static/instance fields、direct/virtual methods）。
 Result<std::vector<ca::u8>, WriteError> writeClassData(const ClassData& data);
 
+/// @brief 解析一个 class_data_item，不依赖 DexFile（按偏移发现用）。
+///
+/// @param source 整个 dex 的源字节；offset 是 class_data_item 起始。
+/// @param fieldLimit/methodLimit 对成员索引做 BadClassData 上界闸门的表长。
+Result<ClassData, ReadError> parseClassData(ByteSlice source, ca::u32 offset,
+                                            ca::u32 fieldLimit, ca::u32 methodLimit);
+
 /// @brief 精确重编码 code_item。
 ///
 /// @param item 头部、tries 与 handler 模型；tries 的 handler_off 按

@@ -1147,13 +1147,15 @@ const ClassData* DexFile::peekClassData(ca::u32 classDefIdx) const noexcept
     return slot.state == LazyClassData::State::Decoded ? slot.data.get() : nullptr;
 }
 
-Result<std::unique_ptr<ClassData>, ReadError> DexFile::decodeClassData(ca::u32 offset)
+Result<ClassData, ReadError> parseClassData(ByteSlice source, ca::u32 offset,
+                                            ca::u32 fieldLimit, ca::u32 methodLimit)
 {
-    if (offset >= sourceBytes_.len()) {
+    if (offset >= source.size()) {
         return Err(ReadError::BadClassData);
     }
 
-    Result<Reader, ReadError> reader = Reader::at(sourceBytes_, offset);
+    const ca::core::Bytes bytes = ca::core::Bytes::from_static(source.data(), source.size());
+    Result<Reader, ReadError> reader = Reader::at(bytes, offset);
     if (reader.is_err()) {
         return Err(ReadError::BadClassData);
     }
@@ -1172,7 +1174,7 @@ Result<std::unique_ptr<ClassData>, ReadError> DexFile::decodeClassData(ca::u32 o
     // 先做上界闸门，避免畸形计数触发巨量分配。
     const ca::u64 fieldTotal = static_cast<ca::u64>(counts[0]) + counts[1];
     const ca::u64 methodTotal = static_cast<ca::u64>(counts[2]) + counts[3];
-    if (fieldTotal > fieldIds.size() || methodTotal > methodIds.size()) {
+    if (fieldTotal > fieldLimit || methodTotal > methodLimit) {
         return Err(ReadError::BadClassData);
     }
 
@@ -1184,7 +1186,7 @@ Result<std::unique_ptr<ClassData>, ReadError> DexFile::decodeClassData(ca::u32 o
         return Err(ReadError::BadClassData);
     }
 
-    auto data = std::make_unique<ClassData>();
+    ClassData data;
 
     const auto readFields = [&cur](ca::u32 count, std::vector<EncodedField>& out) -> Result<void, ReadError> {
         out.reserve(count);
@@ -1238,20 +1240,30 @@ Result<std::unique_ptr<ClassData>, ReadError> DexFile::decodeClassData(ca::u32 o
         return Ok();
     };
 
-    if (readFields(counts[0], data->staticFields).is_err()) {
+    if (readFields(counts[0], data.staticFields).is_err()) {
         return Err(ReadError::BadClassData);
     }
-    if (readFields(counts[1], data->instanceFields).is_err()) {
+    if (readFields(counts[1], data.instanceFields).is_err()) {
         return Err(ReadError::BadClassData);
     }
-    if (readMethods(counts[2], data->directMethods).is_err()) {
+    if (readMethods(counts[2], data.directMethods).is_err()) {
         return Err(ReadError::BadClassData);
     }
-    if (readMethods(counts[3], data->virtualMethods).is_err()) {
+    if (readMethods(counts[3], data.virtualMethods).is_err()) {
         return Err(ReadError::BadClassData);
     }
 
-    data->raw = ByteSpan{offset, static_cast<ca::u32>(cur.pos() - offset)};
+    data.raw = ByteSpan{offset, static_cast<ca::u32>(cur.pos() - offset)};
+    return Ok(std::move(data));
+}
+
+Result<std::unique_ptr<ClassData>, ReadError> DexFile::decodeClassData(ca::u32 offset)
+{
+    Result<ClassData, ReadError> parsed = parseClassData(source(), offset, fieldCount(), methodCount());
+    if (parsed.is_err()) {
+        return Err(parsed.unwrap_err());
+    }
+    std::unique_ptr<ClassData> data = std::make_unique<ClassData>(std::move(parsed).unwrap());
     return Ok(std::move(data));
 }
 
