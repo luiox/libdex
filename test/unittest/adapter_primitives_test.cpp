@@ -195,8 +195,9 @@ TEST(DexInsnAdapter, BuildsPayloadsAndRoundTrips)
     auto encoded = encodeInsns(stream);
     ASSERT_TRUE(encoded.is_ok()) << to_string(encoded.unwrap_err());
     const std::vector<ca::u8> bytes = std::move(encoded).unwrap();
-    // 规范标识在产物字节里。
-    EXPECT_EQ(bytes[8], 0x01);
+    // 规范标识在产物字节里：packed-switch-payload ident = 0x0100（u16 LE，
+    // 字节序 00 01；0x0101 是 move vA,vB 的合法编码，不能作 payload 标识）。
+    EXPECT_EQ(bytes[8], 0x00);
     EXPECT_EQ(bytes[9], 0x01);
 
     auto decoded = decodeInsns(viewOf(bytes));
