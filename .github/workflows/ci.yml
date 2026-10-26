@@ -61,3 +61,42 @@ jobs:
           test -n "$dexbuild"
           "$dexbuild" fixture "$tmp/hello.dex"
           sh tools/oracle/check.sh "$tmp/hello.dex" "$dexbuild"
+
+      # ---- 以下仅 Linux：redex 只有 Linux/macOS 构建，d8 语料生成用
+      # runner 预装的 Android SDK build-tools。----
+
+      - name: install redex
+        if: runner.os == 'Linux'
+        run: brew install redex
+
+      - name: corpus (d8)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+        run: tools/corpus/gen_corpus.sh build/corpus
+
+      - name: oracle (baksmali over corpus)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dexbuild="$(find build -maxdepth 4 -type f -name dexbuild | head -n 1)"
+          test -n "$dexbuild"
+          for dex in build/corpus/corpus_*.dex; do
+            sh tools/oracle/check.sh "$dex" "$dexbuild"
+          done
+
+      # redex 双边管线对比首跑尚未在实机验证；观察若干次绿后移除
+      # continue-on-error，让它参与门禁。
+      - name: oracle (redex roundtrip over corpus)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          dexbuild="$(find build -maxdepth 4 -type f -name dexbuild | head -n 1)"
+          test -n "$dexbuild"
+          for dex in build/corpus/corpus_*.dex; do
+            LIBDEX_ORACLE_MODE=redex sh tools/oracle/check.sh "$dex" "$dexbuild"
+          done

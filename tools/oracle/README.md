@@ -9,9 +9,9 @@ libdex 的"正确"由外部 oracle 定义：库内 reparse 只能证明自洽，
 | oracle | 检验内容 | 接入点 |
 | --- | --- | --- |
 | 库内 reparse + integrity | 结构可再读、checksum/signature 自洽 | 单测 `DexRealCorpus.*`、`DexIncremental.*` |
-| baksmali（dexlib2 2.5.2，版本钉死） | 反汇编文本等价：指令、try/catch、注解、调试信息 | `check.sh`（默认模式） |
-| ReDex | 第二实现的读取-重写往返：libdex 输出能被 ReDex 读取、重写后仍被下游接受 | `check.sh`（`LIBDEX_ORACLE_MODE=redex`） |
-| ART 实机（dex2oat/dexopt） | 终极消费者：verify/compile 接受，执行语义正确 | `check.sh`（`LIBDEX_ORACLE_MODE=art`） |
+| baksmali（dexlib2 2.5.2，版本钉死） | 反汇编文本等价：指令、try/catch、注解、调试信息 | `check.sh`（默认模式）；CI 对 fixture 与 d8 语料 |
+| ReDex | 第二实现交叉验证：原文与重建产物走同一优化管线，产物反汇编必须一致 | `check.sh`（`LIBDEX_ORACLE_MODE=redex`）；CI（Linux） |
+| ART 实机（dex2oat/dexopt） | 终极消费者：verify/compile 接受，执行语义正确 | `check.sh`（`LIBDEX_ORACLE_MODE=art`），常驻设备 |
 | AOSP dex-format 规范 | 结构争议时的文本依据 | 人工 + design.md 记录 |
 
 ## 仲裁顺序
@@ -36,6 +36,42 @@ libdex 的"正确"由外部 oracle 定义：库内 reparse 只能证明自洽，
 （`redex` 可执行文件 / adb 与设备）缺席时**明确输出 skip 并以 0 退出**，
 不伪装通过、也不阻塞流水线。CI 里 baksmali 模式是门槛，redex/art 是
 增量信号。
+
+## ReDex 的接入方式
+
+redex 只有源码发布（GitHub releases 无预编译资产），二进制来源是
+Homebrew bottle：`brew install redex`（Linux/macOS 均可）；也可以用
+`LIBDEX_REDEX_BIN` 指向自建二进制。
+
+对比设计是**双边管线**：`redex` 分别处理原文与 libdex 重建产物，两次
+输出分别反汇编后比较。单边设计（只重写重建产物、与原文比）会被 redex
+默认管线自身的改写（内联、DCE）污染——那些改写与 libdex 无关；双边走
+同一管线后等价生效而抵消，剩下的差异才指向重建语义。
+
+CI（`ci.yml`）在 Linux 上：`brew install redex` → `gen_corpus.sh` 用
+runner 预装 Android SDK 的 d8 生成语料 → 语料逐个跑 baksmali 与 redex
+模式。redex 步骤在管线对比被实机验证稳定前挂 `continue-on-error`，
+绿若干次后移除、参与门禁。
+
+## ART 的常驻设备验收
+
+`LIBDEX_ORACLE_MODE=art` 需要一台 adb 可达的设备或模拟器；用法：
+
+```sh
+LIBDEX_ORACLE_MODE=art LIBDEX_ART_SERIAL=<serial> \
+    tools/oracle/check.sh build/corpus/corpus_038_sample.dex
+```
+
+设备侧只需 `dex2oat` 在 PATH（userdebug 或 root 环境最省事；
+`/data/local/tmp` 可写即可）。常驻化路线：
+
+- **自托管 runner 挂常驻设备**：一台 USB 常插的真机（或 headless
+  模拟器）接自托管 runner，runner 上预装 adb 与平台工具，CI 里以
+  `runs-on: [self-hosted, art]` 标签单独起 job 跑 art 模式，语料用
+  `build/corpus` 的哈希清单校验后再上设备。
+- **提取 040/041 语料**：同一台设备顺带产出 041 container 语料，见
+  `tools/corpus/extract_art.sh`。
+- 设备缺席时 CI 侧表现为明确 skip，不阻塞；仲裁规则见上。
 
 ## baksmali 输出的已知非语义差异
 

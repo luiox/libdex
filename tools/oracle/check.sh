@@ -4,8 +4,9 @@
 # 用法：tools/oracle/check.sh <dex-file> [dexbuild]
 #   LIBDEX_ORACLE_MODE=baksmali|redex|art（默认 baksmali）
 #     baksmali: 反汇编原文与重建产物，要求 smali 文本一致。
-#     redex:    ReDex 读取并重写重建产物，要求重写结果仍被 baksmali 接受
-#               且反汇编与原文一致。redex 不在 PATH 时明确 skip（exit 0）。
+#     redex:    原文与重建产物走同一 ReDex 优化管线后反汇编比较；管线自身
+#               的改写对两侧等价生效而抵消，只剩重建语义差异。redex 不在
+#               PATH 时明确 skip（exit 0）；LIBDEX_REDEX_BIN 可指定二进制。
 #     art:      adb 推送原文与重建产物到设备，dex2oat 验证两者都接受。
 #               adb 或设备缺席时明确 skip（exit 0）。LIBDEX_ART_SERIAL 可
 #               指定 -s 序列号。
@@ -189,18 +190,29 @@ case "$MODE" in
         ;;
 
     redex)
-        command -v redex >/dev/null 2>&1 || {
-            echo "oracle skip: redex not in PATH (LIBDEX_ORACLE_MODE=redex)" >&2
+        REDEX=${LIBDEX_REDEX_BIN:-redex}
+        command -v "$REDEX" >/dev/null 2>&1 || {
+            echo "oracle skip: redex not found (LIBDEX_ORACLE_MODE=redex；" \
+                 "brew install redex，或设 LIBDEX_REDEX_BIN 指向二进制)" >&2
             exit 0
         }
         "$DEXBUILD" rebuild "$DEX" "$TMP/rebuilt.dex"
-        # 第二实现交叉验证：libdex 产物能被 ReDex 读取并重写，重写结果
-        # 反汇编后仍与原文一致。
-        redex --sign "$TMP/rebuilt.dex" -o "$TMP/redexed.dex" >/dev/null 2>&1 || \
-            redex "$TMP/rebuilt.dex" -o "$TMP/redexed.dex" >/dev/null
-        baksmali_disassemble "$TMP/original" "$DEX"
-        baksmali_disassemble "$TMP/redexed" "$TMP/redexed.dex"
-        compare_smali "$TMP/redexed" "$TMP/original"
+        # 第二实现交叉验证：原文与重建产物走同一 ReDex 优化管线，管线自身的
+        # 改写（内联、DCE 等）对两侧等价生效而抵消；libdex 重建若语义走样，
+        # 差异会留在两侧产物里。分别反汇编后比较文本。
+        if ! "$REDEX" "$DEX" -o "$TMP/redex_orig.dex" >/dev/null 2>&1; then
+            ORACLE_FAILED=1
+            echo "oracle: redex rejected the original dex" >&2
+            exit 1
+        fi
+        if ! "$REDEX" "$TMP/rebuilt.dex" -o "$TMP/redex_rebuilt.dex" >/dev/null 2>&1; then
+            ORACLE_FAILED=1
+            echo "oracle: redex rejected the rebuilt dex" >&2
+            exit 1
+        fi
+        baksmali_disassemble "$TMP/redex_orig" "$TMP/redex_orig.dex"
+        baksmali_disassemble "$TMP/redex_rebuilt" "$TMP/redex_rebuilt.dex"
+        compare_smali "$TMP/redex_rebuilt" "$TMP/redex_orig"
         ;;
 
     art)
