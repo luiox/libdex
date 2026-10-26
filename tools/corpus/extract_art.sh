@@ -16,10 +16,6 @@
 # dex（035-039）不收——那些由 d8 语料覆盖（gen_corpus.sh）。
 set -euo pipefail
 
-# git-bash/MSYS 会把 /data/... 这类设备伪路径改写成宿主机路径；adb 的
-# push/pull/shell 参数全是设备侧路径，关闭改写。非 MSYS 环境该变量无效。
-export MSYS_NO_PATHCONV=1
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out_dir="${1:-$script_dir/../../build/corpus}"
 ADB=${LIBDEX_ADB:-adb}
@@ -29,19 +25,33 @@ if [ -n "${LIBDEX_ART_SERIAL:-}" ]; then
     SERIAL_ARGS=(-s "$LIBDEX_ART_SERIAL")
 fi
 
+# git-bash/MSYS 会把 /data/... 这类设备伪路径改写成宿主机路径；adb 的调用
+# 统一关闭改写，宿主侧路径由 host_path 预先转成 Windows 形态（非 MSYS 环境
+# 两者都是恒等）。
+host_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m -- "$1"
+    else
+        printf '%s' "$1"
+    fi
+}
+adb_run() {
+    MSYS_NO_PATHCONV=1 "$ADB" "${SERIAL_ARGS[@]}" "$@"
+}
+
 command -v "$ADB" >/dev/null 2>&1 || { echo "error: $ADB not found" >&2; exit 2; }
 PY=$(command -v python3 || command -v python) || { echo "error: python3 required" >&2; exit 2; }
 
-"$ADB" "${SERIAL_ARGS[@]}" get-state >/dev/null 2>&1 || {
+adb_run get-state >/dev/null 2>&1 || {
     echo "error: no adb device (set LIBDEX_ART_SERIAL or connect one)" >&2
     exit 2
 }
 
 # root 尝试：已在 root 状态的设备上无害；失败不阻断（有的环境本来可读）。
-"$ADB" "${SERIAL_ARGS[@]}" root >/dev/null 2>&1 || true
-"$ADB" "${SERIAL_ARGS[@]}" wait-for-device >/dev/null 2>&1 || true
+adb_run root >/dev/null 2>&1 || true
+adb_run wait-for-device >/dev/null 2>&1 || true
 
-listing=$("$ADB" "${SERIAL_ARGS[@]}" shell \
+listing=$(adb_run shell \
     "find /data/dalvik-cache /data/app -type f \( -name '*.vdex' -o -name '*.cdex' \) 2>/dev/null" \
     | tr -d '\r' | sort -u | head -n "${LIBDEX_EXTRACT_LIMIT:-16}")
 if [ -z "$listing" ]; then
@@ -57,7 +67,7 @@ n=0
 while IFS= read -r f; do
     n=$((n + 1))
     safe="$(printf '%s' "$f" | tr -c 'A-Za-z0-9._@-' '_')"
-    "$ADB" "${SERIAL_ARGS[@]}" pull "$f" "$work/$safe" >/dev/null
+    adb_run pull "$f" "$(host_path "$work")/$safe" >/dev/null
 done <<EOF
 $listing
 EOF
@@ -66,17 +76,11 @@ echo "pulled $n candidates"
 # 切取与分类统一交给内嵌 python：扫描内嵌 magic，按段自身 header 的
 # file_size（偏移 +32 的 u32）定长切出，并校验落在容器边界内。来源清单经
 # 临时文件传递——设备伪路径不能经 argv（MSYS 会改写），heredoc 又占着
-# stdin；MSYS_NO_PATHCONV=1 下本地路径不自动转换，给 python 的路径显式转
-# 成 Windows 形态。
+# stdin；给 python 的路径显式转成 Windows 形态。
 printf '%s\n' "$listing" > "$work/sources.txt"
-py_sources=$work/sources.txt
-py_work=$work
-py_out=$out_dir
-if command -v cygpath >/dev/null 2>&1; then
-    py_sources=$(cygpath -m -- "$work/sources.txt")
-    py_work=$(cygpath -m -- "$work")
-    py_out=$(cygpath -m -- "$out_dir")
-fi
+py_sources=$(host_path "$work/sources.txt")
+py_work=$(host_path "$work")
+py_out=$(host_path "$out_dir")
 "$PY" - "$py_sources" "$py_work" "$py_out" <<'PY'
 import hashlib
 import os
@@ -163,8 +167,8 @@ print(f"extracted {len(written)} section(s), skipped {len(skipped)}; "
       f"manifest: {manifest}")
 PY
 
-fingerprint=$("$ADB" "${SERIAL_ARGS[@]}" shell getprop ro.build.fingerprint | tr -d '\r')
-sdk=$("$ADB" "${SERIAL_ARGS[@]}" shell getprop ro.build.version.sdk | tr -d '\r')
+fingerprint=$(adb_run shell getprop ro.build.fingerprint | tr -d '\r')
+sdk=$(adb_run shell getprop ro.build.version.sdk | tr -d '\r')
 printf 'device fingerprint=%s sdk=%s\n' "$fingerprint" "$sdk" >> "$out_dir/extract_art_report.txt"
 
 echo "--- report"

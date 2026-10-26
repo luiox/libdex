@@ -20,10 +20,6 @@
 # 按版本缓存；baksmali 固定为 BAKSMALI_VERSION，避免上游漂移改变输出。
 set -eu
 
-# git-bash/MSYS 会把 /data/... 这类设备伪路径改写成宿主机路径；art 模式的
-# adb push/shell 参数全是设备侧路径，关闭改写。非 MSYS 环境该变量无效。
-export MSYS_NO_PATHCONV=1
-
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 BAKSMALI_VERSION=${BAKSMALI_VERSION:-2.5.2}
 MODE=${LIBDEX_ORACLE_MODE:-baksmali}
@@ -225,17 +221,30 @@ case "$MODE" in
             echo "oracle skip: adb not found (LIBDEX_ORACLE_MODE=art)" >&2
             exit 0
         }
+        # git-bash/MSYS 会把 /data/... 这类设备伪路径改写成宿主机路径；adb
+        # 的调用统一关闭改写，宿主侧路径由 host_path 预先转成 Windows 形态
+        # （非 MSYS 环境两者都是恒等）。
+        host_path() {
+            if command -v cygpath >/dev/null 2>&1; then
+                cygpath -m -- "$1"
+            else
+                printf '%s' "$1"
+            fi
+        }
+        adb_run() {
+            MSYS_NO_PATHCONV=1 "$ADB" $SERIAL "$@"
+        }
         SERIAL=${LIBDEX_ART_SERIAL:+-s "$LIBDEX_ART_SERIAL"}
-        adb $SERIAL get-state >/dev/null 2>&1 || {
+        adb_run get-state >/dev/null 2>&1 || {
             echo "oracle skip: no adb device (LIBDEX_ORACLE_MODE=art)" >&2
             exit 0
         }
         "$DEXBUILD" rebuild "$DEX" "$TMP/rebuilt.dex"
         # 终审仲裁：设备上的 dex2oat 必须同时接受原文与重建产物。
-        "$ADB" $SERIAL push "$DEX" /data/local/tmp/libdex_oracle_orig.dex >/dev/null
-        "$ADB" $SERIAL push "$TMP/rebuilt.dex" /data/local/tmp/libdex_oracle_rebuilt.dex >/dev/null
+        adb_run push "$(host_path "$DEX")" /data/local/tmp/libdex_oracle_orig.dex >/dev/null
+        adb_run push "$(host_path "$TMP/rebuilt.dex")" /data/local/tmp/libdex_oracle_rebuilt.dex >/dev/null
         for name in orig rebuilt; do
-            if ! "$ADB" $SERIAL shell dex2oat --instruction-set=arm64 \
+            if ! adb_run shell dex2oat --instruction-set=arm64 \
                     --dex-file=/data/local/tmp/libdex_oracle_$name.dex \
                     --oat-file=/data/local/tmp/libdex_oracle_$name.odex >/dev/null; then
                 ORACLE_FAILED=1
@@ -243,7 +252,7 @@ case "$MODE" in
                 exit 1
             fi
         done
-        "$ADB" $SERIAL shell rm -f /data/local/tmp/libdex_oracle_orig.dex \
+        adb_run shell rm -f /data/local/tmp/libdex_oracle_orig.dex \
             /data/local/tmp/libdex_oracle_rebuilt.dex \
             /data/local/tmp/libdex_oracle_orig.odex \
             /data/local/tmp/libdex_oracle_rebuilt.odex >/dev/null
