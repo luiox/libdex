@@ -154,6 +154,24 @@ target("dexbuild")
         add_cxflags("/utf-8", {tools = "cl"})
     end
 
+-- 大文件性能基线：合成 10 万方法级 dex，计时解析/走查/重建（M5）。
+target("dexperf")
+    set_kind("binary")
+    set_group("tools")
+    set_default(false)
+
+    add_deps("libdex")
+    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    add_files("tools/perf_baseline/*.cpp")
+    add_includedirs("src")
+
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
 -- ASan 泄漏门：真实 dex 读 → 全解码 → 重建 → 重读，零报告。
 target("libdex_leak_check")
     set_kind("binary")

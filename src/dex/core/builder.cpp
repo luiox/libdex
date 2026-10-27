@@ -25,6 +25,7 @@ namespace dex::core {
 namespace {
 
 constexpr ca::u32 kHeaderSize = 0x70;
+constexpr ca::u32 kHeaderSizeV41 = 0x78;
 constexpr ca::u32 kEndianTag = 0x12345678u;
 
 ca::u32 alignUp(ca::u32 value, ca::u32 alignment) noexcept
@@ -589,9 +590,6 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     }
     // 无源 DexFile（从零构建）也走 canonical：全部条目来自自有池与编辑层，
     // 引用源条目会在对应解码点返回 SourceUnreadable/InvalidModel。
-    if (dex.header.version >= 41) {
-        return Err(WriteError::NotModeled);
-    }
     if (dex.header.linkSize != 0) {
         return Err(WriteError::NotModeled);
     }
@@ -1240,7 +1238,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     // ---- 输出骨架：ID 区 ----
     std::vector<ca::u8> out;
-    out.resize(kHeaderSize, 0);
+    out.resize(dex.header.version >= 41 ? kHeaderSizeV41 : kHeaderSize, 0);
     std::vector<MapItem> mapItems;
     mapItems.push_back(MapItem{MapType::HeaderItem, 0, 1, 0});
 
@@ -1782,7 +1780,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     putU32(out, 8, 0);
     putU32(out, 32, fileSize);
-    putU32(out, 36, kHeaderSize);
+    putU32(out, 36, version >= 41 ? kHeaderSizeV41 : kHeaderSize);
     putU32(out, 40, kEndianTag);
     putU32(out, 44, 0);
     putU32(out, 48, 0);
@@ -1803,6 +1801,12 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     putU32(out, 104, dataSize);
     putU32(out, 108, dataStart);
+    if (version >= 41) {
+        // container 字段按独立文件约定重置：(file_size, 0)。canonical 重建
+        // 的产物是单文件，不继承容器上下文（实物核对项见 corpus_040_041_notes）。
+        putU32(out, 112, fileSize);
+        putU32(out, 116, 0);
+    }
 
     const std::array<ca::u8, 20> signature =
         sha1Digest(ByteSlice{out.data() + 32, out.size() - 32});
