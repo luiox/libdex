@@ -20,6 +20,14 @@ option("with_tests")
     set_description("Build libdex_unittest (pulls gtest).")
 option_end()
 
+-- ASan 泄漏门：独立 target、不与 gtest 同链（MSVC /fsanitize=address 改
+-- STL ABI）。xmake f --with_asan=y 时插桩；不开也能编但门是假的。
+option("with_asan")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Instrument libdex_leak_check with AddressSanitizer.")
+option_end()
+
 -- 模块集与 mjbase/mjt 的 LUIOX_LIBCA_MODULES 保持一致。libjstr 包定义把
 -- libca 钉在同一超集上；这里取同一份，requireconfs 只负责版本收敛。
 LUIOX_LIBCA_VERSION = "0.0.16"
@@ -85,6 +93,18 @@ target("libdex")
         add_cxflags("/utf-8", {tools = "cl"})
     end
 
+    -- ASan 泄漏门要求全闭包插桩（MSVC 下混链即 LNK1319）；默认关闭，
+    -- 只有 leak_check 场景开 --with_asan=y。
+    if has_config("with_asan") then
+        if is_plat("windows") then
+            add_cxflags("/fsanitize=address", {tools = "cl"})
+            -- 预编译依赖（libca 包）未插桩：关容器注解对齐混链检查。
+            add_defines("_DISABLE_STRING_ANNOTATION", "_DISABLE_VECTOR_ANNOTATION")
+        else
+            add_cxflags("-fsanitize=address", "-fno-omit-frame-pointer")
+        end
+    end
+
 -- 对拍与人工排查用 CLI：与单测共享合成 fixture，不默认构建。
 target("dexbuild")
     set_kind("binary")
@@ -95,6 +115,35 @@ target("dexbuild")
     binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
     add_files("tools/dexbuild/*.cpp", "test/unittest/dex_fixture.cpp")
     add_includedirs("src", "test/unittest")
+
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
+-- ASan 泄漏门：真实 dex 读 → 全解码 → 重建 → 重读，零报告。
+target("libdex_leak_check")
+    set_kind("binary")
+    set_group("tools")
+    set_default(false)
+
+    add_deps("libdex")
+    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    add_files("tools/leak_check/*.cpp")
+    add_includedirs("src")
+
+    if has_config("with_asan") then
+        if is_plat("windows") then
+            add_cxflags("/fsanitize=address", {tools = "cl"})
+            add_defines("_DISABLE_STRING_ANNOTATION", "_DISABLE_VECTOR_ANNOTATION")
+            add_ldflags("/fsanitize=address", {tools = "link"})
+        else
+            add_cxflags("-fsanitize=address", "-fno-omit-frame-pointer")
+            add_ldflags("-fsanitize=address")
+        end
+    end
 
     if is_plat("linux") then
         add_syslinks("pthread")
