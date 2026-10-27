@@ -578,12 +578,10 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
             }
             if (cur.regs[reg].isWideLow()) {
                 diag(addr, FrameDiagnostic::Code::WidePairing);
-                // 宽对两半都记 Long/Double，只能靠邻居判定半别：前一寄存器
-                // 也是宽 → reg 视作高半，清低半；否则按低半清 reg+1。
-                if (reg > 0 && cur.regs[reg - 1].isWideLow()) {
-                    cur.regs[reg - 1] = RegType::top();
-                } else if (reg + 1 < code.registersSize) {
-                    cur.regs[reg + 1] = RegType::top();
+                // 只失效低半之后的高半；reg 本身是高半时低半保留宽标记，
+                // 残留由读点 checkWide（要求两半同宽）兜底诊断。
+                if (reg + 1 < code.registersSize) {
+                    cur.regs[reg + 1] = RegType::top();  // 宽对被踩断
                 }
             }
             cur.regs[reg] = t;
