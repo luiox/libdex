@@ -106,6 +106,37 @@ target("libdex")
     end
 
 -- 对拍与人工排查用 CLI：与单测共享合成 fixture，不默认构建。
+-- libsmali：DEX 与 smali 文本互转（依赖 libdex）。
+target("libsmali")
+    set_kind("static")
+    set_group("libs")
+
+    add_deps("libdex")
+    add_packages("libjstr", {public = true})
+    add_files("src/smali/*.cpp")
+    add_headerfiles("src/(smali/**.hpp)")
+    add_includedirs("src", {public = true})
+    set_languages("cxx17")
+
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
+    -- ASan 全闭包要求：与 libdex 同步插桩（见 libdex 目标内的注释）。
+    if has_config("with_asan") then
+        if is_plat("windows") then
+            add_cxflags("/fsanitize=address", {tools = "cl"})
+            add_defines("_DISABLE_STRING_ANNOTATION", "_DISABLE_VECTOR_ANNOTATION")
+        else
+            add_cxflags("-fsanitize=address", "-fno-omit-frame-pointer")
+        end
+    end
+
+    if is_mode("releasedbg") then
+        add_cxflags("/Zi", "/FS", {force = true})
+        add_ldflags("/DEBUG", {force = true})
+    end
+
 target("dexbuild")
     set_kind("binary")
     set_group("tools")
@@ -129,8 +160,8 @@ target("libdex_leak_check")
     set_group("tools")
     set_default(false)
 
-    add_deps("libdex")
-    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    add_deps("libdex", "libsmali")
+    binary_link_closure("libsmali", "libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
     add_files("tools/leak_check/*.cpp")
     add_includedirs("src")
 
@@ -159,9 +190,9 @@ target("libdex_unittest")
     set_group("libs/test")
     set_default(false)
 
-    add_deps("libdex")
+    add_deps("libdex", "libsmali")
     -- xmake 3.x 不会自动链静态依赖的二级传递闭包；显式列全。
-    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    binary_link_closure("libsmali", "libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
     add_packages("gtest")
     add_files("test/unittest/*.cpp")
     add_includedirs("src")

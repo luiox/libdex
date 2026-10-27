@@ -10,6 +10,7 @@
 /// 退出码 0 = 全部文件走查通过（ASan 无报告时才可能是 0）。
 #include <cstdio>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -21,6 +22,8 @@
 #include "dex/core/reader.hpp"
 #include "dex/core/writer.hpp"
 #include "dex/type/descriptor.hpp"
+#include "smali/disassemble.hpp"
+#include "smali/opcodes.hpp"
 
 using namespace dex::core;
 
@@ -32,7 +35,28 @@ int fail(const char* what, const std::string& name)
     return 1;
 }
 
-/// @brief 把模型里所有 lazy 数据强制解码一遍（含失败路径的缓存写入）。
+/// @brief 逐条比对助记符表，找反汇编器渲染不了的指令。
+void SmaliProbeInsnCheck(DexFile& dex, const EncodedMethod& m)
+{
+    const Result<const CodeItem*, ReadError> code = dex.codeItem(m.codeOff);
+    if (code.is_err() || code.unwrap() == nullptr) {
+        return;
+    }
+    const CodeItem* ci = code.unwrap();
+    const Result<std::vector<Insn>, InsnError> decoded =
+        decodeInsns(subOrEmpty(dex.source(), ci->insns.offset, ci->insns.length));
+    if (decoded.is_err()) {
+        return;
+    }
+    for (const Insn& i : decoded.unwrap()) {
+        const std::optional<dex::smali::Mnemonic> mm = dex::smali::mnemonicOf(i.opcode);
+        if (!mm || mm->format != i.format) {
+            std::printf("smali probe: unmapped insn op=0x%02x fmt=%d at %u\n",
+                        i.opcode, static_cast<int>(i.format), i.address);
+        }
+    }
+}
+
 void walkEverything(DexFile& dex)
 {
     for (ca::u32 i = 0; i < dex.stringCount(); ++i) {
@@ -136,6 +160,30 @@ bool processOne(const std::string& path)
     }
     if (rebuilt2.unwrap() != out) {
         return fail("second buildDex not byte-stable", path) == 0;
+    }
+
+    if (std::getenv("LIBDEX_SMALI_PROBE") != nullptr) {
+        for (ca::u32 c = 0; c < dex.classCount(); ++c) {
+            const Result<std::string, dex::smali::SmaliError> text =
+                dex::smali::disassembleClass(dex, c);
+            if (text.is_err()) {
+                std::printf("smali probe: class %u FAILED: %s\n", c,
+                            dex::smali::to_string(text.unwrap_err()));
+                // 定位渲染不了的指令：逐条比对助记符表。
+                const Result<const ClassData*, ReadError> data = dex.classData(c);
+                if (data.is_ok() && data.unwrap() != nullptr) {
+                    const ClassData* cd = data.unwrap();
+                    for (const EncodedMethod& m : cd->directMethods) {
+                        SmaliProbeInsnCheck(dex, m);
+                    }
+                    for (const EncodedMethod& m : cd->virtualMethods) {
+                        SmaliProbeInsnCheck(dex, m);
+                    }
+                }
+                break;
+            }
+        }
+        std::printf("smali probe: %u classes disassembled\n", dex.classCount());
     }
 
     std::printf("leak_check: ok %s (%u classes)\n", path.c_str(), dex.classCount());
