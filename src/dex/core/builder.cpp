@@ -559,9 +559,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     if (options.incremental) {
         return buildDexIncremental(dex, options);
     }
-    if (!dex.hasSource()) {
-        return Err(WriteError::MissingSource);
-    }
+    // 无源 DexFile（从零构建）也走 canonical：全部条目来自自有池与编辑层，
+    // 引用源条目会在对应解码点返回 SourceUnreadable/InvalidModel。
     if (dex.header.version >= 41) {
         return Err(WriteError::NotModeled);
     }

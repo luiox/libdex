@@ -258,10 +258,11 @@ TEST(DexBuilder, RejectsUnknownOrDuplicateReplacement)
 
 TEST(DexBuilder, RejectsUnfrozenStructures)
 {
+    // 无源 DexFile 现在允许走 canonical（从零构建）；version 0 未冻结仍拒。
     DexFile empty;
     const auto noSource = buildDex(empty);
     ASSERT_TRUE(noSource.is_err());
-    EXPECT_EQ(noSource.unwrap_err(), WriteError::MissingSource);
+    EXPECT_EQ(noSource.unwrap_err(), WriteError::NotModeled);
 
     std::vector<ca::u8> v41 = dex_test::makeHelloDex();
     v41[4] = '0';
