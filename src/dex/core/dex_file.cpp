@@ -52,6 +52,14 @@ Result<StringBody, ReadError> locateStringBody(ByteSlice storage, ca::u32 offset
 
 }   // namespace
 
+std::unique_ptr<DexFile> DexFile::createEmpty(ca::u16 version)
+{
+    auto dex = std::unique_ptr<DexFile>(new DexFile());
+    dex->header.version = version;
+    dex->header.endianTag = 0x12345678u;
+    return dex;
+}
+
 void DexFile::adoptSource(ByteSlice bytes)
 {
     if (bytes.empty()) {

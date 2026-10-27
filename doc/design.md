@@ -8,7 +8,11 @@ libdex 是 DEX 字节核：输入单个 `.dex`，输出保真 DOM 与写回字�
 
 ## 分层
 
-库只有两层：保真 DOM 与逐条目 codec，不定义方法体 AST。条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；`dex_file` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
+库三层：保真 DOM、逐条目 codec、方法体 CodeDom；同仓另有 libsmali 文本层。条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；`dex_file` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
+
+CodeDom（`code_dom`）是方法体的结构编辑模型：`CodeUnit` 拥有指令槽表与程序序，分支/try/handler/payload 用 label 与值句柄（`InsnId{owner,slot,gen}`）引用，insert/replace/erase 后地址与 try 区间联动重算。它是 libsmali 与上层方法体编辑的唯一底座——smali 汇编没有 label 承载的模型做不出来，原「CFG 归 adapter」的裁决随 libsmali 入仓翻案：libsmali 是那个 adapter，建在库内 CodeDom 上，不在库外私养第二套方法体模型。
+
+libsmali（`smali`）是 DEX 与 smali 文本的互转层：反汇编 DexFile → baksmali 兼容文法子集的 `.smali` 文本，汇编文本 → DexFile 编辑。形态选择（`const/4` vs `const/16` vs `const`、分支 10t/20t/30t）在汇编器里按字面量与距离选择——这是 adapter 的职责，core 的「不合并、不提升」裁决不变。文法以反汇编器自产文本为准做往返封闭，baksmali 特有而本库不发射的指令归已知边界。
 
 `const/4`、`const/16`、`const-string/jumbo` 这类形态选择属于使用方 adapter。库按调用方给定的 opcode 精确编码，不做合并或提升；不同需求对应不同 adapter，库不绑定其中一种。
 
@@ -34,7 +38,7 @@ lazy：string_data、class_data、code_item、type_list、注解族、encoded_ar
 
 未修改写回用 `writeDex` 原字节透传，连 checksum/signature 都不重算。`buildDex` 是修改后的唯一写回路径：按 canonical 布局重排，回填文件偏移，重建 map_list，重算 adler32 与 SHA-1。
 
-`buildDex` 只输出可达条目，不可达的建模条目会丢弃；string_data 原字节复制，其余条目精确重编码。未建模 section 默认透传，可选择丢弃；其中若含绝对偏移不会回填。041 与非空 link 区返回 `NotModeled`。
+`buildDex` 只输出可达条目，不可达的建模条目会丢弃；string_data 原字节复制，其余条目精确重编码。未建模 section 默认透传，可选择丢弃；其中若含绝对偏移不会回填。非空 link 区返回 `NotModeled`；041 的 canonical 重建已解冻——header 扩到 0x78，container 字段按独立文件约定重置 `(file_size, 0)`（canonical 产物是单文件，不继承容器上下文），增量路径在实物语料复核前保持 `NotModeled`。
 
 ## 增量重建
 
@@ -76,11 +80,61 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 元数据可以用 `stripDebugInfo` 与 `stripAnnotations` 整体剥离：前者不产出 debug_info 并把 code_item 的 debug_info_off 置 0，后者不产出注解族并把 class_def 的 annotations_off 置 0。剥离不影响 ID 表与指令。
 
+## 分析
+
+`buildCfg` 从解码指令流切块：leaders 取分支/switch 目标、try 边界、handler 入口与转移后继，块不跨 handler 集合变化点；流内边 + 异常边 + 前驱回填，悬垂目标不产假边（不崩溃、不误报）。
+
+`analyzeFrames` 是 best-effort 与 strict 同引擎的到达帧数据流：RegType 格上 cat1/cat2 按半寄存器配对（宽对两半都存 Long/Double，cat1 独立读写高半即 WidePairing）；引用带 type_idx，不同引用合并为引用顶，不解析继承层级（跨类归上层）。三条 ART 对齐的裁决：`const 0` 的字面量零并入引用或 cat1 同族（ART Constant(0)）；冲突合并静默进帧、寄存器被读取才报 TypeConflict（ART 延迟判废——d8 的原地 `aget` 等惯用法不误报）；new-instance 的 UninitRef 由 invoke-direct `<init>` 调用初始化。move-result 必须紧跟 invoke/filled-new-array（DEX 无 jsr/ret，等价约束即此），目标类型按前驱返回描述符定型。monitor 深度在方法出口检查。不做全程序视图与 SMT（对齐 libjbc 基线的裁决）。
+
 ## 错误
 
 错误走 `Result`，不抛异常。结构性问题返回 Err；语义问题（校验和不符、悬垂索引、map 计数不符）记诊断并将 `ParseState` 置 `Recovered`，模型仍可读。
 
 `ParseState` 只有 `Validated` 与 `Recovered`；结构损坏不产出半截模型。
+
+### ReadError 逐码语义（M5 分类学收口）
+
+错误码分四档，判定「读入被拒 / 带病可读 / 延迟到访问 / 构建期」：
+
+| 码 | 档 | 语义 | 测试背书 |
+|---|---|---|---|
+| `Truncated` | 硬拒 | 字节不够读完一个结构（header/表项中间截断） | malformed |
+| `BadMagic` | 硬拒 | magic 不是 `dex\nNNN\0` | malformed |
+| `UnsupportedVersion` | 硬拒 | 版本号不在 035–041 之列 | malformed |
+| `BadHeaderSize` | 硬拒/降级 | `< 0x70` 硬拒；`!=` 版本约定（041 应为 0x78）记诊断 | malformed |
+| `BadEndianTag` | 硬拒 | endian_tag 不是 0x12345678（大端变体不支持） | malformed |
+| `BadFileSize` | 降级 | header.file_size 与实际字节数不符 | real_corpus |
+| `BadMapList` | 降级/硬拒 | map_list 越界或与头部表计数不符（偏移越界可恢复） | malformed |
+| `BadTableSpan` | 硬拒 | ID 表/区间声明的 (size, off) 越出文件 | malformed |
+| `BadStringData` | 访问时 | string_data_item 越界、无终止 NUL 或 ULEB 非法（`string()`/`stringData()` 时报） | lazy |
+| `BadLeb128` | 访问时 | LEB128 超过 32 位或字节数超限 | leb128 |
+| `BadClassData` | 访问时/硬拒 | 偏移悬垂降级；payload 计数/差分非法则 fail-closed | malformed/lazy |
+| `BadCodeItem` | 访问时 | code_item 头部、指令区或 tries 区越界/自相矛盾 | code_item |
+| `BadEncodedValue` | 访问时 | encoded_value 类型、value_arg 或嵌套深度非法 | encoded_value |
+| `BadIndex` | 降级 | 索引悬垂或指向错误类型的条目（解码条目时记诊断） | code_item |
+| `BadChecksum` | 降级 | adler32 不符（可 `verifyIntegrity(false)` 关闭） | malformed |
+| `BadSignature` | 降级 | SHA-1 签名不符（同上） | malformed |
+| `IdTableFull` | 构建期 | type/proto/field/method 表达到 65536 条上限（格式硬顶） | builder |
+
+### WriteError 逐码语义
+
+| 码 | 语义 | 测试背书 |
+|---|---|---|
+| `MissingSource` | 需要源字节但模型未保留（无源走增量/透传） | incremental |
+| `Unencodable` | 模型内容超出编码域宽或自相矛盾，拒绝产出截断字节 | class_data |
+| `NotModeled` | 版本或结构没有冻结语义（增量路径的 041、非空 link 区、大端） | version041 |
+| `SourceUnreadable` | 重建需要再次解码源条目，但源字节不可读或自相矛盾 | builder |
+| `InvalidModel` | 模型引用缺失或替换项指向不存在/无方法体的方法 | builder_edit |
+| `UnmappedRawSection` | 表索引需要重排，但未建模 section 无法迁移内部引用 | builder |
+| `NotIncremental` | 增量重建的前提被破坏（编辑触及 ID 表），需改走 canonical | incremental |
+
+### 帧分析诊断（FrameDiagnostic，strict 档）
+
+`WidePairing`（cat2 半寄存器被独立读写）、`MoveResultPair`（move-result 未紧跟
+invoke/filled-new-array）、`MonitorBalance`（出口深度非零 / exit 无配对）、
+`TypeConflict`（冲突合流的寄存器被读取——合并本身静默，与 ART 的延迟判废
+一致）、`BadOperand`（寄存器越界 / 引用种类不符 / 参数个数不符）。best-effort
+档同一引擎、零诊断；语料门要求真实 dex 全方法 strict 零诊断（analysis_test）。
 
 ## 指令
 
@@ -112,9 +166,9 @@ redex 模式是双边管线对比：原文与重建产物走同一 ReDex 优化�
 
 - odex / vdex / art / compact dex。
 - APK、resources.arsc、AXML 与多 dex 模型。
-- ID 表条目新增与删除（字符串 intern 除外）；压缩与 vacuum。
-- visitor 形状与库内方法体 AST。
-- opcode 形态合并或自动提升。
+- 增量路径的 ID 表级新增与删除（intern/addType/addMethod 等触及 ID 表即 `NotIncremental`，改走 canonical）；vacuum 仅作为 canonical 路径的显式 opt-in（`BuildOptions::vacuumIds`）。
+- visitor 形状；方法体 AST 已翻案为 CodeDom（值句柄、无 visitor，见「分层」）。
+- opcode 形态合并或自动提升（core；libsmali 汇编器作为 adapter 显式选形态）。
 - 修改后字节 diff 最小化：增量重建保留源布局，输出 diff 小是布局保持的结果而非优化目标；库不提供字节级 patch。
 
 ## 相关

@@ -86,7 +86,8 @@ Result<void, WriteError> applyMemberEdits(ClassData& data, const MemberEditSet& 
 Result<std::optional<EncodedArrayItem>, WriteError> synthesizeStaticValues(
     DexFile& dex, ca::u32 classDefIdx, const ClassData* original,
     const std::vector<ca::u32>& addedStatic, const MemberEditSet& edits,
-    const std::vector<ca::u32>* fieldRemap);
+    const std::vector<ca::u32>* fieldRemap,
+    bool trimTrailingDefaults = false);
 
 /// @brief 注解合并的结果：逐类生效目录与自有 set/ref_list 的键分配。
 struct EffectiveDirectory

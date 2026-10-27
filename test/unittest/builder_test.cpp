@@ -258,22 +258,14 @@ TEST(DexBuilder, RejectsUnknownOrDuplicateReplacement)
 
 TEST(DexBuilder, RejectsUnfrozenStructures)
 {
+    // 无源 DexFile 现在允许走 canonical（从零构建）；version 0 未冻结仍拒。
     DexFile empty;
     const auto noSource = buildDex(empty);
     ASSERT_TRUE(noSource.is_err());
-    EXPECT_EQ(noSource.unwrap_err(), WriteError::MissingSource);
+    EXPECT_EQ(noSource.unwrap_err(), WriteError::NotModeled);
 
-    std::vector<ca::u8> v41 = dex_test::makeHelloDex();
-    v41[4] = '0';
-    v41[5] = '4';
-    v41[6] = '1';
-    auto parsed41 = readDex(dex_test::asSlice(v41));
-    ASSERT_TRUE(parsed41.is_ok());
-    std::unique_ptr<DexFile> file41 = std::move(parsed41).unwrap();
-    const auto built41 = buildDex(*file41);
-    ASSERT_TRUE(built41.is_err());
-    EXPECT_EQ(built41.unwrap_err(), WriteError::NotModeled);
-
+    // 041 canonical 写回已解冻（container 字段重置语义见 Dex041 用例）；
+    // 非空 link 区仍未建模，拒绝。
     std::vector<ca::u8> linked = dex_test::makeHelloDex();
     dex_test::patchU32(linked, 44, 4);  // link_size
     auto parsedLink = readDex(dex_test::asSlice(linked));
