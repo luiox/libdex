@@ -88,6 +88,48 @@ TEST(DexVacuum, VacuumIsIdempotent)
     EXPECT_EQ(second.unwrap(), first.unwrap());
 }
 
+/// @brief 仅被 .catch 引用的类型也是闭包成员：漏标会让 vacuum 把它剔除，
+///        重映射后 handler 悄悄改捕另一个类。
+TEST(DexVacuum, KeepsCatchHandlerType)
+{
+    Assembled out;
+    out.dex = dex::core::DexFile::createEmpty(35);
+    ASSERT_NE(out.dex, nullptr);
+    const char* kSrc =
+        ".class public LTryer;\n"
+        ".super Ljava/lang/Object;\n"
+        ".method public static boom()V\n"
+        "    .registers 2\n"
+        ":try_start_0\n"
+        "    invoke-static {}, LOnlyHere;->thrower()V\n"
+        ":try_end_0\n"
+        "    .catch Ljava/lang/IllegalStateException; {:try_start_0 .. :try_end_0} :catch_0\n"
+        "    return-void\n"
+        "    :catch_0\n"
+        "    move-exception v0\n"
+        "    return-void\n"
+        ".end method\n";
+    dex::smali::SmaliAssembler assembler(*out.dex);
+    auto r = assembler.assembleClass(kSrc);
+    ASSERT_TRUE(r.is_ok());
+    out.options = assembler.options();
+    out.options.keepUnknownSections = false;
+    out.options.vacuumIds = true;
+
+    auto built = dex::core::buildDex(*out.dex, out.options);
+    ASSERT_TRUE(built.is_ok()) << dex::core::to_string(built.unwrap_err());
+
+    auto reparsed = dex::core::readDex(dex_test::asSlice(built.unwrap()));
+    ASSERT_TRUE(reparsed.is_ok());
+    std::unique_ptr<DexFile> file = std::move(reparsed).unwrap();
+
+    // catch 类型必须仍在 type_ids 且被 handler 引用；反汇编文本可校验。
+    auto text = dex::smali::disassembleClass(*file, 0);
+    ASSERT_TRUE(text.is_ok());
+    EXPECT_NE(text.unwrap().find(".catch Ljava/lang/IllegalStateException;"),
+              std::string::npos);
+}
+
 TEST(DexVacuum, ClosureKeepsEverythingOnTightCorpus)
 {
     auto parsed = dex::core::readDex(dex_test::asSlice(dex_test::makeHelloDex()));

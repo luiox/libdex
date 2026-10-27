@@ -215,15 +215,16 @@ std::vector<CfgBlock> buildCfg(const std::vector<Insn>& insns,
                     static_cast<ca::u32>(static_cast<ca::i64>(i.address) + i.branchOffset));
                 if (pit != payloadByAddr.end()) {
                     const Insn& p = *pit->second;
+                    // 目标偏移相对 switch 指令地址，不是 payload 地址。
                     if (p.payloadKind == PayloadKind::PackedSwitch) {
                         for (ca::u32 t = 0; t < p.payloadCount; ++t) {
                             addAddr(static_cast<ca::u32>(
-                                static_cast<ca::i64>(p.address) + p.packedSwitchTarget(t)));
+                                static_cast<ca::i64>(i.address) + p.packedSwitchTarget(t)));
                         }
                     } else if (p.payloadKind == PayloadKind::SparseSwitch) {
                         for (ca::u32 t = 0; t < p.payloadCount; ++t) {
                             addAddr(static_cast<ca::u32>(
-                                static_cast<ca::i64>(p.address) + p.sparseSwitchTarget(t)));
+                                static_cast<ca::i64>(i.address) + p.sparseSwitchTarget(t)));
                         }
                     }
                 }
@@ -233,7 +234,8 @@ std::vector<CfgBlock> buildCfg(const std::vector<Insn>& insns,
             addAddr(static_cast<ca::u32>(static_cast<ca::i64>(i.address) + i.branchOffset));
         }
         if (i.opcode == 0x27 /*throw*/ || (i.opcode >= 0x0e && i.opcode <= 0x11) /*return*/ ||
-            (i.opcode >= 0x28 && i.opcode <= 0x2c) /*goto/switch*/) {
+            (i.opcode >= 0x28 && i.opcode <= 0x2c) /*goto/switch*/ ||
+            (i.opcode >= 0x32 && i.opcode <= 0x37) /*条件分支：落点自成块*/) {
             addAddr(i.address + i.width);  // 转移后的下一条自成块
         }
     }
@@ -307,10 +309,11 @@ std::vector<CfgBlock> buildCfg(const std::vector<Insn>& insns,
                 static_cast<ca::u32>(static_cast<ca::i64>(last->address) + last->branchOffset));
             if (pit != payloadByAddr.end()) {
                 const Insn& p = *pit->second;
+                // 目标偏移相对 switch 指令地址；default 分支线性落入下一条。
                 if (p.payloadKind == PayloadKind::PackedSwitch) {
                     for (ca::u32 t = 0; t < p.payloadCount; ++t) {
                         const ca::u32 target = blockAt(
-                            static_cast<ca::u32>(static_cast<ca::i64>(p.address) +
+                            static_cast<ca::u32>(static_cast<ca::i64>(last->address) +
                                                  p.packedSwitchTarget(t)));
                         if (target != 0xFFFFFFFFu) {
                             blk.successors.push_back(target);
@@ -319,13 +322,18 @@ std::vector<CfgBlock> buildCfg(const std::vector<Insn>& insns,
                 } else if (p.payloadKind == PayloadKind::SparseSwitch) {
                     for (ca::u32 t = 0; t < p.payloadCount; ++t) {
                         const ca::u32 target = blockAt(
-                            static_cast<ca::u32>(static_cast<ca::i64>(p.address) +
+                            static_cast<ca::u32>(static_cast<ca::i64>(last->address) +
                                                  p.sparseSwitchTarget(t)));
                         if (target != 0xFFFFFFFFu) {
                             blk.successors.push_back(target);
                         }
                     }
                 }
+            }
+            if (nextIdx != 0xFFFFFFFFu) {
+                blk.successors.push_back(nextIdx);  // switch 的 default 落点
+            } else {
+                blk.isExitReachable = true;
             }
         } else if (last->opcode == 0x27 || (last->opcode >= 0x0e && last->opcode <= 0x11)) {
             blk.isExitReachable = true;  // 无流出
@@ -570,8 +578,12 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
             }
             if (cur.regs[reg].isWideLow()) {
                 diag(addr, FrameDiagnostic::Code::WidePairing);
-                if (reg + 1 < code.registersSize) {
-                    cur.regs[reg + 1] = RegType::top();  // 宽对被踩断
+                // 宽对两半都记 Long/Double，只能靠邻居判定半别：前一寄存器
+                // 也是宽 → reg 视作高半，清低半；否则按低半清 reg+1。
+                if (reg > 0 && cur.regs[reg - 1].isWideLow()) {
+                    cur.regs[reg - 1] = RegType::top();
+                } else if (reg + 1 < code.registersSize) {
+                    cur.regs[reg + 1] = RegType::top();
                 }
             }
             cur.regs[reg] = t;
@@ -596,7 +608,8 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
         const auto argsOf = [&]() -> std::vector<ca::u32> {
             std::vector<ca::u32> regs;
             if (insn.format == InsnFormat::F35c || insn.format == InsnFormat::F45cc) {
-                for (ca::u32 k = 0; k < insn.registerCount; ++k) {
+                const std::size_t kMax = std::min<std::size_t>(insn.registerCount, 5);
+                for (std::size_t k = 0; k < kMax; ++k) {
                     regs.push_back(insn.registers[k]);
                 }
             } else {
@@ -627,29 +640,42 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
                 const Result<TypeListSpan, ReadError> params = dex.protoParameters(proto);
                 if (params.is_ok()) {
                     const TypeListSpan& list = params.unwrap();
+                    // 寄存器槽数按宽参数展开成对计数，不能用参数个数对齐。
+                    ca::u32 wantSlots = 0;
+                    for (ca::u32 p = 0; p < list.size; ++p) {
+                        wantSlots += regTypeOfTypeIdx(dex, list.at(p)).isWideLow() ? 2u : 1u;
+                    }
                     if (strict &&
-                        list.size + (hasReceiver ? 1u : 0u) != args.size()) {
+                        wantSlots + (hasReceiver ? 1u : 0u) != args.size()) {
                         diag(addr, FrameDiagnostic::Code::BadOperand);
                     }
                     std::size_t argPos = 0;
                     if (hasReceiver && argPos < args.size()) {
                         checkRefish(args[argPos++]);  // 接收者（可为未初始化引用）
                     }
-                    const std::size_t n =
-                        std::min<std::size_t>(list.size, args.size() - argPos);
-                    for (std::size_t p = 0; p < n; ++p) {
-                        checkValue(args[argPos + p], regTypeOfTypeIdx(dex, list.at(p)));
+                    for (ca::u32 p = 0; p < list.size && argPos < args.size(); ++p) {
+                        const RegType want = regTypeOfTypeIdx(dex, list.at(p));
+                        checkValue(args[argPos], want);
+                        argPos += want.isWideLow() ? 2u : 1u;
                     }
                 }
             }
             if (allowInit && insn.opcode == 0x70 /*invoke-direct*/ &&
                 insn.indexKind == IndexKind::Method && insn.index < dex.methodCount()) {
                 const auto callee = dex.methodName(insn.index);
-                if (callee.is_ok() && callee.unwrap().as_std_view() == "<init>") {
+                if (callee.is_ok() && callee.unwrap().as_std_view() == "<init>" &&
+                    !args.empty()) {
+                    // 只初始化接收者与持有同一未初始化引用（同一 new-instance
+                    // 地址）的寄存器；其余 UninitRef 属于别的对象。
+                    const RegType& receiver = cur.regs[args.front()];
+                    const RegType initialized =
+                        RegType::ref(dex.methodIds[insn.index].classIdx);
                     for (RegType& slot : cur.regs) {
-                        if (slot.kind == RegKind::UninitRef ||
-                            slot.kind == RegKind::UninitThis) {
-                            slot = RegType::ref(dex.methodIds[insn.index].classIdx);
+                        if (slot.kind == receiver.kind &&
+                            (slot.kind == RegKind::UninitRef ||
+                             slot.kind == RegKind::UninitThis) &&
+                            slot.addr == receiver.addr) {
+                            slot = initialized;
                         }
                     }
                 }
@@ -763,7 +789,7 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
             }
             break;
         case 0x1f:  // check-cast
-            checkRefish(insn.registers[1]);
+            checkRefish(insn.registers[0]);
             writeSingle(insn.registers[0], RegType::ref(insn.index));
             break;
         case 0x20:  // instance-of
@@ -840,8 +866,8 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
                 const RegType ft = regTypeOfTypeIdx(dex, dex.fieldIds[insn.index].typeIdx);
                 const bool igetFamily = insn.opcode < 0x60;
                 const bool isGet =
-                    (insn.opcode >= 0x52 && insn.opcode <= 0x5b) ||
-                    (insn.opcode >= 0x60 && insn.opcode <= 0x6b);
+                    (insn.opcode >= 0x52 && insn.opcode <= 0x58) ||  // iget
+                    (insn.opcode >= 0x60 && insn.opcode <= 0x66);    // sget
                 if (isGet) {
                     if (igetFamily) {
                         checkRefish(insn.registers[1]);  // B 对象
@@ -940,14 +966,24 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
                 static_cast<ca::u32>(static_cast<ca::i64>(insn.address) + insn.branchOffset));
             if (pit != insIdx.end() && insns[pit->second].isPayload()) {
                 const Insn& p = insns[pit->second];
+                // 目标偏移相对 switch 指令地址，不是 payload 地址。
                 if (p.payloadKind == PayloadKind::PackedSwitch) {
                     for (ca::u32 t = 0; t < p.payloadCount; ++t) {
-                        offerAddr(static_cast<ca::i64>(p.address) + p.packedSwitchTarget(t));
+                        offerAddr(static_cast<ca::i64>(insn.address) +
+                                  p.packedSwitchTarget(t));
                     }
                 } else if (p.payloadKind == PayloadKind::SparseSwitch) {
                     for (ca::u32 t = 0; t < p.payloadCount; ++t) {
-                        offerAddr(static_cast<ca::i64>(p.address) + p.sparseSwitchTarget(t));
+                        offerAddr(static_cast<ca::i64>(insn.address) +
+                                  p.sparseSwitchTarget(t));
                     }
+                }
+            }
+            // default 分支线性落到下一条真实指令（payload 不可执行，跳过）。
+            for (ca::u32 n = idx + 1; n < insns.size(); ++n) {
+                if (!insns[n].isPayload()) {
+                    offer(n, cur);
+                    break;
                 }
             }
         } else if (insn.opcode == 0x27 ||
@@ -957,8 +993,11 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
             if (insn.opcode >= 0x38 && insn.opcode <= 0x3d) {
                 offerAddr(static_cast<ca::i64>(insn.address) + insn.branchOffset);
             }
-            if (idx + 1 < insns.size()) {
-                offer(idx + 1, cur);
+            for (ca::u32 n = idx + 1; n < insns.size(); ++n) {
+                if (!insns[n].isPayload()) {
+                    offer(n, cur);
+                    break;
+                }
             }
         }
     }

@@ -92,24 +92,33 @@ Result<std::string, SmaliError> toText(DexFile& dex, ca::u32 stringIdx)
 }
 
 /// @brief smali 字符串字面量（带引号与转义）。
+/// @note  按 UTF-16 码元转义：非 ASCII/不可打印逐码元 \uXXXX。若按 UTF-8
+///        字节转义，多字节字符会被拆成逐字节的 \u00xx，汇编端还原出另一个
+///        字符串，往返即碎。baksmali 同为码元粒度。
 Result<std::string, SmaliError> quotedString(DexFile& dex, ca::u32 stringIdx)
 {
-    const Result<std::string, SmaliError> text = toText(dex, stringIdx);
-    if (text.is_err()) {
-        return text;
+    const Result<jstr::MUtf8StringRef, core::ReadError> s = dex.string(stringIdx);
+    if (s.is_err()) {
+        return Err(fromRead(s.unwrap_err()));
+    }
+    const Result<std::u16string, jstr::EncodingError> u16 =
+        jstr::mutf8_to_utf16(s.unwrap());
+    if (u16.is_err()) {
+        return Err(SmaliError::SourceUnreadable);
     }
     std::string out = "\"";
-    for (unsigned char c : text.unwrap()) {
+    for (char16_t c : u16.unwrap()) {
         switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
+        case u'"': out += "\\\""; break;
+        case u'\\': out += "\\\\"; break;
+        case u'\n': out += "\\n"; break;
+        case u'\r': out += "\\r"; break;
+        case u'\t': out += "\\t"; break;
         default:
-            if (c < 0x20 || c >= 0x7F) {
-                char buf[8];
-                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+            if (c < 0x20 || c > 0x7E) {
+                char buf[16];
+                std::snprintf(buf, sizeof(buf), "\\u%04x",
+                              static_cast<ca::u32>(c));
                 out += buf;
             } else {
                 out.push_back(static_cast<char>(c));
@@ -766,6 +775,18 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
         totalEndAddress = i.address + i.width;
     }
 
+    // payload 的 target 相对 switch 指令地址（DEX 规范，lower 同款语义），
+    // 不相对 payload 表自身；反查 31t → payload 建基址表。
+    std::unordered_map<ca::u32, ca::u32> switchBaseOfPayload;
+    for (const Insn& i : insns) {
+        if (i.format == core::InsnFormat::F31t) {
+            const ca::i64 pa = insnBranchTarget(i);
+            if (pa >= 0) {
+                switchBaseOfPayload.emplace(static_cast<ca::u32>(pa), i.address);
+            }
+        }
+    }
+
     // 事件流：debug local/file 事件与指令按地址穿插。
     std::size_t localIdx = 0;
     auto emitLocalEvents = [&](ca::u32 addr) -> Result<void, SmaliError> {
@@ -832,6 +853,9 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
         }
         if (i.isPayload()) {
             out += ind(2) + labels.at(i.address) + "\n";
+            const auto baseIt = switchBaseOfPayload.find(i.address);
+            const ca::u32 targetBase =
+                baseIt != switchBaseOfPayload.end() ? baseIt->second : i.address;
             switch (i.payloadKind) {
             case core::PayloadKind::PackedSwitch: {
                 out += ind(2) + ".packed-switch " +
@@ -839,7 +863,7 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
                 for (ca::u32 t = 0; t < i.payloadCount; ++t) {
                     out += ind(3) +
                            labels.at(static_cast<ca::u32>(
-                               static_cast<ca::i64>(i.address) +
+                               static_cast<ca::i64>(targetBase) +
                                i.packedSwitchTarget(t))) +
                            "\n";
                 }
@@ -852,7 +876,7 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
                     out += ind(3) + literalText(i.sparseSwitchKey(t), core::InsnFormat::F31i) +
                            " -> " +
                            labels.at(static_cast<ca::u32>(
-                               static_cast<ca::i64>(i.address) +
+                               static_cast<ca::i64>(targetBase) +
                                i.sparseSwitchTarget(t))) +
                            "\n";
                 }

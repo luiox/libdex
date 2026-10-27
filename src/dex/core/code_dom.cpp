@@ -281,6 +281,11 @@ Result<void, CodeDomError> CodeUnit::bindBranch(InsnId branch, LabelId target)
     if (!get(branch).isBranch()) {
         return Err(CodeDomError::BadShape);
     }
+    if (get(branch).format == InsnFormat::F31t) {
+        // 31t 的目标是 payload，走 bindPayload；bindBranch 会让 lower 把
+        // 偏移指向普通指令，产出 ART 拒收的方法体。
+        return Err(CodeDomError::BadShape);
+    }
     branchLabel_[branch.slot] = target;
     return Ok();
 }
@@ -300,6 +305,11 @@ Result<void, CodeDomError> CodeUnit::bindPayload(InsnId switchInsn, InsnId paylo
     const Insn& sw = get(switchInsn);
     const Insn& pl = get(payload);
     if (sw.format != InsnFormat::F31t || !pl.isPayload()) {
+        return Err(CodeDomError::BadShape);
+    }
+    const auto existingOwner = payloadOwner_.find(payload.slot);
+    if (existingOwner != payloadOwner_.end() && existingOwner->second != switchInsn.slot) {
+        // 两个 switch 共享一个 payload：1:1 owner 表无法表达，明确拒绝。
         return Err(CodeDomError::BadShape);
     }
     const PayloadKind kind = switchKindOf(sw.opcode);
@@ -401,6 +411,7 @@ Result<CodeUnit, CodeDomError> CodeUnit::promote(const CodeItem& item, ByteSlice
     for (ca::u32 i = 0; i < handles.size(); ++i) {
         Insn& insn = unit.get(handles[i]);
         if (insn.format == InsnFormat::F31t) {
+            const ca::u32 switchAddr = list[i].address;
             const ca::i64 payloadAddr = insnBranchTarget(insn);
             if (payloadAddr < 0 || payloadAddr >= static_cast<ca::i64>(totalEnd)) {
                 return Err(CodeDomError::Unencodable);
@@ -414,17 +425,31 @@ Result<CodeUnit, CodeDomError> CodeUnit::promote(const CodeItem& item, ByteSlice
             if (payloadHandle.slot == kEndSlot) {
                 return Err(CodeDomError::Unencodable);
             }
+            const auto existingOwner = unit.payloadOwner_.find(payloadHandle.slot);
+            if (existingOwner != unit.payloadOwner_.end() &&
+                existingOwner->second != handles[i].slot) {
+                // 两个 switch 共享一个 payload：lower 的 1:1 owner 表无法表
+                // 达，当场拒绝而不是静默孤儿化前者。
+                return Err(CodeDomError::BadShape);
+            }
             unit.payloadOwner_[payloadHandle.slot] = handles[i].slot;
+            // bindPayload 同形：31t 的 branchLabel 指向 payload 锚点，
+            // lower 靠它解析 payload 地址。
+            unit.branchLabel_[handles[i].slot] = label.unwrap();
 
             std::vector<LabelId> targets;
             const PayloadKind kind = switchKindOf(insn.opcode);
             if (kind == PayloadKind::PackedSwitch || kind == PayloadKind::SparseSwitch) {
-                targets.reserve(insn.payloadCount);
-                for (ca::u32 t = 0; t < insn.payloadCount; ++t) {
+                // size/target 表在 payload 伪指令上（decode 只填它）；
+                // target 值相对 switch 指令地址（DEX 规范）。
+                const Insn& pl = unit.get(payloadHandle);
+                targets.reserve(pl.payloadCount);
+                for (ca::u32 t = 0; t < pl.payloadCount; ++t) {
                     const ca::i32 rel =
-                        kind == PayloadKind::PackedSwitch ? insn.packedSwitchTarget(t)
-                                                          : insn.sparseSwitchTarget(t);
-                    const ca::i64 abs = payloadAddr + static_cast<ca::i64>(rel);
+                        kind == PayloadKind::PackedSwitch ? pl.packedSwitchTarget(t)
+                                                          : pl.sparseSwitchTarget(t);
+                    const ca::i64 abs =
+                        static_cast<ca::i64>(switchAddr) + static_cast<ca::i64>(rel);
                     if (abs < 0 || abs > static_cast<ca::i64>(totalEnd)) {
                         return Err(CodeDomError::Unencodable);
                     }
@@ -542,6 +567,14 @@ Result<LoweredCode, CodeDomError> CodeUnit::lower(bool autoAlign)
     // 定宽 → 对齐 → 终算：payload 重建会改宽度（目标数被编辑过时），先按
     // 当前地址重建一次把宽度定下来，再插对齐 nop，最后用终态地址重算全部
     // 偏移。重建对固定宽度是幂等的。
+    // 手工构造的 Insn 容易忘填 width；地址/偏移全建立在 width 上，而编码按
+    // 格式规范宽度写——先对不上就当场报错，免得静默错位。
+    for (const ca::u32 slot : order_) {
+        const Insn& s = slots_[slot].insn;
+        if (!s.isPayload() && s.width != insnWidth(s.format)) {
+            return Err(CodeDomError::Unencodable);
+        }
+    }
     const auto rebuildAndFill = [&](bool fillBranches) -> Result<void, CodeDomError> {
         const std::vector<ca::u32> addrs = computeAddresses();
         for (ca::usize pos = 0; pos < order_.size(); ++pos) {
@@ -580,11 +613,14 @@ Result<LoweredCode, CodeDomError> CodeUnit::lower(bool autoAlign)
 
                 const PayloadKind kind = switchKindOf(cur.opcode);
                 if (kind == PayloadKind::PackedSwitch || kind == PayloadKind::SparseSwitch) {
+                    // payload 数据（size/firstKey/keys）在 payload 伪指令上，
+                    // decode 只填它；31t 自身只有寄存器与分支偏移。
+                    const Insn& pl = payloadRef.insn;
                     std::vector<ca::i32> keys;
                     if (kind == PayloadKind::SparseSwitch) {
-                        keys.reserve(cur.payloadCount);
-                        for (ca::u32 k = 0; k < cur.payloadCount; ++k) {
-                            keys.push_back(cur.sparseSwitchKey(k));
+                        keys.reserve(pl.payloadCount);
+                        for (ca::u32 k = 0; k < pl.payloadCount; ++k) {
+                            keys.push_back(pl.sparseSwitchKey(k));
                         }
                     }
                     std::vector<ca::i32> targets;
@@ -604,7 +640,7 @@ Result<LoweredCode, CodeDomError> CodeUnit::lower(bool autoAlign)
                     }
                     Result<PayloadInsn, InsnEncodeError> p =
                         kind == PayloadKind::PackedSwitch
-                            ? makePackedSwitchPayload(cur.payloadFirstKey, targets)
+                            ? makePackedSwitchPayload(pl.payloadFirstKey, targets)
                             : makeSparseSwitchPayload(keys, targets);
                     if (p.is_err()) {
                         return Err(CodeDomError::Unencodable);

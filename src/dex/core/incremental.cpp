@@ -1268,6 +1268,9 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
                 if (e == nullptr) {
                     return Err(WriteError::InvalidModel);
                 }
+                // ref_list 本身也要记为被引用：否则闭包把它当孤儿删掉，
+                // 目录透传检查见 kDangling 直接判 InvalidModel。
+                note(key);
                 for (ca::u32 setOff : e->refList->annotationSetOffs) {
                     if (setOff != 0) {
                         setKeys.insert(setOff);
@@ -1362,7 +1365,10 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
             }
             e.kind = Kind::ClassData;
             e.effectiveClassData = &effectiveByClass[classDefIdx];
-        } else if (key >= kIncArrayKeyBase && key < kOwnedTypeListKeyBase) {
+        } else if (key >= kIncArrayKeyBase) {
+            // 顶段 key（0x7C000000+classDefIdx）：合成 static_values。此前
+            // 误写上界 kOwnedTypeListKeyBase（0x4…，比基址还小）恒为假，
+            // 全部落进 directory 分支被拒。
             const ca::u32 classDefIdx = key - kIncArrayKeyBase;
             if (!synthesizedValues[classDefIdx].has_value()) {
                 return Err(WriteError::InvalidModel);
@@ -1550,6 +1556,7 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
                 if (v.is_err()) {
                     return Err(v.unwrap_err());
                 }
+                method.codeOff = v.unwrap();
             }
             std::sort(list->begin(), list->end(),
                       [](const EncodedMethod& a, const EncodedMethod& b) {
@@ -2065,6 +2072,11 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
                 sameAsPrevious = false;
             }
             previous[idx] = current;
+        }
+        // 源尾（最后条目之后到文件尾）不设条目但会原样透传，容量必须预留，
+        // 否则发射阶段 memcpy 越过 total（堆越界写）。
+        if (fileSize > prevEnd) {
+            cursor += fileSize - prevEnd;
         }
         offsets.sortSegments();
         total = cursor;

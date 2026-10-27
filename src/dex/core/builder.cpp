@@ -388,6 +388,11 @@ Result<void, WriteError> remapDebugInfoIndices(DebugInfo& info, const IndexRemap
 {
     bool headerChanged = false;
     for (ca::u32& name : info.parameterNames) {
+        // 规范允许 param_name / name / signature 取 NO_INDEX；保持原样透传，
+        // 只对真实索引做越界检查与重映射。
+        if (name == DexFile::kNoIndex) {
+            continue;
+        }
         if (name >= maps.strings.size()) {
             return Err(WriteError::InvalidModel);
         }
@@ -405,33 +410,39 @@ Result<void, WriteError> remapDebugInfoIndices(DebugInfo& info, const IndexRemap
         bool changed = false;
         if (op.opcode == kDbgStartLocal || op.opcode == kDbgStartLocalExtended ||
             op.opcode == kDbgSetFile) {
-            if (op.nameIdx >= maps.strings.size()) {
-                return Err(WriteError::InvalidModel);
-            }
-            const ca::u32 mapped = maps.strings[op.nameIdx];
-            if (mapped != op.nameIdx) {
-                op.nameIdx = mapped;
-                changed = true;
+            if (op.nameIdx != DexFile::kNoIndex) {
+                if (op.nameIdx >= maps.strings.size()) {
+                    return Err(WriteError::InvalidModel);
+                }
+                const ca::u32 mapped = maps.strings[op.nameIdx];
+                if (mapped != op.nameIdx) {
+                    op.nameIdx = mapped;
+                    changed = true;
+                }
             }
         }
         if (op.opcode == kDbgStartLocal || op.opcode == kDbgStartLocalExtended) {
-            if (op.typeIdx >= maps.types.size()) {
-                return Err(WriteError::InvalidModel);
-            }
-            const ca::u32 mapped = maps.types[op.typeIdx];
-            if (mapped != op.typeIdx) {
-                op.typeIdx = mapped;
-                changed = true;
+            if (op.typeIdx != DexFile::kNoIndex) {
+                if (op.typeIdx >= maps.types.size()) {
+                    return Err(WriteError::InvalidModel);
+                }
+                const ca::u32 mapped = maps.types[op.typeIdx];
+                if (mapped != op.typeIdx) {
+                    op.typeIdx = mapped;
+                    changed = true;
+                }
             }
         }
         if (op.opcode == kDbgStartLocalExtended) {
-            if (op.sigIdx >= maps.strings.size()) {
-                return Err(WriteError::InvalidModel);
-            }
-            const ca::u32 mapped = maps.strings[op.sigIdx];
-            if (mapped != op.sigIdx) {
-                op.sigIdx = mapped;
-                changed = true;
+            if (op.sigIdx != DexFile::kNoIndex) {
+                if (op.sigIdx >= maps.strings.size()) {
+                    return Err(WriteError::InvalidModel);
+                }
+                const ca::u32 mapped = maps.strings[op.sigIdx];
+                if (mapped != op.sigIdx) {
+                    op.sigIdx = mapped;
+                    changed = true;
+                }
             }
         }
         if (changed) {

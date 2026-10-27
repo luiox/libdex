@@ -204,13 +204,15 @@ void markDebug(Marker& m, const DebugInfo& info)
         }
     }
     for (const DebugOp& op : info.ops) {
-        if (op.nameIdx != 0) {
+        // 缺席标记是 NO_INDEX（0xFFFFFFFF）而非 0：按 0 哨兵会漏标合法的
+        // 索引 0 引用（空串 / 排序最靠前的类型），vacuum 后悄悄换指。
+        if (op.nameIdx != DexFile::kNoIndex) {
             m.markString(op.nameIdx);
         }
-        if (op.typeIdx != 0) {
+        if (op.typeIdx != DexFile::kNoIndex) {
             m.markType(op.typeIdx);
         }
-        if (op.sigIdx != 0) {
+        if (op.sigIdx != DexFile::kNoIndex) {
             m.markString(op.sigIdx);
         }
     }
@@ -234,6 +236,13 @@ Result<void, WriteError> markCode(Marker& m, DexFile& dex, ca::u32 codeOff)
             m, subOrEmpty(dex.source(), item->insns.offset, item->insns.length));
         r.is_err()) {
         return r;
+    }
+    // catch handler 的类型索引也是 type_ids 的引用闭包成员；漏标会让仅被
+    // .catch 引用的类型被 vacuum 掉，重映射后悄悄落到别的类型上。
+    for (const CatchHandler& handler : item->catchHandlers) {
+        for (const TypedCatch& typed : handler.typed) {
+            m.markType(typed.typeIdx);
+        }
     }
     if (item->debugInfoOff != 0) {
         const Result<const DebugInfo*, ReadError> info = dex.debugInfo(item->debugInfoOff);
@@ -264,6 +273,12 @@ Result<void, WriteError> markEditRoots(Marker& m, DexFile& dex,
                     return r;
                 }
             }
+            // 新增体的 catch 类型同样是根（与源方法体 markCode 同规则）。
+            for (const CatchHandler& handler : add->item.catchHandlers) {
+                for (const TypedCatch& typed : handler.typed) {
+                    m.markType(typed.typeIdx);
+                }
+            }
             if (!add->debugInfo.empty()) {
                 const Result<DebugInfo, ReadError> info = readDebugInfo(
                     ByteSlice{add->debugInfo.data(), add->debugInfo.size()}, 0);
@@ -281,6 +296,11 @@ Result<void, WriteError> markEditRoots(Marker& m, DexFile& dex,
                     m, ByteSlice{entry.second->insns.data(), entry.second->insns.size()});
                 r.is_err()) {
                 return r;
+            }
+        }
+        for (const CatchHandler& handler : entry.second->item.catchHandlers) {
+            for (const TypedCatch& typed : handler.typed) {
+                m.markType(typed.typeIdx);
             }
         }
     }
@@ -390,22 +410,36 @@ Result<VacuumKeep, WriteError> computeVacuumClosure(DexFile& dex,
             }
         }
 
-        // class_data：定义成员本身是根。
+        // class_data：定义成员本身是根；被编辑层移除的成员除外——闭包若
+        // 给它们续命，首次 vacuum+removal 的产物会留死条目，二次 vacuum
+        // 才掉，破坏「重建即不动点」。
         const Result<const ClassData*, ReadError> data = dex.classData(i);
         if (data.is_err()) {
             return Err(WriteError::SourceUnreadable);
         }
         if (data.unwrap() != nullptr) {
             for (const EncodedField& f : data.unwrap()->staticFields) {
+                if (edits && edits->removedFields.count(f.fieldIndex) != 0) {
+                    continue;
+                }
                 m.markField(f.fieldIndex);
             }
             for (const EncodedField& f : data.unwrap()->instanceFields) {
+                if (edits && edits->removedFields.count(f.fieldIndex) != 0) {
+                    continue;
+                }
                 m.markField(f.fieldIndex);
             }
             for (const EncodedMethod& meth : data.unwrap()->directMethods) {
+                if (edits && edits->removedMethods.count(meth.methodIndex) != 0) {
+                    continue;
+                }
                 m.markMethod(meth.methodIndex);
             }
             for (const EncodedMethod& meth : data.unwrap()->virtualMethods) {
+                if (edits && edits->removedMethods.count(meth.methodIndex) != 0) {
+                    continue;
+                }
                 m.markMethod(meth.methodIndex);
             }
         }
@@ -486,12 +520,18 @@ Result<VacuumKeep, WriteError> computeVacuumClosure(DexFile& dex,
                 continue;
             }
             for (const EncodedMethod& meth : data->directMethods) {
+                if (edits && edits->removedMethods.count(meth.methodIndex) != 0) {
+                    continue;  // 移除的方法体随之丢弃，不续命其引用
+                }
                 if (Result<void, WriteError> r = markCode(m, dex, meth.codeOff);
                     r.is_err()) {
                     return Err(r.unwrap_err());
                 }
             }
             for (const EncodedMethod& meth : data->virtualMethods) {
+                if (edits && edits->removedMethods.count(meth.methodIndex) != 0) {
+                    continue;
+                }
                 if (Result<void, WriteError> r = markCode(m, dex, meth.codeOff);
                     r.is_err()) {
                     return Err(r.unwrap_err());

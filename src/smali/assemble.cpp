@@ -93,6 +93,9 @@ std::vector<std::string> tokenize(std::string_view line)
             break;
         case ' ':
         case '\t':
+        case ',':
+            // 裸逗号一律当分隔符：baksmali 规范文本与自家空格文本都能吃
+            // （引号内的逗号走 inQuote 分支，不受影响）。
             flush();
             break;
         case '{':
@@ -181,9 +184,6 @@ R<Ref> parseRef(const std::string& tok, ca::u32 line)
         // 类型描述符。
         if (tok.find(';') == std::string::npos &&
             tok.find_first_of("[BCDFIJSZV") != 0) {
-            if (std::getenv("LIBDEX_ASM_DBG") != nullptr) {
-                std::fprintf(stderr, "parseRef type-branch fail [%s]\n", tok.c_str());
-            }
             return Err(fail(AsmErrorCode::BadRef, line, tok));
         }
         r.kind = Ref::Type;
@@ -292,10 +292,6 @@ R<ca::u32> internType(DexFile& dex, const std::string& desc, ca::u32 line)
 {
     const Result<ca::u32, core::ReadError> idx = dex.addType(desc);
     if (idx.is_err()) {
-        if (std::getenv("LIBDEX_ASM_DBG") != nullptr) {
-            std::fprintf(stderr, "internType fail [%s] err=%d\n", desc.c_str(),
-                         static_cast<int>(idx.unwrap_err()));
-        }
         return Err(fail(AsmErrorCode::BadRef, line, desc));
     }
     return Ok(idx.unwrap());
@@ -444,10 +440,6 @@ struct ValueParser
                 // name = value
                 const std::size_t eq = text.find('=', pos);
                 if (eq == std::string::npos) {
-                    if (std::getenv("LIBDEX_ASM_DBG") != nullptr) {
-                        std::fprintf(stderr, "subannotation element fail at pos=%zu rest=[%s]' + BS + 'n",
-                                     pos, text.substr(pos, 60).c_str());
-                    }
                     return Err(fail(AsmErrorCode::BadValue, line, "annotation element"));
                 }
                 std::string name;
@@ -748,6 +740,42 @@ R<Ref> parseMethodSig(const std::string& tok, ca::u32 line)
     return Ok(std::move(r));
 }
 
+/// @brief 裸 proto 描述符 `(params)ret`（invoke-polymorphic 第二操作数）。
+///        parseRef 只认 类型/字段/方法引用 形态，认不了这个，单独切。
+R<Ref> parseProtoDesc(const std::string& tok, ca::u32 line)
+{
+    if (tok.empty() || tok[0] != '(') {
+        return Err(fail(AsmErrorCode::BadRef, line, tok));
+    }
+    const std::size_t close = tok.find(')');
+    if (close == std::string::npos) {
+        return Err(fail(AsmErrorCode::BadRef, line, tok));
+    }
+    Ref r;
+    r.kind = Ref::Proto;
+    const std::string params = tok.substr(1, close - 1);
+    r.type = tok.substr(close + 1);
+    if (r.type.empty()) {
+        return Err(fail(AsmErrorCode::BadRef, line, tok));
+    }
+    for (std::size_t i = 0; i < params.size();) {
+        std::size_t j = i;
+        while (j < params.size() && params[j] == '[') {
+            ++j;
+        }
+        j += 1;
+        if (j - 1 < params.size() && params[j - 1] == 'L') {
+            while (j < params.size() && params[j] != ';') {
+                ++j;
+            }
+            j += 1;
+        }
+        r.params.push_back(params.substr(i, j - i));
+        i = j;
+    }
+    return Ok(std::move(r));
+}
+
 struct MethodCtx
 {
     std::string name;
@@ -826,11 +854,6 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
     // 方法索引与参数槽位。
     const Result<ca::u32, core::ReadError> retIdx = dex.addType(sig.unwrap().type);
     if (retIdx.is_err()) {
-        if (std::getenv("LIBDEX_ASM_DBG") != nullptr) {
-            std::fprintf(stderr, "header retType fail [%s] err=%d' + BS + 'n",
-                         sig.unwrap().type.c_str(),
-                         static_cast<int>(retIdx.unwrap_err()));
-        }
         return Err(fail(AsmErrorCode::BadRef, headLine, sig.unwrap().type));
     }
     std::vector<ca::u32> paramIdxs;
@@ -1223,8 +1246,14 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             } else {
                 // .fill-array-data + .array-data w ... .end array-data
                 while (bi + 1 < bodyLines.size() &&
+                       trimTok(bodyLines[bi + 1]) != ".end fill-array-data" &&
                        tokenize(bodyLines[bi + 1])[0] != ".array-data") {
                     ++bi;
+                }
+                if (bi + 1 >= bodyLines.size() ||
+                    tokenize(bodyLines[bi + 1])[0] != ".array-data") {
+                    return Err(fail(AsmErrorCode::Syntax, ln,
+                                    "missing .array-data after .fill-array-data"));
                 }
                 ++bi;
                 const std::vector<std::string> ad = tokenize(bodyLines[bi]);
@@ -1512,11 +1541,19 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
         case core::InsnFormat::F4rcc: {
             if (toks.size() < 3) { return Err(fail(AsmErrorCode::Syntax, ln, raw)); }
             // 寄存器组可能被 tokenizer 拆成 { / p0 / , / p1 / } 多个 token，
-            // 重新拼接到 '}' 收口。
+            // 重新拼接到 '}' 收口；列表元素间补逗号，range 的 .. 直连。
             std::string regs = toks[1];
             std::size_t regEnd = 1;
+            std::string prevTok = toks[1];
             while (regEnd + 1 < toks.size() && regs.find('}') == std::string::npos) {
-                regs += toks[++regEnd];
+                const std::string nx = toks[++regEnd];
+                const bool attach = regs.back() == '{' || nx == "}" || nx == ".." ||
+                                    prevTok == "..";
+                if (!attach) {
+                    regs += ',';
+                }
+                regs += nx;
+                prevTok = nx;
             }
             if (regEnd + 2 > toks.size()) {
                 return Err(fail(AsmErrorCode::Syntax, ln, raw));
@@ -1549,10 +1586,13 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                     std::string cur;
                     for (std::size_t i = 0; i <= regList.size(); ++i) {
                         if (i == regList.size() || regList[i] == ',') {
-                            R<ca::u16> a = parseReg(trimTok(cur), firstParamReg,
-                                                    registersSize, ln);
-                            if (a.is_err()) { return Err(a.unwrap_err()); }
-                            rs.push_back(a.unwrap());
+                            const std::string one = trimTok(cur);
+                            if (!one.empty()) {
+                                R<ca::u16> a = parseReg(one, firstParamReg,
+                                                        registersSize, ln);
+                                if (a.is_err()) { return Err(a.unwrap_err()); }
+                                rs.push_back(a.unwrap());
+                            }
                             cur.clear();
                         } else if (regList[i] != ' ') {
                             cur.push_back(regList[i]);
@@ -1587,23 +1627,27 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             insn.index = idx;
             if (mne->format == core::InsnFormat::F3rc ||
                 mne->format == core::InsnFormat::F4rcc) {
+                // 3rc 的寄存器计数是 u8；过宽当场报错而非静默截断。
+                if (rs.size() > 255) {
+                    return Err(fail(AsmErrorCode::Overflow, ln, raw));
+                }
                 insn.startRegister = rs.empty() ? 0 : rs.front();
                 insn.registerCount = static_cast<ca::u8>(rs.size());
             } else {
+                if (rs.size() > 5) {
+                    return Err(fail(AsmErrorCode::Overflow, ln, raw));
+                }
                 insn.registerCount = static_cast<ca::u8>(rs.size());
-                for (ca::u32 k = 0; k < rs.size() && k < 5; ++k) {
+                for (ca::u32 k = 0; k < rs.size(); ++k) {
                     insn.registers[k] = rs[k];
                 }
             }
             if (mne->format == core::InsnFormat::F45cc ||
                 mne->format == core::InsnFormat::F4rcc) {
-                if (toks.size() != 4) {
+                if (rest.size() != 2) {
                     return Err(fail(AsmErrorCode::Syntax, ln, raw));
                 }
-                if (rest.size() < 2) {
-                    return Err(fail(AsmErrorCode::Syntax, ln, raw));
-                }
-                R<Ref> pr = parseRef(rest[1], ln);
+                R<Ref> pr = parseProtoDesc(rest[1], ln);
                 if (pr.is_err()) { return Err(pr.unwrap_err()); }
                 R<ca::u32> pi = resolveProto(dex, pr.unwrap(), ln);
                 if (pi.is_err()) { return Err(pi.unwrap_err()); }
@@ -1653,10 +1697,6 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                         core::to_string(body.unwrap_err())));
     }
     MethodBody out = std::move(body).unwrap();
-    if (std::getenv("LIBDEX_BLD_DBG") != nullptr) {
-        std::fprintf(stderr, "asm commit: insnsSize=%u bytes=%zu\n",
-                    out.item.insnsSize, out.insns.size());
-    }
 
     // debug 事件 → ops（commit 后地址已定）。
     if (!ctx.events.empty() || !ctx.paramNames.empty()) {
@@ -1701,13 +1741,13 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             resolved.push_back(Resolved{a.unwrap(), 0, e.kind, e.line, e.reg,
                                         e.nameIdx, e.typeIdx, e.sigIdx});
         }
-        std::sort(resolved.begin(), resolved.end(),
-                  [](const Resolved& x, const Resolved& y) {
-                      if (x.addr != y.addr) {
-                          return x.addr < y.addr;
-                      }
-                      return x.order < y.order;
-                  });
+        std::stable_sort(resolved.begin(), resolved.end(),
+                         [](const Resolved& x, const Resolved& y) {
+                             if (x.addr != y.addr) {
+                                 return x.addr < y.addr;
+                             }
+                             return x.order < y.order;
+                         });
 
         core::DebugInfo info;
         for (const std::string& n : ctx.paramNames) {
@@ -1908,9 +1948,6 @@ Result<ca::u32, AsmError> SmaliAssembler::assembleClass(std::string_view text)
         }
         const std::vector<std::string> toks = tokenize(t);
         const std::string& d = toks[0];
-        if (std::getenv("LIBDEX_ASM_DBG") != nullptr) {
-            std::fprintf(stderr, "asm: line %u d=[%s]\n", ln, d.c_str());
-        }
 
         if (d == ".class") {
             if (toks.size() < 2) {
@@ -1936,6 +1973,9 @@ Result<ca::u32, AsmError> SmaliAssembler::assembleClass(std::string_view text)
             if (!haveClass) {
                 return Err(fail(AsmErrorCode::Syntax, ln, ".super before .class"));
             }
+            if (toks.size() != 2) {
+                return Err(fail(AsmErrorCode::Syntax, ln, t));
+            }
             const Result<ca::u32, core::ReadError> idx = dex_.addType(toks[1]);
             if (idx.is_err()) {
                 return Err(fail(AsmErrorCode::BadRef, ln, toks[1]));
@@ -1944,8 +1984,11 @@ Result<ca::u32, AsmError> SmaliAssembler::assembleClass(std::string_view text)
             continue;
         }
         if (d == ".source") {
-            const std::string body = t.substr(t.find('"'));
-            R<ca::u32> idx = internString(dex_, body.substr(1, body.size() - 2), ln);
+            if (toks.size() != 2 || toks[1].size() < 2 ||
+                toks[1].front() != '"' || toks[1].back() != '"') {
+                return Err(fail(AsmErrorCode::Syntax, ln, t));
+            }
+            R<ca::u32> idx = internString(dex_, toks[1].substr(1, toks[1].size() - 2), ln);
             if (idx.is_err()) {
                 return Err(idx.unwrap_err());
             }
@@ -1953,6 +1996,9 @@ Result<ca::u32, AsmError> SmaliAssembler::assembleClass(std::string_view text)
             continue;
         }
         if (d == ".implements") {
+            if (toks.size() != 2) {
+                return Err(fail(AsmErrorCode::Syntax, ln, t));
+            }
             const Result<ca::u32, core::ReadError> idx = dex_.addType(toks[1]);
             if (idx.is_err()) {
                 return Err(fail(AsmErrorCode::BadRef, ln, toks[1]));
@@ -2101,9 +2147,6 @@ Result<ca::u32, AsmError> SmaliAssembler::assembleClass(std::string_view text)
             continue;
         }
         if (d == ".method") {
-            if (std::getenv("LIBDEX_ASM_DBG") != nullptr) {
-                std::fprintf(stderr, "asm: .method at line %u\n", ln);
-            }
             if (!haveClass) {
                 return Err(fail(AsmErrorCode::Syntax, ln, ".method before .class"));
             }

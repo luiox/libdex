@@ -260,6 +260,122 @@ TEST(DexCodeDom, MisalignedPayloadWithoutAutoAlignFails)
     ASSERT_TRUE(unit.lower(true).is_ok());
 }
 
+/// @brief payload 数据只存在 payload 伪指令上；lower 不得用 31t 槽上的
+///        默认 0 重建 payload，promote 的 target 须以 switch 地址为基。
+TEST(DexCodeDom, SwitchPayloadDataSurvivesLowerAndPromote)
+{
+    // packed-switch，firstKey=10：lower 后 firstKey 必须保持。
+    CodeUnit unit;
+    unit.setRegistersSize(2);
+    const InsnId sw = unit.append(f31t(0x2b, PayloadKind::PackedSwitch));
+    unit.append(f10x(0x0e));
+    const LabelId t0 = unit.newLabel();
+    const LabelId t1 = unit.newLabel();
+    const InsnId case0 = unit.append(f10x(0x0e));
+    const InsnId case1 = unit.append(f10x(0x0e));
+    ASSERT_TRUE(unit.bindLabel(t0, case0).is_ok());
+    ASSERT_TRUE(unit.bindLabel(t1, case1).is_ok());
+    Result<PayloadInsn, InsnEncodeError> p = makePackedSwitchPayload(10, {0, 0});
+    ASSERT_TRUE(p.is_ok());
+    PayloadInsn built = std::move(p).unwrap();
+    const InsnId payload = unit.append(built.insn, std::move(built.storage));
+    ASSERT_TRUE(unit.bindPayload(sw, payload, {t0, t1}).is_ok());
+    const Result<LoweredCode, CodeDomError> out = unit.lower();
+    ASSERT_TRUE(out.is_ok());
+    LoweredCode lowered = std::move(out).unwrap();
+
+    const Result<std::vector<Insn>, InsnError> back =
+        decodeInsns(ByteSlice{lowered.insns.data(), lowered.insns.size()});
+    ASSERT_TRUE(back.is_ok());
+    ca::i32 firstKey = -1;
+    for (const Insn& i : back.unwrap()) {
+        if (i.isPayload() && i.payloadKind == PayloadKind::PackedSwitch) {
+            firstKey = i.payloadFirstKey;
+        }
+    }
+    EXPECT_EQ(firstKey, 10);
+
+    // writeCodeItem → parseCodeItem → promote → lower：字节恒等。
+    const Result<std::vector<ca::u8>, WriteError> encoded =
+        writeCodeItem(lowered.item,
+                      ByteSlice{lowered.insns.data(), lowered.insns.size()});
+    ASSERT_TRUE(encoded.is_ok());
+    const Result<CodeItem, ReadError> reparsed =
+        parseCodeItem(ByteSlice{encoded.unwrap().data(), encoded.unwrap().size()}, 0);
+    ASSERT_TRUE(reparsed.is_ok());
+    const Result<CodeUnit, CodeDomError> unit2 = CodeUnit::promote(
+        reparsed.unwrap(), ByteSlice{lowered.insns.data(), lowered.insns.size()});
+    ASSERT_TRUE(unit2.is_ok());
+    const Result<LoweredCode, CodeDomError> out2 = unit2.unwrap().lower();
+    ASSERT_TRUE(out2.is_ok());
+    EXPECT_EQ(out2.unwrap().insns, lowered.insns);
+}
+
+TEST(DexCodeDom, SparseSwitchKeysSurviveLowerAndPromote)
+{
+    CodeUnit unit;
+    unit.setRegistersSize(2);
+    const InsnId sw = unit.append(f31t(0x2c, PayloadKind::SparseSwitch));
+    unit.append(f10x(0x0e));
+    const LabelId t0 = unit.newLabel();
+    const LabelId t1 = unit.newLabel();
+    const InsnId case0 = unit.append(f10x(0x0e));
+    const InsnId case1 = unit.append(f10x(0x0e));
+    ASSERT_TRUE(unit.bindLabel(t0, case0).is_ok());
+    ASSERT_TRUE(unit.bindLabel(t1, case1).is_ok());
+    // 乱序 key 也必须保序保值（lower 重建不得丢 key 表）。
+    Result<PayloadInsn, InsnEncodeError> p =
+        makeSparseSwitchPayload({-3, 5, 100}, {0, 0, 0});
+    ASSERT_TRUE(p.is_ok());
+    PayloadInsn built = std::move(p).unwrap();
+    const InsnId payload = unit.append(built.insn, std::move(built.storage));
+    ASSERT_TRUE(unit.bindPayload(sw, payload, {t0, t1, t0}).is_ok());
+    const Result<LoweredCode, CodeDomError> out = unit.lower();
+    ASSERT_TRUE(out.is_ok());
+    LoweredCode lowered = std::move(out).unwrap();
+
+    const Result<std::vector<Insn>, InsnError> back =
+        decodeInsns(ByteSlice{lowered.insns.data(), lowered.insns.size()});
+    ASSERT_TRUE(back.is_ok());
+    ca::u32 count = 0;
+    for (const Insn& i : back.unwrap()) {
+        if (i.isPayload() && i.payloadKind == PayloadKind::SparseSwitch) {
+            count = i.payloadCount;
+            ASSERT_GE(count, 3u);
+            EXPECT_EQ(i.sparseSwitchKey(0), -3);
+            EXPECT_EQ(i.sparseSwitchKey(1), 5);
+            EXPECT_EQ(i.sparseSwitchKey(2), 100);
+        }
+    }
+    EXPECT_EQ(count, 3u);
+
+    const Result<std::vector<ca::u8>, WriteError> encoded =
+        writeCodeItem(lowered.item,
+                      ByteSlice{lowered.insns.data(), lowered.insns.size()});
+    ASSERT_TRUE(encoded.is_ok());
+    const Result<CodeItem, ReadError> reparsed =
+        parseCodeItem(ByteSlice{encoded.unwrap().data(), encoded.unwrap().size()}, 0);
+    ASSERT_TRUE(reparsed.is_ok());
+    const Result<CodeUnit, CodeDomError> unit2 = CodeUnit::promote(
+        reparsed.unwrap(), ByteSlice{lowered.insns.data(), lowered.insns.size()});
+    ASSERT_TRUE(unit2.is_ok());
+    const Result<LoweredCode, CodeDomError> out2 = unit2.unwrap().lower();
+    ASSERT_TRUE(out2.is_ok());
+    EXPECT_EQ(out2.unwrap().insns, lowered.insns);
+}
+
+/// @brief 31t 是 payload 分支：bindBranch 直连普通 label 会在 lower 产出
+///        指向非 payload 的 switch，必须拒绝。
+TEST(DexCodeDom, BindBranchRejectsSwitchOpcode)
+{
+    CodeUnit unit;
+    const InsnId sw = unit.append(f31t(0x2b, PayloadKind::PackedSwitch));
+    unit.append(f10x(0x0e));
+    const LabelId anywhere = unit.newLabel();
+    ASSERT_TRUE(unit.bindLabel(anywhere, unit.first()).is_ok());
+    EXPECT_EQ(unit.bindBranch(sw, anywhere).unwrap_err(), CodeDomError::BadShape);
+}
+
 TEST(DexCodeDom, TryRegionWithSharedHandler)
 {
     CodeUnit unit;

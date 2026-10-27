@@ -655,6 +655,18 @@ Result<AnnotationPlan, WriteError> planAnnotations(DexFile& dex,
                      attach == nullptr ? nullptr : &attach->methods,
                      eff.content.methodAnnotations);
 
+        // 目录数组按成员索引升序是 DEX 规范要求（ART DexFileVerifier 校验）；
+        // 源条目保序、覆盖条目追加会打乱顺序，合并后统一排序。
+        const auto sortByMember = [](std::vector<AnnotationsDirectoryEntry>& v) {
+            std::sort(v.begin(), v.end(),
+                      [](const AnnotationsDirectoryEntry& a,
+                         const AnnotationsDirectoryEntry& b) {
+                          return a.memberIdx < b.memberIdx;
+                      });
+        };
+        sortByMember(eff.content.fieldAnnotations);
+        sortByMember(eff.content.methodAnnotations);
+
         for (const AnnotationsDirectoryEntry& entry :
              source == nullptr ? noEntries : source->parameterAnnotations) {
             const bool overridden =
@@ -682,6 +694,7 @@ Result<AnnotationPlan, WriteError> planAnnotations(DexFile& dex,
                 plan.ownedRefListSets.emplace(refListKey, std::move(setKeys));
             }
         }
+        sortByMember(eff.content.parameterAnnotations);
 
         eff.effectivelyEmpty = eff.content.classAnnotationsOff == 0 &&
                                eff.content.fieldAnnotations.empty() &&
