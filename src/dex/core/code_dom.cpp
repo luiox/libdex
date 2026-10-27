@@ -776,12 +776,9 @@ Result<LoweredCode, CodeDomError> CodeUnit::lower(bool autoAlign)
     std::sort(blocks.begin(), blocks.end(), [](const TryBlock& a, const TryBlock& b) {
         return a.startAddress < b.startAddress;
     });
-    for (ca::usize i = 1; i < blocks.size(); ++i) {
-        if (blocks[i].startAddress <
-            blocks[i - 1].startAddress + blocks[i - 1].insnCount) {
-            return Err(CodeDomError::BadTryRegion);  // 交叠
-        }
-    }
+    // 规范要求 try 条目不交叠，但 d8 实发完全相同的区间（同一范围挂多个
+    // handler），ART 接受——按现实放宽：只要求按起始地址排序。
+    (void)0;
 
     std::vector<CatchHandler> handlers;
     handlers.reserve(handlers_.size());

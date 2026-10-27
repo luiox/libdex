@@ -3,7 +3,9 @@
 /// @brief       libsmali 反汇编器实现。
 #include "smali/disassemble.hpp"
 
+#include <algorithm>
 #include <cstdio>
+#include <utility>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -242,8 +244,20 @@ Result<std::string, SmaliError> valueText(DexFile& dex, const EncodedValue& v,
     case core::EncodedValueType::Short:
     case core::EncodedValueType::Int:
     case core::EncodedValueType::Long:
-        std::snprintf(buf, sizeof(buf), "%lld",
-                      static_cast<long long>(v.integer));
+        // 带类型后缀：文本里区分 Byte/Short/Int/Long（汇编器按后缀还原）。
+        if (v.type == core::EncodedValueType::Byte) {
+            std::snprintf(buf, sizeof(buf), "%db",
+                          static_cast<int>(v.integer));
+        } else if (v.type == core::EncodedValueType::Short) {
+            std::snprintf(buf, sizeof(buf), "%ds",
+                          static_cast<int>(v.integer));
+        } else if (v.type == core::EncodedValueType::Long) {
+            std::snprintf(buf, sizeof(buf), "%lldL",
+                          static_cast<long long>(v.integer));
+        } else {
+            std::snprintf(buf, sizeof(buf), "%d",
+                          static_cast<int>(v.integer));
+        }
         return Ok(std::string(buf));
     case core::EncodedValueType::Char:
         std::snprintf(buf, sizeof(buf), "'\\u%04x'", v.bits & 0xFFFFu);
@@ -369,6 +383,7 @@ Result<void, SmaliError> annotationBlocks(DexFile& dex, const Items& itemOffs,
 struct LabelTable
 {
     std::unordered_map<ca::u32, std::string> byAddr;
+    std::map<ca::u32, std::vector<std::string>> namesAt;  ///< 地址 → label 名（渲染用）
 
     const std::string& at(ca::u32 addr)
     {
@@ -377,6 +392,7 @@ struct LabelTable
             char buf[24];
             std::snprintf(buf, sizeof(buf), ":l%u", addr);
             found = byAddr.emplace(addr, buf).first;
+            namesAt[addr].push_back(found->second);
         }
         return found->second;
     }
@@ -652,6 +668,10 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
     if (method.methodIndex >= dex.methodCount()) {
         return Err(SmaliError::BadIndex);
     }
+    if (std::getenv("LIBDEX_DIS_DBG") != nullptr) {
+        std::fprintf(stderr, "dis: method idx=%u codeOff=%u\n", method.methodIndex,
+                     method.codeOff);
+    }
     const core::MethodId& mid = dex.methodIds[method.methodIndex];
     const Result<std::string, SmaliError> name = toText(dex, mid.nameIdx);
     if (name.is_err()) {
@@ -664,7 +684,7 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
     out += "\n";
     out += ind(1);
     out += ".method " + renderAccessFlags(method.accessFlags) + " " + name.unwrap() +
-           " " + proto.unwrap() + "\n";
+           proto.unwrap() + "\n";
 
     const Result<const CodeItem*, core::ReadError> code = dex.codeItem(method.codeOff);
     if (code.is_err()) {
@@ -745,6 +765,10 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
             labels.at(h.catchAllAddress);
         }
     }
+    ca::u32 totalEndAddress = 0;
+    for (const Insn& i : insns) {
+        totalEndAddress = i.address + i.width;
+    }
 
     // 事件流：debug local/file 事件与指令按地址穿插。
     std::size_t localIdx = 0;
@@ -793,6 +817,14 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
     std::size_t insnIdx = 0;
     while (insnIdx < insns.size()) {
         const Insn& i = insns[insnIdx];
+        {
+            auto labelsHere = labels.namesAt.find(i.address);
+            if (labelsHere != labels.namesAt.end()) {
+                for (const std::string& n : labelsHere->second) {
+                    out += ind(2) + n + "\n";
+                }
+            }
+        }
         if (Result<void, SmaliError> r = emitLocalEvents(i.address); r.is_err()) {
             return r;
         }
@@ -866,6 +898,14 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
     }
     if (Result<void, SmaliError> r = emitLocalEvents(0xFFFFFFFFu); r.is_err()) {
         return r;
+    }
+    {
+        auto labelsHere = labels.namesAt.find(totalEndAddress);
+        if (labelsHere != labels.namesAt.end()) {
+            for (const std::string& n : labelsHere->second) {
+                out += ind(2) + n + "\n";
+            }
+        }
     }
 
     // try/catch。
@@ -1021,6 +1061,9 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
         out += ".source " + src.unwrap() + "\n";
     }
     if (def.interfacesOff != 0 || def.ownedInterfaces) {
+        if (std::getenv("LIBDEX_DIS_DBG") != nullptr) {
+            std::fprintf(stderr, "dis: ifaces\n");
+        }
         const Result<core::TypeListSpan, core::ReadError> ifaces = dex.interfaces(classDefIdx);
         if (ifaces.is_err()) {
             return Err(fromRead(ifaces.unwrap_err()));
@@ -1036,6 +1079,9 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
     }
 
     // 注解：源目录 + 自有覆盖层（自有优先；本反汇编器不合并两者）。
+    if (std::getenv("LIBDEX_DIS_DBG") != nullptr) {
+        std::fprintf(stderr, "dis: class ann\n");
+    }
     const auto* owned = &dex.annotationAttachments();
     const auto ownedIt = owned->find(classDefIdx);
     if (ownedIt != owned->end() && ownedIt->second.hasClass) {
@@ -1067,6 +1113,9 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
     out += "\n";
 
     const Result<const ClassData*, core::ReadError> data = dex.classData(classDefIdx);
+    if (std::getenv("LIBDEX_DIS_DBG") != nullptr) {
+        std::fprintf(stderr, "dis: classdata\n");
+    }
     if (data.is_err()) {
         return Err(fromRead(data.unwrap_err()));
     }
@@ -1142,17 +1191,57 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
     };
 
     if (cd != nullptr) {
+        // canonical 文本形态：字段/方法按 (名字, 类型/proto) 文本序渲染，与
+        // buildDex 重排后的 class_data 顺序一致——反汇编(汇编(反汇编(x)))
+        // 的文本因此逐字节稳定。
+        std::vector<ca::u32> staticOrder(cd->staticFields.size());
+        for (ca::u32 i = 0; i < staticOrder.size(); ++i) {
+            staticOrder[i] = i;
+        }
+        std::sort(staticOrder.begin(), staticOrder.end(),
+                  [&](ca::u32 a, ca::u32 b) {
+                      const core::FieldId& fa = dex.fieldIds[cd->staticFields[a].fieldIndex];
+                      const core::FieldId& fb = dex.fieldIds[cd->staticFields[b].fieldIndex];
+                      const Result<std::string, SmaliError> na = toText(dex, fa.nameIdx);
+                      const Result<std::string, SmaliError> nb = toText(dex, fb.nameIdx);
+                      if (na.unwrap() != nb.unwrap()) {
+                          return na.unwrap() < nb.unwrap();
+                      }
+                      return typeText(dex, fa.typeIdx).unwrap() <
+                             typeText(dex, fb.typeIdx).unwrap();
+                  });
         out += "\n# static fields\n";
-        for (ca::u32 i = 0; i < cd->staticFields.size(); ++i) {
+        for (ca::u32 pos = 0; pos < staticOrder.size(); ++pos) {
             if (Result<void, SmaliError> r =
-                    renderField(cd->staticFields[i], true, i);
+                    renderField(cd->staticFields[staticOrder[pos]], true,
+                                staticOrder[pos]);
                 r.is_err()) {
                 return Err(r.unwrap_err());
             }
         }
+        std::vector<ca::u32> instanceOrder(cd->instanceFields.size());
+        for (ca::u32 i = 0; i < instanceOrder.size(); ++i) {
+            instanceOrder[i] = i;
+        }
+        std::sort(instanceOrder.begin(), instanceOrder.end(),
+                  [&](ca::u32 a, ca::u32 b) {
+                      const core::FieldId& fa =
+                          dex.fieldIds[cd->instanceFields[a].fieldIndex];
+                      const core::FieldId& fb =
+                          dex.fieldIds[cd->instanceFields[b].fieldIndex];
+                      const Result<std::string, SmaliError> na = toText(dex, fa.nameIdx);
+                      const Result<std::string, SmaliError> nb = toText(dex, fb.nameIdx);
+                      if (na.unwrap() != nb.unwrap()) {
+                          return na.unwrap() < nb.unwrap();
+                      }
+                      return typeText(dex, fa.typeIdx).unwrap() <
+                             typeText(dex, fb.typeIdx).unwrap();
+                  });
         out += "\n# instance fields\n";
-        for (const core::EncodedField& f : cd->instanceFields) {
-            if (Result<void, SmaliError> r = renderField(f, false, 0); r.is_err()) {
+        for (ca::u32 pos = 0; pos < instanceOrder.size(); ++pos) {
+            if (Result<void, SmaliError> r =
+                    renderField(cd->instanceFields[instanceOrder[pos]], false, 0);
+                r.is_err()) {
                 return Err(r.unwrap_err());
             }
         }
@@ -1161,8 +1250,32 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
             [&](const std::vector<core::EncodedMethod>& methods, const char* title,
                 bool direct) -> Result<void, SmaliError> {
             (void)direct;
+            std::vector<ca::u32> order(methods.size());
+            for (ca::u32 i = 0; i < order.size(); ++i) {
+                order[i] = i;
+            }
+            std::sort(order.begin(), order.end(),
+                      [&](ca::u32 a, ca::u32 b) {
+                          const core::MethodId& ma =
+                              dex.methodIds[methods[a].methodIndex];
+                          const core::MethodId& mb =
+                              dex.methodIds[methods[b].methodIndex];
+                          const Result<std::string, SmaliError> na =
+                              toText(dex, ma.nameIdx);
+                          const Result<std::string, SmaliError> nb =
+                              toText(dex, mb.nameIdx);
+                          if (na.unwrap() != nb.unwrap()) {
+                              return na.unwrap() < nb.unwrap();
+                          }
+                          const Result<std::string, SmaliError> pa =
+                              protoText(dex, ma.protoIdx);
+                          const Result<std::string, SmaliError> pb =
+                              protoText(dex, mb.protoIdx);
+                          return pa.unwrap() < pb.unwrap();
+                      });
             out += "\n# " + std::string(title) + "\n";
-            for (const core::EncodedMethod& m : methods) {
+            for (ca::u32 pos = 0; pos < order.size(); ++pos) {
+                const core::EncodedMethod& m = methods[order[pos]];
                 if (m.methodIndex >= dex.methodCount()) {
                     return Err(SmaliError::BadIndex);
                 }

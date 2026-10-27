@@ -776,7 +776,8 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             }
         }
         Result<std::optional<EncodedArrayItem>, WriteError> synthesized = synthesizeStaticValues(
-            dex, classDefIdx, original, addedStatic, memberEdits, &fieldOrder.remap);
+            dex, classDefIdx, original, addedStatic, memberEdits, &fieldOrder.remap,
+            options.trimTrailingStaticDefaults);
         if (synthesized.is_err()) {
             return Err(synthesized.unwrap_err());
         }
@@ -877,11 +878,43 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             }
         }
     }
+    ItemTable debugInfos;
+    // 新增方法体的 debug：字节由调用方预编码（从零构建的文件没有源字节，
+    // 无法走 lazy 解码路径），这里按需重排索引后登记到 debugInfos，挂一个
+    // 与真实偏移不冲突的合成键，走统一的 debug 偏移回填。
+    constexpr ca::u32 kOwnedDebugBase = 0x80000000u;
+    ca::u32 ownedDebugSeq = 0;
     for (const auto& entry : methodsByClass) {
         for (const MethodAddition* add : entry.second) {
+            if (add->insns.empty()) {
+                continue;  // 无码方法（abstract/native）：不进 code 布局，code_off 保持 0
+            }
+            ca::u32 debugOff = options.stripDebugInfo ? 0u : add->item.debugInfoOff;
+            if (!add->debugInfo.empty()) {
+                const Result<DebugInfo, ReadError> info = readDebugInfo(
+                    ByteSlice{add->debugInfo.data(), add->debugInfo.size()}, 0);
+                if (info.is_err()) {
+                    return Err(WriteError::InvalidModel);
+                }
+                DebugInfo remapped = std::move(info).unwrap();
+                if (indicesChanged) {
+                    const Result<void, WriteError> r =
+                        remapDebugInfoIndices(remapped, maps);
+                    if (r.is_err()) {
+                        return Err(r.unwrap_err());
+                    }
+                }
+                Result<std::vector<ca::u8>, WriteError> encoded =
+                    writeDebugInfo(remapped);
+                if (encoded.is_err()) {
+                    return Err(WriteError::Unencodable);
+                }
+                debugOff = kOwnedDebugBase + (++ownedDebugSeq);
+                debugInfos.add(debugOff, std::move(encoded).unwrap());
+            }
             const Result<void, WriteError> added = pushUnit(
                 &add->item, ByteSlice{add->insns.data(), add->insns.size()},
-                add->item.debugInfoOff, methodOrder.remap[add->methodIdx],
+                debugOff, methodOrder.remap[add->methodIdx],
                 {add->methodIdx});
             if (added.is_err()) {
                 return Err(added.unwrap_err());
@@ -893,7 +926,6 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         return a.sortKey < b.sortKey;
     });
 
-    ItemTable debugInfos;
     const auto addDebugInfo = [&](ca::u32 oldOff) -> Result<void, WriteError> {
         if (options.stripDebugInfo || oldOff == 0 || debugInfos.contains(oldOff)) {
             return Ok();

@@ -20,6 +20,10 @@ struct MethodBody
 {
     CodeItem item;              ///< 头部计数与 tries/handlers 模型
     std::vector<ca::u8> insns;  ///< 已编码指令区，长度 = item.insnsSize * 2
+
+    /// @brief 预编码的 debug_info_item 字节（libsmali 汇编路径用；从零构建
+    ///        的文件没有源字节，builder 无法 lazy 解码）。空表示无 debug。
+    std::vector<ca::u8> debugBytes;
 };
 
 /// @brief 单方法体编辑器。

@@ -183,6 +183,37 @@ target("libdex_leak_check")
         add_cxflags("/utf-8", {tools = "cl"})
     end
 
+-- smalict：libsmali 的 CLI（反汇编/汇编/往返自检）。
+target("smalict")
+    set_kind("binary")
+    set_group("tools")
+    set_default(false)
+
+    add_deps("libdex", "libsmali")
+    binary_link_closure("libsmali", "libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    add_files("tools/smalict/*.cpp")
+    add_includedirs("src")
+
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
+-- 诊断用（临时）。
+target("rt_diag")
+    set_kind("binary")
+    set_group("tools")
+    set_default(false)
+    add_deps("libdex", "libsmali")
+    binary_link_closure("libsmali", "libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    add_files("build/rt_diag.cpp", "test/unittest/dex_fixture.cpp")
+    add_includedirs("src", "test/unittest")
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
 -- gtest 面随 with_tests 门控：默认配置不定义本 target、不拉 gtest。
 if has_config("with_tests") then
 target("libdex_unittest")

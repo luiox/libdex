@@ -258,7 +258,7 @@ Result<MemberEditSet, WriteError> collectMemberEdits(
             EncodedMethod method;
             method.methodIndex = add->methodIdx;
             method.accessFlags = add->accessFlags;
-            method.codeOff = 1;  // 占位，布局后替换为真实 code_off
+            method.codeOff = add->insns.empty() ? 0u : 1u;  // 占位；无码（abstract/native）保持 0
             const bool direct = (add->accessFlags &
                                  (kAccPrivate | kAccStatic | kAccConstructor)) != 0;
             (direct ? edit.directMethods : edit.virtualMethods).push_back(method);
@@ -324,7 +324,7 @@ Result<void, WriteError> applyMemberEdits(ClassData& data, const MemberEditSet& 
 Result<std::optional<EncodedArrayItem>, WriteError> synthesizeStaticValues(
     DexFile& dex, ca::u32 classDefIdx, const ClassData* original,
     const std::vector<ca::u32>& addedStatic, const MemberEditSet& edits,
-    const std::vector<ca::u32>* fieldRemap)
+    const std::vector<ca::u32>* fieldRemap, bool trimTrailingDefaults)
 {
     const std::map<ca::u32, EncodedValue>* valueEdits = nullptr;
     const auto& allEdits = dex.staticFieldValueEdits();
@@ -437,16 +437,19 @@ Result<std::optional<EncodedArrayItem>, WriteError> synthesizeStaticValues(
 
     EncodedArrayItem synthesized;
     synthesized.values.reserve(slots.size());
+    std::vector<bool> synthesizedDefault(slots.size(), false);
     for (const StaticSlot& slot : slots) {
         if (valueEdits != nullptr) {
             const auto edited = valueEdits->find(slot.fieldIdx);
             if (edited != valueEdits->end()) {
                 synthesized.values.push_back(edited->second);
+                synthesizedDefault.push_back(false);
                 continue;
             }
         }
         if (slot.fromOriginal && slot.valuePos < array.values.size()) {
             synthesized.values.push_back(array.values[slot.valuePos]);
+            synthesizedDefault.push_back(false);
             continue;
         }
         // 新增字段与被省略的尾部槽位都填类型默认值。
@@ -455,6 +458,18 @@ Result<std::optional<EncodedArrayItem>, WriteError> synthesizeStaticValues(
             return Err(value.unwrap_err());
         }
         synthesized.values.push_back(value.unwrap());
+        synthesizedDefault.push_back(true);
+    }
+    // 规范允许省略尾部的默认槽位；opt-in（d8 约定）时裁掉尾部合成默认值，
+    // 全默认则整个 static_values 不写，汇编往返文本因此与源文件稳定一致。
+    if (trimTrailingDefaults) {
+        while (!synthesized.values.empty() && synthesizedDefault.back()) {
+            synthesized.values.pop_back();
+            synthesizedDefault.pop_back();
+        }
+        if (synthesized.values.empty()) {
+            return Ok(std::optional<EncodedArrayItem>{});
+        }
     }
     return Ok(std::optional<EncodedArrayItem>(std::move(synthesized)));
 }
