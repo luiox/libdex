@@ -14,6 +14,7 @@
 
 #include "dex/core/annotation.hpp"
 #include "dex/core/builder_edit.hpp"
+#include "dex/core/vacuum.hpp"
 #include "dex/core/debug_info.hpp"
 #include "dex/core/insn.hpp"
 #include "dex/core/integrity.hpp"
@@ -156,13 +157,35 @@ struct IdOrder
 
 /// @brief 按旧索引比较的排序器，返回 a 是否严格小于 b。
 template <typename Less>
+Result<IdOrder, WriteError> makeIdOrderKept(ca::u32 count, const std::vector<bool>* keep,
+                                            Less less);
+
+/// @brief 全量排序版（keep = nullptr）。
+template <typename Less>
 Result<IdOrder, WriteError> makeIdOrder(ca::u32 count, Less less)
 {
+    return makeIdOrderKept(count, nullptr, less);
+}
+
+/// @brief 同上；@p keep 非空时只保留打标的旧索引（vacuum），未打标条目的
+/// remap 置 0（闭包保证无引用点）。
+template <typename Less>
+Result<IdOrder, WriteError> makeIdOrderKept(ca::u32 count, const std::vector<bool>* keep,
+                                            Less less)
+{
     IdOrder order;
-    order.oldIndexByNew.resize(count);
-    order.remap.resize(count);
-    for (ca::u32 i = 0; i < count; ++i) {
-        order.oldIndexByNew[i] = i;
+    order.oldIndexByNew.reserve(count);
+    if (keep == nullptr) {
+        order.oldIndexByNew.resize(count);
+        for (ca::u32 i = 0; i < count; ++i) {
+            order.oldIndexByNew[i] = i;
+        }
+    } else {
+        for (ca::u32 i = 0; i < count; ++i) {
+            if ((*keep)[i]) {
+                order.oldIndexByNew.push_back(i);
+            }
+        }
     }
 
     std::sort(order.oldIndexByNew.begin(), order.oldIndexByNew.end(),
@@ -176,7 +199,8 @@ Result<IdOrder, WriteError> makeIdOrder(ca::u32 count, Less less)
                   return a < b;
               });
 
-    for (ca::u32 newIndex = 0; newIndex < count; ++newIndex) {
+    order.remap.assign(count, 0);
+    for (ca::u32 newIndex = 0; newIndex < order.oldIndexByNew.size(); ++newIndex) {
         const ca::u32 oldIndex = order.oldIndexByNew[newIndex];
         if (newIndex != 0) {
             const ca::u32 previous = order.oldIndexByNew[newIndex - 1];
@@ -223,16 +247,20 @@ Result<std::u16string, WriteError> decodeStringKey(const std::vector<ca::u8>& it
     return Ok(std::move(units));
 }
 
-Result<StringPool, WriteError> collectStringPool(DexFile& dex)
+Result<StringPool, WriteError> collectStringPool(DexFile& dex,
+                                                 const std::vector<bool>* keep)
 {
     const ca::u32 count = dex.stringCount();
     StringPool pool;
-    pool.remap.resize(count);
-    pool.poolIndexByOld.resize(count);
+    pool.remap.assign(count, 0);
+    pool.poolIndexByOld.assign(count, 0);
 
     std::vector<PoolString> entries;
     entries.reserve(count);
     for (ca::u32 i = 0; i < count; ++i) {
+        if (keep != nullptr && !(*keep)[i]) {
+            continue;  // vacuum：未引用字符串不进池，remap 保持 0
+        }
         Result<std::vector<ca::u8>, ReadError> fetched = dex.stringData(i);
         if (fetched.is_err()) {
             return Err(fetched.unwrap_err() == ReadError::BadIndex
@@ -574,8 +602,43 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         return Err(WriteError::InvalidModel);
     }
 
+    // ---- 源 class_data 与编辑集（vacuum 闭包需要编辑层根，先于此收集）----
+    Result<std::map<ca::u32, const ClassData*>, WriteError> collectedData =
+        collectSourceClassData(dex);
+    if (collectedData.is_err()) {
+        return Err(collectedData.unwrap_err());
+    }
+    const std::map<ca::u32, const ClassData*> classDataByOff =
+        std::move(collectedData).unwrap();
+
+    Result<MemberEditSet, WriteError> collectedEdits =
+        collectMemberEdits(dex, options, classDataByOff);
+    if (collectedEdits.is_err()) {
+        return Err(collectedEdits.unwrap_err());
+    }
+    const MemberEditSet memberEdits = std::move(collectedEdits).unwrap();
+
+    // ---- vacuum：引用闭包（opt-in）----
+    std::vector<bool> vacuumStrings;
+    std::vector<bool> vacuumTypes;
+    std::vector<bool> vacuumProtos;
+    std::vector<bool> vacuumFields;
+    std::vector<bool> vacuumMethods;
+    if (options.vacuumIds) {
+        Result<VacuumKeep, WriteError> closure = computeVacuumClosure(dex, &memberEdits);
+        if (closure.is_err()) {
+            return Err(closure.unwrap_err());
+        }
+        vacuumStrings = std::move(closure.unwrap().strings);
+        vacuumTypes = std::move(closure.unwrap().types);
+        vacuumProtos = std::move(closure.unwrap().protos);
+        vacuumFields = std::move(closure.unwrap().fields);
+        vacuumMethods = std::move(closure.unwrap().methods);
+    }
+
     // ---- canonical 字符串池：排序、去重、建立旧→新索引映射 ----
-    Result<StringPool, WriteError> collected = collectStringPool(dex);
+    Result<StringPool, WriteError> collected =
+        collectStringPool(dex, options.vacuumIds ? &vacuumStrings : nullptr);
     if (collected.is_err()) {
         return Err(collected.unwrap_err());
     }
@@ -586,7 +649,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         return pool.keyOf(dex.typeIds[a].descriptorIdx) <
                pool.keyOf(dex.typeIds[b].descriptorIdx);
     };
-    Result<IdOrder, WriteError> typeOrderResult = makeIdOrder(dex.typeCount(), typeLess);
+    Result<IdOrder, WriteError> typeOrderResult =
+        makeIdOrderKept(dex.typeCount(), options.vacuumIds ? &vacuumTypes : nullptr,
+                        typeLess);
     if (typeOrderResult.is_err()) {
         return Err(typeOrderResult.unwrap_err());
     }
@@ -638,7 +703,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
         return false;
     };
-    Result<IdOrder, WriteError> protoOrderResult = makeIdOrder(dex.protoCount(), protoLess);
+    Result<IdOrder, WriteError> protoOrderResult =
+        makeIdOrderKept(dex.protoCount(), options.vacuumIds ? &vacuumProtos : nullptr,
+                        protoLess);
     if (protoOrderResult.is_err()) {
         return Err(protoOrderResult.unwrap_err());
     }
@@ -659,7 +726,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
         return typeOrder.remap[fieldA.typeIdx] < typeOrder.remap[fieldB.typeIdx];
     };
-    Result<IdOrder, WriteError> fieldOrderResult = makeIdOrder(dex.fieldCount(), fieldLess);
+    Result<IdOrder, WriteError> fieldOrderResult =
+        makeIdOrderKept(dex.fieldCount(), options.vacuumIds ? &vacuumFields : nullptr,
+                        fieldLess);
     if (fieldOrderResult.is_err()) {
         return Err(fieldOrderResult.unwrap_err());
     }
@@ -679,7 +748,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         }
         return protoOrder.remap[methodA.protoIdx] < protoOrder.remap[methodB.protoIdx];
     };
-    Result<IdOrder, WriteError> methodOrderResult = makeIdOrder(dex.methodCount(), methodLess);
+    Result<IdOrder, WriteError> methodOrderResult =
+        makeIdOrderKept(dex.methodCount(), options.vacuumIds ? &vacuumMethods : nullptr,
+                        methodLess);
     if (methodOrderResult.is_err()) {
         return Err(methodOrderResult.unwrap_err());
     }
@@ -706,22 +777,6 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         pool.remap, typeOrder.remap, protoOrder.remap, fieldOrder.remap, methodOrder.remap};
 
     const ByteSlice source = dex.source();
-
-    // ---- 编辑集校验与逐类有效 class_data（共享编辑层）----
-    Result<std::map<ca::u32, const ClassData*>, WriteError> collectedData =
-        collectSourceClassData(dex);
-    if (collectedData.is_err()) {
-        return Err(collectedData.unwrap_err());
-    }
-    const std::map<ca::u32, const ClassData*> classDataByOff =
-        std::move(collectedData).unwrap();
-
-    Result<MemberEditSet, WriteError> collectedEdits =
-        collectMemberEdits(dex, options, classDataByOff);
-    if (collectedEdits.is_err()) {
-        return Err(collectedEdits.unwrap_err());
-    }
-    const MemberEditSet memberEdits = std::move(collectedEdits).unwrap();
     const std::unordered_map<ca::u32, const CodeReplacement*>& replacements =
         memberEdits.replacements;
     const std::unordered_set<ca::u32>& removedFields = memberEdits.removedFields;
@@ -1196,18 +1251,22 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         mapItems.push_back(MapItem{MapType::StringIdItem, 0, stringCount, stringIdsOff});
     }
 
+    const ca::u32 typeCountOut = static_cast<ca::u32>(typeOrder.oldIndexByNew.size());
+    const ca::u32 protoCountOut = static_cast<ca::u32>(protoOrder.oldIndexByNew.size());
+    const ca::u32 fieldCountOut = static_cast<ca::u32>(fieldOrder.oldIndexByNew.size());
+    const ca::u32 methodCountOut = static_cast<ca::u32>(methodOrder.oldIndexByNew.size());
     ca::u32 typeIdsOff = 0;
-    if (!dex.typeIds.empty()) {
+    if (typeCountOut != 0) {
         typeIdsOff = offsetOf(out);
         for (ca::u32 i = 0; i < typeOrder.oldIndexByNew.size(); ++i) {
             const TypeId& id = dex.typeIds[typeOrder.oldIndexByNew[i]];
             appendU32(out, pool.remap[id.descriptorIdx]);
         }
-        mapItems.push_back(MapItem{MapType::TypeIdItem, 0, dex.typeCount(), typeIdsOff});
+        mapItems.push_back(MapItem{MapType::TypeIdItem, 0, typeCountOut, typeIdsOff});
     }
 
     ca::u32 protoIdsOff = 0;
-    if (!dex.protoIds.empty()) {
+    if (protoCountOut != 0) {
         protoIdsOff = offsetOf(out);
         for (ca::u32 i = 0; i < protoOrder.oldIndexByNew.size(); ++i) {
             const ProtoId& proto = dex.protoIds[protoOrder.oldIndexByNew[i]];
@@ -1215,11 +1274,11 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             appendU32(out, typeOrder.remap[proto.returnTypeIdx]);
             appendU32(out, 0);  // parameters_off 稍后回填
         }
-        mapItems.push_back(MapItem{MapType::ProtoIdItem, 0, dex.protoCount(), protoIdsOff});
+        mapItems.push_back(MapItem{MapType::ProtoIdItem, 0, protoCountOut, protoIdsOff});
     }
 
     ca::u32 fieldIdsOff = 0;
-    if (!dex.fieldIds.empty()) {
+    if (fieldCountOut != 0) {
         fieldIdsOff = offsetOf(out);
         for (ca::u32 i = 0; i < fieldOrder.oldIndexByNew.size(); ++i) {
             const FieldId& field = dex.fieldIds[fieldOrder.oldIndexByNew[i]];
@@ -1227,11 +1286,11 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             appendU16(out, static_cast<ca::u16>(typeOrder.remap[field.typeIdx]));
             appendU32(out, pool.remap[field.nameIdx]);
         }
-        mapItems.push_back(MapItem{MapType::FieldIdItem, 0, dex.fieldCount(), fieldIdsOff});
+        mapItems.push_back(MapItem{MapType::FieldIdItem, 0, fieldCountOut, fieldIdsOff});
     }
 
     ca::u32 methodIdsOff = 0;
-    if (!dex.methodIds.empty()) {
+    if (methodCountOut != 0) {
         methodIdsOff = offsetOf(out);
         for (ca::u32 i = 0; i < methodOrder.oldIndexByNew.size(); ++i) {
             const MethodId& method = dex.methodIds[methodOrder.oldIndexByNew[i]];
@@ -1239,7 +1298,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
             appendU16(out, static_cast<ca::u16>(protoOrder.remap[method.protoIdx]));
             appendU32(out, pool.remap[method.nameIdx]);
         }
-        mapItems.push_back(MapItem{MapType::MethodIdItem, 0, dex.methodCount(), methodIdsOff});
+        mapItems.push_back(MapItem{MapType::MethodIdItem, 0, methodCountOut, methodIdsOff});
     }
 
     ca::u32 classDefsOff = 0;
@@ -1731,13 +1790,13 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     putU32(out, 56, stringCount);
     putU32(out, 60, stringIdsOff);
-    putU32(out, 64, dex.typeCount());
+    putU32(out, 64, typeCountOut);
     putU32(out, 68, typeIdsOff);
-    putU32(out, 72, dex.protoCount());
+    putU32(out, 72, protoCountOut);
     putU32(out, 76, protoIdsOff);
-    putU32(out, 80, dex.fieldCount());
+    putU32(out, 80, fieldCountOut);
     putU32(out, 84, fieldIdsOff);
-    putU32(out, 88, dex.methodCount());
+    putU32(out, 88, methodCountOut);
     putU32(out, 92, methodIdsOff);
     putU32(out, 96, dex.classCount());
     putU32(out, 100, classDefsOff);

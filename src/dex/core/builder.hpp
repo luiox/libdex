@@ -115,6 +115,9 @@ struct BuildOptions
     /// 不写（class_def.static_values_off 置 0）。与 d8 输出约定一致，汇编器
     /// 从文本重建时开启以保证往返文本稳定；增量编辑默认关闭（补齐语义）。
     bool trimTrailingStaticDefaults = false;
+    /// @brief vacuum：计算引用闭包，剔除未引用的 string/type/proto/field/
+    /// method 表项并全量重写引用。class_defs 不裁。仅 canonical 路径生效。
+    bool vacuumIds = false;
 };
 
 /// @brief 把 DOM 重建为一份 canonical 布局的 .dex 字节。
