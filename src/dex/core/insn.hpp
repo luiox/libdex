@@ -124,7 +124,7 @@ struct Insn
 
 /// @brief 解码整个 insns 区。
 ///
-/// 规范标识 0x0101/0x0202/0x0300 的偶数地址 code unit 识别为 payload；
+/// 规范标识 0x0100/0x0200/0x0300 的偶数地址 code unit 识别为 payload；
 /// 低字节为 0、高字节非 payload 标识的 code unit 按 ART 的宽容度当作 nop
 /// （宽度 1）。
 Result<std::vector<Insn>, InsnError> decodeInsns(ByteSlice insns);

@@ -29,6 +29,7 @@ constexpr ca::u32 kProtoIdsTableOff = 0x9C;
 constexpr ca::u32 kFieldIdsTableOff = 0xB4;
 constexpr ca::u32 kMethodIdsTableOff = 0xBC;
 constexpr ca::u32 kClassDefsTableOff = 0xC4;
+constexpr ca::u32 kDataOffset = 0xE4;  ///< data 区起点（字符串数据之前）
 
 constexpr ca::u32 kHeaderChecksumField = 8;
 constexpr ca::u32 kHeaderSignatureField = 12;

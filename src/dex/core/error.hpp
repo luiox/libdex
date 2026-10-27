@@ -47,6 +47,7 @@ enum class WriteError {
     SourceUnreadable,  ///< 重建需要再次解码源条目，但源字节不可读或自相矛盾
     InvalidModel,      ///< 模型引用缺失或替换项指向不存在/无方法体的方法
     UnmappedRawSection, ///< 表索引需要重排，但未建模 section 无法迁移内部引用
+    NotIncremental,    ///< 增量重建的前提被破坏（编辑触及 ID 表），需改走 canonical
 };
 
 /// @brief 模型的解析状态：描述能力，而非合法性。

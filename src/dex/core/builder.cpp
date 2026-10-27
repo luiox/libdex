@@ -13,6 +13,7 @@
 #include "jstr/conversion.hpp"
 
 #include "dex/core/annotation.hpp"
+#include "dex/core/builder_edit.hpp"
 #include "dex/core/debug_info.hpp"
 #include "dex/core/insn.hpp"
 #include "dex/core/integrity.hpp"
@@ -123,72 +124,6 @@ struct CodeUnit
     std::vector<ca::u32> methods;       ///< 复用该 code_item 的旧 method 索引
     ca::u32 newOffset = 0;
 };
-
-/// @brief 重建前的 ID 表护栏：容量与表内索引。
-///
-/// DEX 的 type/proto/field/method 索引是 16 位；string 索引是 32 位。
-/// 这里只检查模型自洽，不检查排序（排序是 DEX 规范要求，reader 只做诊断）。
-bool validIdTables(const DexFile& dex) noexcept
-{
-    if (dex.stringIds.size() > 0xFFFFFFFFu ||
-        dex.typeIds.size() > DexFile::kIdTableLimit ||
-        dex.protoIds.size() > DexFile::kIdTableLimit ||
-        dex.fieldIds.size() > DexFile::kIdTableLimit ||
-        dex.methodIds.size() > DexFile::kIdTableLimit) {
-        return false;
-    }
-
-    const ca::u32 stringCount = dex.stringCount();
-    const ca::u32 typeCount = dex.typeCount();
-    const ca::u32 protoCount = dex.protoCount();
-    const ca::u32 fieldCount = dex.fieldCount();
-    const ca::u32 methodCount = dex.methodCount();
-
-    for (const TypeId& type : dex.typeIds) {
-        if (type.descriptorIdx >= stringCount) {
-            return false;
-        }
-    }
-    for (const ProtoId& proto : dex.protoIds) {
-        if (proto.shortyIdx >= stringCount || proto.returnTypeIdx >= typeCount) {
-            return false;
-        }
-    }
-    for (const FieldId& field : dex.fieldIds) {
-        if (field.classIdx >= typeCount || field.typeIdx >= typeCount ||
-            field.nameIdx >= stringCount) {
-            return false;
-        }
-    }
-    for (const MethodId& method : dex.methodIds) {
-        if (method.classIdx >= typeCount || method.protoIdx >= protoCount ||
-            method.nameIdx >= stringCount) {
-            return false;
-        }
-    }
-    for (const ClassDef& def : dex.classDefs) {
-        if (def.classIdx >= typeCount ||
-            (def.superclassIdx != DexFile::kNoIndex && def.superclassIdx >= typeCount) ||
-            (def.sourceFileIdx != DexFile::kNoIndex && def.sourceFileIdx >= stringCount)) {
-            return false;
-        }
-    }
-    for (const CallSiteId& site : dex.callSites) {
-        if (site.callSiteOff == 0) {
-            return false;
-        }
-    }
-    for (const MethodHandle& handle : dex.methodHandles) {
-        if (handle.handleType > 8) {
-            return false;
-        }
-        const ca::u32 limit = handle.handleType <= 3 ? fieldCount : methodCount;
-        if (handle.targetIdx >= limit) {
-            return false;
-        }
-    }
-    return true;
-}
 
 struct PoolString
 {
@@ -621,6 +556,9 @@ Result<std::vector<AnnotationsDirectoryEntry>, WriteError> remapDirectoryEntries
 Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                                                  const BuildOptions& options)
 {
+    if (options.incremental) {
+        return buildDexIncremental(dex, options);
+    }
     if (!dex.hasSource()) {
         return Err(WriteError::MissingSource);
     }
@@ -770,84 +708,41 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     const ByteSlice source = dex.source();
 
-    // ---- 替换项索引 ----
-    std::unordered_map<ca::u32, const CodeReplacement*> replacements;
-    for (const CodeReplacement& repl : options.codeReplacements) {
-        if (repl.methodIdx >= dex.methodCount()) {
-            return Err(WriteError::InvalidModel);
-        }
-        if (!replacements.emplace(repl.methodIdx, &repl).second) {
-            return Err(WriteError::InvalidModel);
-        }
-        if (repl.insns.size() != static_cast<ca::usize>(repl.item.insnsSize) * 2u) {
-            return Err(WriteError::Unencodable);
-        }
+    // ---- 编辑集校验与逐类有效 class_data（共享编辑层）----
+    Result<std::map<ca::u32, const ClassData*>, WriteError> collectedData =
+        collectSourceClassData(dex);
+    if (collectedData.is_err()) {
+        return Err(collectedData.unwrap_err());
     }
+    const std::map<ca::u32, const ClassData*> classDataByOff =
+        std::move(collectedData).unwrap();
 
-    // ---- 删除成员：只从 class_data 移除，ID 表条目保留 ----
-    std::unordered_set<ca::u32> removedFields(options.removedFields.begin(),
-                                              options.removedFields.end());
-    std::unordered_set<ca::u32> removedMethods(options.removedMethods.begin(),
-                                               options.removedMethods.end());
-    for (ca::u32 fieldIdx : removedFields) {
-        if (fieldIdx >= dex.fieldCount()) {
-            return Err(WriteError::InvalidModel);
-        }
+    Result<MemberEditSet, WriteError> collectedEdits =
+        collectMemberEdits(dex, options, classDataByOff);
+    if (collectedEdits.is_err()) {
+        return Err(collectedEdits.unwrap_err());
     }
-    for (ca::u32 methodIdx : removedMethods) {
-        if (methodIdx >= dex.methodCount() || replacements.count(methodIdx) != 0) {
-            return Err(WriteError::InvalidModel);
-        }
-    }
+    const MemberEditSet memberEdits = std::move(collectedEdits).unwrap();
+    const std::unordered_map<ca::u32, const CodeReplacement*>& replacements =
+        memberEdits.replacements;
+    const std::unordered_set<ca::u32>& removedFields = memberEdits.removedFields;
+    const std::unordered_set<ca::u32>& removedMethods = memberEdits.removedMethods;
+    const std::unordered_map<ca::u32, std::vector<const FieldAddition*>>& fieldsByClass =
+        memberEdits.fieldsByClass;
+    const std::unordered_map<ca::u32, std::vector<const MethodAddition*>>& methodsByClass =
+        memberEdits.methodsByClass;
 
-    // ---- class_data 与方法体目录（按旧偏移去重，保序）----
-    std::map<ca::u32, const ClassData*> classDataByOff;
-    for (ca::u32 i = 0; i < dex.classCount(); ++i) {
-        const ca::u32 off = dex.classDefs[i].classDataOff;
-        if (off == 0 || classDataByOff.count(off) != 0) {
-            continue;
-        }
-        const Result<const ClassData*, WriteError> data = requireDecoded(dex.classData(i));
-        if (data.is_err()) {
-            return Err(data.unwrap_err());
-        }
-        classDataByOff.emplace(off, data.unwrap());
-    }
-
+    // ---- 方法体目录：保留共享 code_off，按新方法索引排序 ----
     std::vector<MethodSite> sites;
-    std::unordered_set<ca::u32> methodsWithCode;
-    std::unordered_set<ca::u32> definedFields;
-    std::unordered_set<ca::u32> definedMethods;
     for (const auto& entry : classDataByOff) {
         const ClassData& data = *entry.second;
-        const std::vector<EncodedField>* fieldLists[2] = {&data.staticFields,
-                                                          &data.instanceFields};
-        for (const std::vector<EncodedField>* fields : fieldLists) {
-            for (const EncodedField& field : *fields) {
-                if (removedFields.count(field.fieldIndex) != 0) {
-                    continue;
-                }
-                if (field.fieldIndex >= dex.fieldCount()) {
-                    return Err(WriteError::InvalidModel);
-                }
-                definedFields.insert(field.fieldIndex);
-            }
-        }
-        const std::vector<EncodedMethod>* lists[2] = {&data.directMethods, &data.virtualMethods};
+        const std::vector<EncodedMethod>* lists[2] = {&data.directMethods,
+                                                      &data.virtualMethods};
         for (const std::vector<EncodedMethod>* list : lists) {
             for (const EncodedMethod& method : *list) {
-                if (removedMethods.count(method.methodIndex) != 0) {
+                if (removedMethods.count(method.methodIndex) != 0 ||
+                    method.codeOff == 0) {
                     continue;
-                }
-                if (method.methodIndex >= dex.methodCount()) {
-                    return Err(WriteError::InvalidModel);
-                }
-                definedMethods.insert(method.methodIndex);
-                if (method.codeOff == 0) {
-                    continue;
-                }
-                if (!methodsWithCode.insert(method.methodIndex).second) {
-                    return Err(WriteError::InvalidModel);  // 同一方法被两处定义
                 }
                 sites.push_back(MethodSite{method.methodIndex, method.codeOff});
             }
@@ -858,142 +753,10 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
               [&methodOrder](const MethodSite& a, const MethodSite& b) {
                   return methodOrder.remap[a.methodIdx] < methodOrder.remap[b.methodIdx];
               });
-    for (const auto& entry : replacements) {
-        if (methodsWithCode.count(entry.first) == 0) {
-            return Err(WriteError::InvalidModel);
-        }
-    }
-
-    // ---- 新增成员：校验重复定义，挂到对应 class_data 的副本 ----
-    constexpr ca::u32 kAccPrivate = 0x2u;
-    constexpr ca::u32 kAccStatic = 0x8u;
-    constexpr ca::u32 kAccConstructor = 0x10000u;
-    std::unordered_map<ca::u32, std::vector<const FieldAddition*>> fieldsByClass;
-    std::unordered_map<ca::u32, std::vector<const MethodAddition*>> methodsByClass;
-    std::unordered_set<ca::u32> addedFields;
-    std::unordered_set<ca::u32> addedMethods;
-    for (const FieldAddition& add : options.fieldAdditions) {
-        if (add.classDefIdx >= dex.classCount() || add.fieldIdx >= dex.fieldCount()) {
-            return Err(WriteError::InvalidModel);
-        }
-        // static/instance 分组由 isStatic 决定，写入的标志位必须一致。
-        if (add.isStatic != ((add.accessFlags & kAccStatic) != 0)) {
-            return Err(WriteError::InvalidModel);
-        }
-        if (definedFields.count(add.fieldIdx) != 0 ||
-            removedFields.count(add.fieldIdx) != 0 ||
-            !addedFields.insert(add.fieldIdx).second) {
-            return Err(WriteError::InvalidModel);  // 重复定义或与删除冲突
-        }
-        fieldsByClass[add.classDefIdx].push_back(&add);
-    }
-    for (const MethodAddition& add : options.methodAdditions) {
-        if (add.classDefIdx >= dex.classCount() || add.methodIdx >= dex.methodCount()) {
-            return Err(WriteError::InvalidModel);
-        }
-        if (definedMethods.count(add.methodIdx) != 0 ||
-            !addedMethods.insert(add.methodIdx).second ||
-            replacements.count(add.methodIdx) != 0 ||
-            removedMethods.count(add.methodIdx) != 0) {
-            return Err(WriteError::InvalidModel);  // 重复定义或与替换/删除冲突
-        }
-        if (add.insns.size() != static_cast<ca::usize>(add.item.insnsSize) * 2u) {
-            return Err(WriteError::Unencodable);
-        }
-        methodsByClass[add.classDefIdx].push_back(&add);
-    }
-
-    std::unordered_map<ca::u32, ca::u32> fieldFlagEdits;
-    for (const AccessFlagEdit& edit : options.fieldAccessFlags) {
-        if (edit.index >= dex.fieldCount() || removedFields.count(edit.index) != 0 ||
-            addedFields.count(edit.index) != 0 ||
-            definedFields.count(edit.index) == 0 ||
-            !fieldFlagEdits.emplace(edit.index, edit.accessFlags).second) {
-            return Err(WriteError::InvalidModel);
-        }
-    }
-    std::unordered_map<ca::u32, ca::u32> methodFlagEdits;
-    for (const AccessFlagEdit& edit : options.methodAccessFlags) {
-        if (edit.index >= dex.methodCount() || removedMethods.count(edit.index) != 0 ||
-            addedMethods.count(edit.index) != 0 ||
-            definedMethods.count(edit.index) == 0 ||
-            !methodFlagEdits.emplace(edit.index, edit.accessFlags).second) {
-            return Err(WriteError::InvalidModel);
-        }
-    }
-
-    std::map<ca::u32, ClassData> classDataEdits;
-    const auto ensureEdit = [&](ca::u32 classDefIdx) -> ClassData& {
-        ClassData& edit = classDataEdits[classDefIdx];
-        if (edit.raw.length == 0 && edit.staticFields.empty() &&
-            edit.instanceFields.empty() && edit.directMethods.empty() &&
-            edit.virtualMethods.empty()) {
-            const ca::u32 off = dex.classDefs[classDefIdx].classDataOff;
-            if (off != 0) {
-                const auto found = classDataByOff.find(off);
-                if (found != classDataByOff.end()) {
-                    edit = *found->second;
-                }
-            }
-        }
-        return edit;
-    };
-    for (const auto& entry : fieldsByClass) {
-        ClassData& edit = ensureEdit(entry.first);
-        for (const FieldAddition* add : entry.second) {
-            EncodedField field;
-            field.fieldIndex = add->fieldIdx;
-            field.accessFlags = add->accessFlags;
-            (add->isStatic ? edit.staticFields : edit.instanceFields).push_back(field);
-        }
-    }
-    for (const auto& entry : methodsByClass) {
-        ClassData& edit = ensureEdit(entry.first);
-        for (const MethodAddition* add : entry.second) {
-            EncodedMethod method;
-            method.methodIndex = add->methodIdx;
-            method.accessFlags = add->accessFlags;
-            method.codeOff = 1;  // 占位，布局后替换为真实 code_off
-            const bool direct = (add->accessFlags &
-                                 (kAccPrivate | kAccStatic | kAccConstructor)) != 0;
-            (direct ? edit.directMethods : edit.virtualMethods).push_back(method);
-        }
-    }
 
     // ---- static_values：按新的静态字段顺序重建，补齐新增字段并去掉删除项 ----
-    const auto defaultStaticValue = [&](ca::u32 fieldIdx)
-        -> Result<EncodedValue, WriteError> {
-        Result<jstr::MUtf8StringRef, ReadError> descriptor = dex.fieldTypeDescriptor(fieldIdx);
-        if (descriptor.is_err()) {
-            return Err(WriteError::SourceUnreadable);
-        }
-        const std::string_view text = descriptor.unwrap().as_std_view();
-        if (text.empty()) {
-            return Err(WriteError::InvalidModel);
-        }
-        EncodedValue value;
-        switch (text[0]) {
-            case 'Z': value.type = EncodedValueType::Boolean; break;
-            case 'B': value.type = EncodedValueType::Byte; break;
-            case 'S': value.type = EncodedValueType::Short; break;
-            case 'C': value.type = EncodedValueType::Char; break;
-            case 'I': value.type = EncodedValueType::Int; break;
-            case 'J': value.type = EncodedValueType::Long; break;
-            case 'F': value.type = EncodedValueType::Float; break;
-            case 'D': value.type = EncodedValueType::Double; break;
-            case 'L':
-            case '[': value.type = EncodedValueType::Null; break;
-            default: return Err(WriteError::InvalidModel);
-        }
-        value.valueArg = 0;
-        return Ok(std::move(value));
-    };
-
     std::unordered_map<ca::u32, std::vector<ca::u8>> staticValueOverrides;
-    const std::map<ca::u32, std::map<ca::u32, EncodedValue>>& valueEdits =
-        dex.staticFieldValueEdits();
     for (ca::u32 classDefIdx = 0; classDefIdx < dex.classCount(); ++classDefIdx) {
-        const ca::u32 valuesOff = dex.classDefs[classDefIdx].staticValuesOff;
         const ca::u32 dataOff = dex.classDefs[classDefIdx].classDataOff;
         const ClassData* original = nullptr;
         if (dataOff != 0) {
@@ -1013,109 +776,17 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                 }
             }
         }
-        const std::map<ca::u32, EncodedValue>* edits = nullptr;
-        const auto editBucket = valueEdits.find(classDefIdx);
-        if (editBucket != valueEdits.end()) {
-            edits = &editBucket->second;
+        Result<std::optional<EncodedArrayItem>, WriteError> synthesized = synthesizeStaticValues(
+            dex, classDefIdx, original, addedStatic, memberEdits, &fieldOrder.remap);
+        if (synthesized.is_err()) {
+            return Err(synthesized.unwrap_err());
         }
-        bool changed = !addedStatic.empty() || edits != nullptr;
-        if (!changed && original != nullptr) {
-            for (const EncodedField& field : original->staticFields) {
-                if (removedFields.count(field.fieldIndex) != 0) {
-                    changed = true;
-                    break;
-                }
-            }
-        }
-        if (!changed) {
+        if (!synthesized.unwrap().has_value()) {
             continue;
-        }
-        // 只有编辑触发时才允许无源数组：等价于全部槽位按尾部默认值省略。
-        if (valuesOff == 0 && addedStatic.empty() && edits == nullptr) {
-            continue;
-        }
-
-        EncodedArrayItem synthesizedEmpty;
-        const EncodedArrayItem* arrayPtr = &synthesizedEmpty;
-        if (valuesOff != 0) {
-            Result<const EncodedArrayItem*, WriteError> fetched =
-                requireDecoded(dex.encodedArray(valuesOff));
-            if (fetched.is_err()) {
-                return Err(fetched.unwrap_err());
-            }
-            arrayPtr = fetched.unwrap();
-        }
-        const EncodedArrayItem& array = *arrayPtr;
-        const ca::usize originalCount = original == nullptr ? 0 : original->staticFields.size();
-        // 规范允许省略尾部的默认值槽位；数组比静态字段还长才是模型不自洽。
-        if (array.values.size() > originalCount) {
-            return Err(WriteError::InvalidModel);
-        }
-
-        struct StaticSlot
-        {
-            ca::u32 fieldIdx = 0;
-            bool fromOriginal = false;
-            ca::usize valuePos = 0;
-        };
-        std::vector<StaticSlot> slots;
-        ca::usize pos = 0;
-        if (original != nullptr) {
-            for (const EncodedField& field : original->staticFields) {
-                const ca::usize valuePos = pos++;
-                if (removedFields.count(field.fieldIndex) == 0) {
-                    slots.push_back(StaticSlot{field.fieldIndex, true, valuePos});
-                }
-            }
-        }
-        for (ca::u32 fieldIdx : addedStatic) {
-            slots.push_back(StaticSlot{fieldIdx, false, 0});
-        }
-        std::sort(slots.begin(), slots.end(),
-                  [&fieldOrder](const StaticSlot& a, const StaticSlot& b) {
-                      return fieldOrder.remap[a.fieldIdx] < fieldOrder.remap[b.fieldIdx];
-                  });
-
-        // 编辑目标必须落在最终静态字段集合里（实例字段、删除字段、未定义字段都拒绝）。
-        if (edits != nullptr) {
-            for (const auto& entry : *edits) {
-                bool found = false;
-                for (const StaticSlot& slot : slots) {
-                    if (slot.fieldIdx == entry.first) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    return Err(WriteError::InvalidModel);
-                }
-            }
-        }
-
-        EncodedArrayItem synthesized;
-        synthesized.values.reserve(slots.size());
-        for (const StaticSlot& slot : slots) {
-            if (edits != nullptr) {
-                const auto edited = edits->find(slot.fieldIdx);
-                if (edited != edits->end()) {
-                    synthesized.values.push_back(edited->second);
-                    continue;
-                }
-            }
-            if (slot.fromOriginal && slot.valuePos < array.values.size()) {
-                synthesized.values.push_back(array.values[slot.valuePos]);
-                continue;
-            }
-            // 新增字段与被省略的尾部槽位都填类型默认值。
-            Result<EncodedValue, WriteError> value = defaultStaticValue(slot.fieldIdx);
-            if (value.is_err()) {
-                return Err(value.unwrap_err());
-            }
-            synthesized.values.push_back(value.unwrap());
         }
         Result<std::vector<ca::u8>, WriteError> encoded =
-            indicesChanged ? encodeArrayRemapped(synthesized, maps)
-                           : writeEncodedArrayItem(synthesized);
+            indicesChanged ? encodeArrayRemapped(*synthesized.unwrap(), maps)
+                           : writeEncodedArrayItem(*synthesized.unwrap());
         if (encoded.is_err()) {
             return Err(encoded.unwrap_err());
         }
@@ -1302,211 +973,19 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     // ---- 注解族：源目录与自有覆盖合并成生效目录，再按生效目录发现 ----
     // 自有条目用合成键挂进各 ItemTable；源偏移与合成键以 0x40000000 为界。
-    constexpr ca::u32 kOwnedTypeListKeyBase = 0x40000000u;
-    constexpr ca::u32 kOwnedItemKeyBase = 0x50000000u;
-    constexpr ca::u32 kOwnedSetKeyBase = 0x60000000u;
-    constexpr ca::u32 kOwnedRefListKeyBase = 0x70000000u;
-    constexpr ca::u32 kOwnedDirectoryKeyBase = 0x78000000u;
-
-    const std::map<ca::u32, AnnotationAttachments>& attachments = dex.annotationAttachments();
-    if (!attachments.empty() && options.stripAnnotations) {
-        return Err(WriteError::InvalidModel);  // 剥离与新建注解互相矛盾
+    Result<AnnotationPlan, WriteError> planned =
+        planAnnotations(dex, options, memberEdits, classDataByOff);
+    if (planned.is_err()) {
+        return Err(planned.unwrap_err());
     }
-
-    // 覆盖目标必须在生效 class_data（含注入成员，扣除删除）中有定义。
-    const auto validateTargets = [&](const AnnotationAttachments& attach,
-                                     ca::u32 classDefIdx) -> Result<void, WriteError> {
-        const ClassData* effective = nullptr;
-        const auto edited = classDataEdits.find(classDefIdx);
-        if (edited != classDataEdits.end()) {
-            effective = &edited->second;
-        } else {
-            const ca::u32 off = dex.classDefs[classDefIdx].classDataOff;
-            if (off != 0) {
-                const auto found = classDataByOff.find(off);
-                if (found == classDataByOff.end()) {
-                    return Err(WriteError::InvalidModel);
-                }
-                effective = found->second;
-            }
-        }
-        const auto memberDefined = [effective, &removedFields, &removedMethods](
-                                        bool method, ca::u32 memberIdx) {
-            if (method ? removedMethods.count(memberIdx) != 0
-                       : removedFields.count(memberIdx) != 0) {
-                return false;  // 成员已被删除，不能作为注解目标
-            }
-            if (effective == nullptr) {
-                return false;
-            }
-            if (method) {
-                for (const EncodedMethod& m : effective->directMethods) {
-                    if (m.methodIndex == memberIdx) return true;
-                }
-                for (const EncodedMethod& m : effective->virtualMethods) {
-                    if (m.methodIndex == memberIdx) return true;
-                }
-                return false;
-            }
-            for (const EncodedField& f : effective->staticFields) {
-                if (f.fieldIndex == memberIdx) return true;
-            }
-            for (const EncodedField& f : effective->instanceFields) {
-                if (f.fieldIndex == memberIdx) return true;
-            }
-            return false;
-        };
-        for (const auto& entry : attach.fields) {
-            if (!memberDefined(false, entry.first)) {
-                return Err(WriteError::InvalidModel);
-            }
-        }
-        for (const auto& entry : attach.methods) {
-            if (!memberDefined(true, entry.first)) {
-                return Err(WriteError::InvalidModel);
-            }
-        }
-        for (const auto& entry : attach.parameters) {
-            if (!memberDefined(true, entry.first)) {
-                return Err(WriteError::InvalidModel);
-            }
-            const Result<TypeListSpan, ReadError> params =
-                dex.protoParameters(dex.methodIds[entry.first].protoIdx);
-            if (params.is_err() || params.unwrap().size != entry.second.size()) {
-                return Err(WriteError::InvalidModel);  // 参数个数不匹配
-            }
-        }
-        return Ok();
-    };
-    for (const auto& entry : attachments) {
-        if (entry.first >= dex.classCount()) {
-            return Err(WriteError::InvalidModel);
-        }
-        const Result<void, WriteError> targets = validateTargets(entry.second, entry.first);
-        if (targets.is_err()) {
-            return Err(targets.unwrap_err());
-        }
-    }
-
-    std::set<ca::u32> directoryOffs;
-    if (!options.stripAnnotations) {
-        for (const ClassDef& def : dex.classDefs) {
-            if (def.annotationsOff != 0) {
-                directoryOffs.insert(def.annotationsOff);
-            }
-        }
-    }
-    std::map<ca::u32, const AnnotationsDirectory*> directories;
-    for (ca::u32 off : directoryOffs) {
-        const Result<const AnnotationsDirectory*, WriteError> directory =
-            requireDecoded(dex.annotationsDirectory(off));
-        if (directory.is_err()) {
-            return Err(directory.unwrap_err());
-        }
-        directories.emplace(off, directory.unwrap());
-    }
-
-    // 逐类合并源目录与覆盖；条目的 annotationsOff 字段承载键（源偏移或合成键）。
-    struct EffectiveDirectory
-    {
-        bool overridden = false;       // 有自有覆盖，目录按合成键发射
-        bool effectivelyEmpty = true;  // 覆盖后无任何内容（不发射目录）
-        AnnotationsDirectory content;
-    };
-    std::vector<EffectiveDirectory> effectiveDirs(dex.classCount());
-    std::map<ca::u32, const std::vector<ca::u32>*> ownedSetItems;        // set 键 → 池下标
-    std::map<ca::u32, std::vector<ca::u32>> ownedRefListSets;            // refList 键 → set 键
-    ca::u32 ownedSetKeySeq = 0;
-    ca::u32 ownedRefListKeySeq = 0;
-    for (ca::u32 i = 0; i < dex.classCount(); ++i) {
-        const ClassDef& def = dex.classDefs[i];
-        const AnnotationsDirectory* source = nullptr;
-        if (def.annotationsOff != 0) {
-            source = directories.find(def.annotationsOff)->second;
-        }
-        const AnnotationAttachments* attach = nullptr;
-        const auto found = attachments.find(i);
-        if (found != attachments.end()) {
-            attach = &found->second;
-        }
-        EffectiveDirectory& eff = effectiveDirs[i];
-        eff.overridden = attach != nullptr;
-
-        if (attach != nullptr && attach->hasClass) {
-            if (!attach->classItems.empty()) {
-                const ca::u32 key = kOwnedSetKeyBase + ownedSetKeySeq++;
-                eff.content.classAnnotationsOff = key;
-                ownedSetItems.emplace(key, &attach->classItems);
-            }
-        } else if (source != nullptr) {
-            eff.content.classAnnotationsOff = source->classAnnotationsOff;
-        }
-
-        const auto mergeEntries = [&](const std::vector<AnnotationsDirectoryEntry>& src,
-                                      const std::map<ca::u32, std::vector<ca::u32>>* overrides,
-                                      std::vector<AnnotationsDirectoryEntry>& out) {
-            if (src.empty() && overrides == nullptr) {
-                return;
-            }
-            for (const AnnotationsDirectoryEntry& entry : src) {
-                if (overrides != nullptr && overrides->count(entry.memberIdx) != 0) {
-                    continue;  // 该成员被覆盖，源条目不进入生效目录
-                }
-                out.push_back(entry);
-            }
-            if (overrides == nullptr) {
-                return;
-            }
-            for (const auto& entry : *overrides) {
-                if (entry.second.empty()) {
-                    continue;  // 显式清空：无条目
-                }
-                const ca::u32 key = kOwnedSetKeyBase + ownedSetKeySeq++;
-                out.push_back(AnnotationsDirectoryEntry{entry.first, key});
-                ownedSetItems.emplace(key, &entry.second);
-            }
-        };
-        const std::vector<AnnotationsDirectoryEntry> noEntries;
-        mergeEntries(source == nullptr ? noEntries : source->fieldAnnotations,
-                     attach == nullptr ? nullptr : &attach->fields,
-                     eff.content.fieldAnnotations);
-        mergeEntries(source == nullptr ? noEntries : source->methodAnnotations,
-                     attach == nullptr ? nullptr : &attach->methods,
-                     eff.content.methodAnnotations);
-
-        for (const AnnotationsDirectoryEntry& entry :
-             source == nullptr ? noEntries : source->parameterAnnotations) {
-            const bool overridden =
-                attach != nullptr && attach->parameters.count(entry.memberIdx) != 0;
-            if (!overridden) {
-                eff.content.parameterAnnotations.push_back(entry);
-            }
-        }
-        if (attach != nullptr) {
-            for (const auto& entry : attach->parameters) {
-                std::vector<ca::u32> setKeys;
-                setKeys.reserve(entry.second.size());
-                for (const std::vector<ca::u32>& items : entry.second) {
-                    if (items.empty()) {
-                        setKeys.push_back(0);
-                        continue;
-                    }
-                    const ca::u32 key = kOwnedSetKeyBase + ownedSetKeySeq++;
-                    setKeys.push_back(key);
-                    ownedSetItems.emplace(key, &items);
-                }
-                const ca::u32 refListKey = kOwnedRefListKeyBase + ownedRefListKeySeq++;
-                eff.content.parameterAnnotations.push_back(
-                    AnnotationsDirectoryEntry{entry.first, refListKey});
-                ownedRefListSets.emplace(refListKey, std::move(setKeys));
-            }
-        }
-
-        eff.effectivelyEmpty = eff.content.classAnnotationsOff == 0 &&
-                               eff.content.fieldAnnotations.empty() &&
-                               eff.content.methodAnnotations.empty() &&
-                               eff.content.parameterAnnotations.empty();
-    }
+    const AnnotationPlan annotationPlan = std::move(planned).unwrap();
+    const std::vector<EffectiveDirectory>& effectiveDirs = annotationPlan.dirs;
+    const std::map<ca::u32, const std::vector<ca::u32>*>& ownedSetItems =
+        annotationPlan.ownedSetItems;
+    const std::map<ca::u32, std::vector<ca::u32>>& ownedRefListSets =
+        annotationPlan.ownedRefListSets;
+    const std::map<ca::u32, const AnnotationsDirectory*>& directories =
+        annotationPlan.directories;
 
     // 从生效目录发现源 set / ref_list；合成键不进发现集合。
     std::set<ca::u32> setOffs;
@@ -1883,18 +1362,25 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     const std::vector<ca::u32>* methodMembers =
         methodOrder.identity ? nullptr : &methodOrder.remap;
 
-    // 目录按 class_def 顺序发射：未覆盖的类沿用源偏移作键（共享目录自动去重），
-    // 覆盖的类用合成键且内容为合并后的生效目录；内容全空则不发射。
+    // 目录按新的 class_def 顺序发射：未覆盖的类沿用源偏移作键（共享目录自动去重），
+    // 覆盖的类用合成键且内容为合并后的生效目录；内容全空则不发射。发射序必须
+    // 取 classOrder 而非 DOM 序——重排后 DOM 序在两次重建间不同，会导致目录
+    // 落位漂移、破坏二次重建固定点。
     ItemTable annotationDirectories;
-    for (ca::u32 i = 0; i < effectiveDirs.size(); ++i) {
-        const EffectiveDirectory& eff = effectiveDirs[i];
-        const bool emit = eff.overridden ? !eff.effectivelyEmpty
-                                         : dex.classDefs[i].annotationsOff != 0;
+    for (ca::u32 i = 0; i < classOrder.oldIndexByNew.size(); ++i) {
+        const ca::u32 oldClassIdx = classOrder.oldIndexByNew[i];
+        const EffectiveDirectory& eff = effectiveDirs[oldClassIdx];
+        // strip 时目录一律不发射：class_def 的 annotations_off 已写 0，
+        // 发射目录只会制造无引用孤儿，破坏二次重建固定点。
+        const bool emit =
+            !options.stripAnnotations &&
+            (eff.overridden ? !eff.effectivelyEmpty
+                            : dex.classDefs[oldClassIdx].annotationsOff != 0);
         if (!emit) {
             continue;
         }
-        const ca::u32 key = eff.overridden ? kOwnedDirectoryKeyBase + i
-                                           : dex.classDefs[i].annotationsOff;
+        const ca::u32 key = eff.overridden ? kOwnedDirectoryKeyBase + oldClassIdx
+                                           : dex.classDefs[oldClassIdx].annotationsOff;
         const AnnotationsDirectory& dir = eff.content;
         Result<std::vector<AnnotationsDirectoryEntry>, WriteError> fieldEntries =
             remapDirectoryEntries(dir.fieldAnnotations, fieldMembers);
@@ -1997,58 +1483,9 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     // ---- class_data：code_off 换成新偏移，field/method 索引换成新下标 ----
     const auto encodeClassData = [&](ClassData copy)
         -> Result<std::vector<ca::u8>, WriteError> {
-        const auto fieldRemoved = [&removedFields](const EncodedField& field) {
-            return removedFields.count(field.fieldIndex) != 0;
-        };
-        for (std::vector<EncodedField>* list : {&copy.staticFields, &copy.instanceFields}) {
-            list->erase(std::remove_if(list->begin(), list->end(), fieldRemoved),
-                        list->end());
-        }
-        const auto methodRemoved = [&removedMethods](const EncodedMethod& method) {
-            return removedMethods.count(method.methodIndex) != 0;
-        };
-        for (std::vector<EncodedMethod>* list : {&copy.directMethods, &copy.virtualMethods}) {
-            list->erase(std::remove_if(list->begin(), list->end(), methodRemoved),
-                        list->end());
-        }
-
-        if (!fieldFlagEdits.empty()) {
-            for (std::vector<EncodedField>* list : {&copy.staticFields,
-                                                    &copy.instanceFields}) {
-                for (EncodedField& field : *list) {
-                    const auto edit = fieldFlagEdits.find(field.fieldIndex);
-                    if (edit == fieldFlagEdits.end()) {
-                        continue;
-                    }
-                    if (((field.accessFlags ^ edit->second) & 0x8u) != 0) {
-                        return Err(WriteError::InvalidModel);  // 不能改 static 位
-                    }
-                    field.accessFlags = edit->second;
-                }
-            }
-        }
-        if (!methodFlagEdits.empty()) {
-            std::vector<EncodedMethod> moved;
-            for (std::vector<EncodedMethod>* list : {&copy.directMethods,
-                                                     &copy.virtualMethods}) {
-                for (auto it = list->begin(); it != list->end();) {
-                    const auto edit = methodFlagEdits.find(it->methodIndex);
-                    if (edit == methodFlagEdits.end()) {
-                        ++it;
-                        continue;
-                    }
-                    EncodedMethod method = *it;
-                    method.accessFlags = edit->second;
-                    moved.push_back(std::move(method));
-                    it = list->erase(it);
-                }
-            }
-            for (EncodedMethod& method : moved) {
-                const bool direct =
-                    (method.accessFlags & (kAccPrivate | kAccStatic | kAccConstructor)) != 0;
-                (direct ? copy.directMethods : copy.virtualMethods)
-                    .push_back(std::move(method));
-            }
+        const Result<void, WriteError> edited = applyMemberEdits(copy, memberEdits);
+        if (edited.is_err()) {
+            return Err(edited.unwrap_err());
         }
 
         std::vector<EncodedField>* fieldLists[2] = {&copy.staticFields,
@@ -2094,7 +1531,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
     // 未被新增成员改写的 class_data 按旧偏移共享；被改写的类各写一份副本。
     std::unordered_set<ca::u32> usedByNonEdited;
     for (ca::u32 i = 0; i < dex.classCount(); ++i) {
-        if (classDataEdits.count(i) != 0) {
+        if (memberEdits.classDataEdits.count(i) != 0) {
             continue;
         }
         const ca::u32 off = dex.classDefs[i].classDataOff;
@@ -2117,7 +1554,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
         classDataIndexByOff[entry.first] = classDataBlobs.size();
         classDataBlobs.push_back(std::move(encoded).unwrap());
     }
-    for (const auto& entry : classDataEdits) {
+    for (const auto& entry : memberEdits.classDataEdits) {
         Result<std::vector<ca::u8>, WriteError> encoded = encodeClassData(entry.second);
         if (encoded.is_err()) {
             return Err(encoded.unwrap_err());

@@ -8,7 +8,7 @@ libdex 是 DEX 字节核：输入单个 `.dex`，输出保真 DOM 与写回字�
 
 ## 分层
 
-库只有两层：保真 DOM 与逐条目 codec，不定义方法体 AST。
+库只有两层：保真 DOM 与逐条目 codec，不定义方法体 AST。条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；`dex_file` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
 
 `const/4`、`const/16`、`const-string/jumbo` 这类形态选择属于使用方 adapter。库按调用方给定的 opcode 精确编码，不做合并或提升；不同需求对应不同 adapter，库不绑定其中一种。
 
@@ -35,6 +35,20 @@ lazy：string_data、class_data、code_item、type_list、注解族、encoded_ar
 未修改写回用 `writeDex` 原字节透传，连 checksum/signature 都不重算。`buildDex` 是修改后的唯一写回路径：按 canonical 布局重排，回填文件偏移，重建 map_list，重算 adler32 与 SHA-1。
 
 `buildDex` 只输出可达条目，不可达的建模条目会丢弃；string_data 原字节复制，其余条目精确重编码。未建模 section 默认透传，可选择丢弃；其中若含绝对偏移不会回填。041 与非空 link 区返回 `NotModeled`。
+
+## 增量重建
+
+`buildDex` 有两条布局路径，由 `BuildOptions::incremental` 选择。canonical 是默认路径：整文件重排成规范布局。incremental 保留源布局，只重编码被改条目，为的是大文件上少量编辑的写回成本与输出稳定性。
+
+增量模式的前提是**编辑不触及 ID 表**：`stringIds`/`typeIds`/`protoIds`/`fieldIds`/`methodIds` 的条目数与内容必须和源一致。检测到表级编辑（intern 过字符串、`addType`/`addProto`/`addField`/`addMethod` 追加过条目、`addProtoWithParams` 用过自有参数表）返回 `NotIncremental`，调用方应改走 canonical。`classDefs` 允许 erase（类删除）；手工改写 ID 表字段值是调用方违约，产物未定义。
+
+- **发现**：从 DOM 引用图出发枚举全部源条目（含共享去重），再对六类自描述段（type_list、annotation set/ref list、annotation_item、encoded_array、debug_info）按 map 声明的段范围逐项走查补齐——工具会发射无人引用的孤儿条目（如 d8 为无注解类生成的空 annotation_set_item），漏掉它们会改变 map 计数与 checksum；条目间按 kind 对齐（如 type_list 的 4 字节），段尾对齐 padding 交给 gap。按源偏移排序；条目之间的空隙作为 gap 原样保留——canonical 会丢弃的「不可达条目」与未知填充，增量模式不丢。
+- **发射集合**：编辑后引用图仍可达的条目。被编辑断开引用的源条目删除（成员删除后无人引用的 code_item、类删除、`stripDebugInfo`/`stripAnnotations`、注解清空后的孤儿 set）。
+- **透传判定**：未被编辑且内部引用的偏移映射不变的条目按源字节透传，不解码内容、不重编码。string_data、debug_info、指令区、annotation_item、encoded_array 与三张纯索引 ID 表天然没有偏移引用，永远透传（除非删除）；含偏移引用的定长条目（string_ids、proto_ids、class_defs、call_site_ids、注解 set/ref_list/directory、code_item 的 debug_info_off）按新映射重发射；class_data 的 code_off 是 ULEB 变长，偏移变化触发重编码。
+- **布局**：条目与 gap 按源偏移顺序线性平移；新条目（替换方法体、注入方法体、自有 type_list、注解覆盖、物化静态初值）追加在同类源条目之后，无同类时落在 map_list 之前；4 对齐条目在前导 gap 尾补零。ULEB 宽度随偏移变化会再次改变 class_data 大小，布局迭代至多 4 轮求固定点，不收敛返回 `Unencodable`。
+- **map_list 与 header**：map_list 按源条目顺序重发射，size/offset 更新，无条目的 section 删条目、新 section 按 type 值插入；header 透传源字节后回填变化字段（file_size、map_off、表偏移、data_off/data_size）并重算 checksum/SHA-1。
+- **固定点**：无编辑的增量重建逐字节返回源文件（源自身 checksum/signature 一致时）；有编辑时二次增量稳定。
+- 索引不动，因此未建模 section 的保留不再与索引重排冲突；section 整体平移，内部绝对偏移不回填，与 canonical 透传语义相同。
 
 ## ID 表与字符串池
 
@@ -74,7 +88,7 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 `encodeInsn`/`encodeInsns` 按 opcode 的定长格式写回，域宽溢出返回 `OperandOverflow`，payload 错位返回 `MisalignedPayload`。不自动插 nop、不改变形态。
 
-库还给 adapter 提供编辑原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`，寄存器域的 `insnRegisterLayout`/`insnRegisterAt`/`setInsnRegister`/`setInsnRegisterRange`/`insnRegisterCeiling` 与批量 `shiftInsnRegisters`/`remapInsnRegisters`，以及 payload 构造器 `makePackedSwitchPayload`/`makeSparseSwitchPayload`/`makeFillArrayDataPayload`（返回自包含的 `PayloadInsn`，storage 移动不失效）。寄存器写入按格式域宽校验（4/8/16 位）；重映射对 range 格式要求映射在区间上是平移，不平移的重排需要改成 35c 形态，归 adapter。sparse 构造器要求 key 严格递增（ART 按二分查找解释）。payload 标识取规范值 0x0101/0x0202/0x0300。label、CFG 与 const 形态选择仍归 adapter。
+库还给 adapter 提供编辑原语：`constFormFits`、`insnIndexLimit`、`insnBranchTarget`/`setInsnBranchTarget`、`recomputeInsnAddresses`，寄存器域的 `insnRegisterLayout`/`insnRegisterAt`/`setInsnRegister`/`setInsnRegisterRange`/`insnRegisterCeiling` 与批量 `shiftInsnRegisters`/`remapInsnRegisters`，以及 payload 构造器 `makePackedSwitchPayload`/`makeSparseSwitchPayload`/`makeFillArrayDataPayload`（返回自包含的 `PayloadInsn`，storage 移动不失效）。寄存器写入按格式域宽校验（4/8/16 位）；重映射对 range 格式要求映射在区间上是平移，不平移的重排需要改成 35c 形态，归 adapter。sparse 构造器要求 key 严格递增（ART 按二分查找解释）。payload 标识取规范值 0x0100/0x0200/0x0300——0x0101 是 `move vA,vB` 的合法编码，不能当 packed-switch 标识（此前版本曾写反，真实语料的 move 指令被误判 payload 而报错）。label、CFG 与 const 形态选择仍归 adapter。
 
 payload 不展开成 target 数组，保留源字节视图；switch target 相对 switch 指令地址。
 
@@ -88,9 +102,11 @@ type 层只解析字段类型与方法描述符，不查 ID 表、不解析泛�
 
 文本 oracle 是 baksmali 2.5.2（dexlib2）：原文件与 `buildDex` 产物分别反汇编，smali 文本必须一致。canonical 重建按规范重排 method_ids 后，class_data 的方法顺序会变；方法块顺序不是语义，脚本按块排序后再 diff，字段、注解与指令文本仍逐字节比较。它覆盖指令、try/catch、注解、静态初值、debug 行号与访问标志。
 
-baksmali 不覆盖未建模 section，也不等于 ART 接受；与 AOSP DEX 规范冲突时以规范为准。ReDex 与 ART 实机验证尚未接线。
+baksmali 不覆盖未建模 section，也不等于 ART 接受。仲裁规则（ART 终审、规范裁决工具分歧、环境缺席明确 skip）见 [tools/oracle/README.md](../tools/oracle/README.md)；`check.sh` 按 `LIBDEX_ORACLE_MODE` 分派 baksmali/redex/art 三种模式，redex 与 art 在对应工具缺席时明确 skip。
 
-真实语料不入库，通过 `LIBDEX_REAL_DEX_DIR` 注入；第三方 APK 只允许哈希清单与复现脚本。
+redex 模式是双边管线对比：原文与重建产物走同一 ReDex 优化管线，管线自身的改写（内联、DCE 等）对两侧等价生效而抵消，两侧产物反汇编后必须一致——单边对比会被管线自身改写污染。CI（Linux）用 Homebrew bottle 装 redex，并用 runner 预装 Android SDK 的 d8 生成语料跑 baksmali/redex 对拍；art 的常驻设备配方见 oracle README。
+
+真实语料不入库，通过 `LIBDEX_REAL_DEX_DIR` 注入；第三方 APK 只允许哈希清单与复现脚本。040/041 由设备提取（`tools/corpus/extract_art.sh`），container 语义的评估与待决问题见 [corpus_040_041_notes](corpus_040_041_notes.md)。
 
 ## 不做
 
@@ -99,7 +115,7 @@ baksmali 不覆盖未建模 section，也不等于 ART 接受；与 AOSP DEX 规
 - ID 表条目新增与删除（字符串 intern 除外）；压缩与 vacuum。
 - visitor 形状与库内方法体 AST。
 - opcode 形态合并或自动提升。
-- 修改后字节 diff 最小化。
+- 修改后字节 diff 最小化：增量重建保留源布局，输出 diff 小是布局保持的结果而非优化目标；库不提供字节级 patch。
 
 ## 相关
 

@@ -10,6 +10,7 @@ DEX（Android 字节码）读写库。保真 DOM 加逐条目 codec，返回值�
 
 - 读取 035–041：header、ID 表、class_data、code_item、try/catch、注解、静态初值、debug_info、call_site/method_handle。
 - 未修改写回原字节透传；`buildDex` 重新排布为 canonical 布局，回填偏移并重算 checksum/SHA-1。
+- 增量布局：`BuildOptions::incremental` 保留源布局、未编辑条目源字节透传，只重编码被改条目（编辑不得触及 ID 表，详见 `doc/design.md`「增量重建」）。
 - 按 method_idx 替换方法体，供反混淆、审计与重写使用。
 - 追加或复用字符串（`internString`/`internUtf8`）；重建时按 UTF-16 重排字符串池并去重。
 - 追加或复用 type/proto/field/method 条目（`addType`/`addProto`/`addField`/`addMethod`）；proto 可按参数列表直建（`addProtoWithParams`，shorty 自动推导）。
@@ -55,7 +56,11 @@ tools/oracle/check.sh /tmp/hello.dex
 for f in "$LIBDEX_REAL_DEX_DIR"/*.dex; do tools/oracle/check.sh "$f"; done
 ```
 
-CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍。baksmali 通过不等于 ART 接受，最终以 AOSP 规范为准。
+`check.sh` 另有两个环境依赖的 oracle 模式：`LIBDEX_ORACLE_MODE=redex` 让原文与重建产物走同一 ReDex 优化管线后反汇编比较（redex 可 `brew install redex` 或用 `LIBDEX_REDEX_BIN` 指定），`LIBDEX_ORACLE_MODE=art` 把两者推到 adb 设备由 dex2oat 验收（仲裁规则见 [tools/oracle/README.md](tools/oracle/README.md)）。对应工具缺席时明确 skip。
+
+语料：`tools/corpus/gen_corpus.sh` 用本机 Android SDK 的 d8 生成 035–039 样本；040/041 由 root 可读设备提取（`tools/corpus/extract_art.sh`）。产物不入库，清单入库。
+
+CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍；Ubuntu 另跑 d8 语料上的 baksmali 对拍与 redex 对拍（观察期）。baksmali 通过不等于 ART 接受，最终以 AOSP 规范为准。
 
 ## 示例
 

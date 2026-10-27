@@ -39,6 +39,7 @@ const char* to_string(WriteError e) noexcept
         case WriteError::SourceUnreadable: return "source_unreadable";
         case WriteError::InvalidModel: return "invalid_model";
         case WriteError::UnmappedRawSection: return "unmapped_raw_section";
+        case WriteError::NotIncremental: return "not_incremental";
     }
     return "unknown";
 }
