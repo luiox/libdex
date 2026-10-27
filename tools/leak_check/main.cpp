@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "dex/core/analysis.hpp"
 #include "dex/core/builder.hpp"
 #include "dex/core/dex_file.hpp"
 #include "dex/core/error.hpp"
@@ -53,6 +54,74 @@ void SmaliProbeInsnCheck(DexFile& dex, const EncodedMethod& m)
         if (!mm || mm->format != i.format) {
             std::printf("smali probe: unmapped insn op=0x%02x fmt=%d at %u\n",
                         i.opcode, static_cast<int>(i.format), i.address);
+        }
+    }
+}
+
+/// @brief 帧分析走查（M4 路径进 ASan 门）。
+void AnalyzeFramesProbe(DexFile& dex, const EncodedMethod& m)
+{
+    if (m.codeOff == 0) {
+        return;
+    }
+    const Result<const CodeItem*, ReadError> code = dex.codeItem(m.codeOff);
+    if (code.is_err() || code.unwrap() == nullptr) {
+        return;
+    }
+    const bool isStatic = (m.accessFlags & 0x8u) != 0;
+    for (const bool strict : {false, true}) {
+        const Result<MethodAnalysis, ReadError> a =
+            analyzeFrames(dex, *code.unwrap(), m.methodIndex, isStatic, strict);
+        if (a.is_err()) {
+            std::printf("analysis probe: method %u failed: %s\n", m.methodIndex,
+                        to_string(a.unwrap_err()));
+            return;
+        }
+        if (!strict || a.unwrap().diagnostics.empty()) {
+            continue;
+        }
+        std::printf("analysis probe: method %u diags:", m.methodIndex);
+        for (const FrameDiagnostic& d : a.unwrap().diagnostics) {
+            std::printf(" @%u/c%d", d.address, static_cast<int>(d.code));
+        }
+        std::printf("\n");
+        if (std::getenv("LIBDEX_ANALYSIS_DUMP") == nullptr) {
+            continue;
+        }
+        {
+            const Result<std::vector<Insn>, InsnError> decoded = decodeInsns(
+                subOrEmpty(dex.source(), code.unwrap()->insns.offset,
+                           code.unwrap()->insns.length));
+            if (decoded.is_ok()) {
+                for (const Insn& i : decoded.unwrap()) {
+                    std::printf("  insn @%u op=0x%02x w=%u\n", i.address, i.opcode,
+                                i.width);
+                }
+            }
+            std::printf("  regs=%u ins=%u\n", code.unwrap()->registersSize,
+                        code.unwrap()->insSize);
+        }
+        for (ca::u32 c = 0; c < dex.classCount(); ++c) {
+            const Result<const ClassData*, ReadError> data = dex.classData(c);
+            if (data.is_err() || data.unwrap() == nullptr) {
+                continue;
+            }
+            bool owns = false;
+            for (const EncodedMethod& mm : data.unwrap()->directMethods) {
+                owns = owns || mm.methodIndex == m.methodIndex;
+            }
+            for (const EncodedMethod& mm : data.unwrap()->virtualMethods) {
+                owns = owns || mm.methodIndex == m.methodIndex;
+            }
+            if (!owns) {
+                continue;
+            }
+            const Result<std::string, dex::smali::SmaliError> text =
+                dex::smali::disassembleClass(dex, c);
+            if (text.is_ok()) {
+                std::printf("---- class %u ----\n%s", c, text.unwrap().c_str());
+            }
+            break;
         }
     }
 }
@@ -101,6 +170,7 @@ void walkEverything(DexFile& dex)
             if (ci->debugInfoOff != 0) {
                 (void)dex.debugInfo(ci->debugInfoOff);
             }
+            AnalyzeFramesProbe(dex, m);
         }
         for (const EncodedMethod& m : cd->virtualMethods) {
             (void)dex.methodName(m.methodIndex);
@@ -113,6 +183,7 @@ void walkEverything(DexFile& dex)
             if (ci->debugInfoOff != 0) {
                 (void)dex.debugInfo(ci->debugInfoOff);
             }
+            AnalyzeFramesProbe(dex, m);
         }
     }
     for (ca::u32 i = 0; i < dex.callSiteCount(); ++i) {
