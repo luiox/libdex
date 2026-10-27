@@ -65,9 +65,17 @@ jobs:
       # ---- 以下仅 Linux：redex 只有 Linux/macOS 构建，d8 语料生成用
       # runner 预装的 Android SDK build-tools。----
 
-      - name: install redex
+      # redex 是可选 oracle：check.sh 在二进制缺席时明确 skip（exit 0）。
+      # ubuntu runner 无 brew、redex 也无官方 Linux 二进制，装不上不算失败。
+      - name: install redex (best effort)
         if: runner.os == 'Linux'
-        run: brew install redex
+        continue-on-error: true
+        run: |
+          if command -v brew >/dev/null 2>&1; then
+            brew install redex
+          else
+            echo "oracle skip: brew unavailable on runner; redex mode will skip"
+          fi
 
       - name: corpus (d8)
         if: runner.os == 'Linux'
