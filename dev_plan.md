@@ -47,6 +47,11 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 
 ## 下一批
 
-- 040/041 实物语料落地：常驻设备跑 `extract_art.sh`，语料进 `LIBDEX_REAL_DEX_DIR`，回填 040 结构差异核对与 041 container 字段实测取值，冻结 container 字段的重建语义（重置为 `(file_size, 0)` 还是保留原值）。
-- redex 出观察期：CI 双边对比绿稳后移除 `continue-on-error` 转门槛；ART 侧落一台自托管 runner 挂常驻设备，art 模式进 CI。
-- 分层整理续：dex_file.cpp 仍持有编辑 API（intern/add*/set* 注解与初值）与懒解码缓存，可再拆出编辑应用层与查询层；builder.cpp 的 canonical 发射器按 map section 归组。
+补齐路线全文见 [doc/roadmap.md](doc/roadmap.md)（场景矩阵、M0–M5 里程碑与
+验收即 goal 边界）。当前批次：
+
+- M0 首批：ASan 泄漏检查 target（借 libjbc §20/§23 做法）+ 畸形错误族
+  盘点表。
+- M0 收口：redex 双边对比出观察期转门禁；040/041 实物到位后进语料矩阵。
+- M1 预研：CodeDom/InsnId 模型草案（参照 libjbc `src/jbc/ir/code_dom.*`），
+  design.md 翻案条款（方法体 AST → CodeDom）先行成文。

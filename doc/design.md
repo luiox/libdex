@@ -8,7 +8,11 @@ libdex 是 DEX 字节核：输入单个 `.dex`，输出保真 DOM 与写回字�
 
 ## 分层
 
-库只有两层：保真 DOM 与逐条目 codec，不定义方法体 AST。条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；`dex_file` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
+库三层：保真 DOM、逐条目 codec、方法体 CodeDom；同仓另有 libsmali 文本层。条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；`dex_file` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
+
+CodeDom（`code_dom`）是方法体的结构编辑模型：`CodeUnit` 拥有指令槽表与程序序，分支/try/handler/payload 用 label 与值句柄（`InsnId{owner,slot,gen}`）引用，insert/replace/erase 后地址与 try 区间联动重算。它是 libsmali 与上层方法体编辑的唯一底座——smali 汇编没有 label 承载的模型做不出来，原「CFG 归 adapter」的裁决随 libsmali 入仓翻案：libsmali 是那个 adapter，建在库内 CodeDom 上，不在库外私养第二套方法体模型。
+
+libsmali（`smali`）是 DEX 与 smali 文本的互转层：反汇编 DexFile → baksmali 兼容文法子集的 `.smali` 文本，汇编文本 → DexFile 编辑。形态选择（`const/4` vs `const/16` vs `const`、分支 10t/20t/30t）在汇编器里按字面量与距离选择——这是 adapter 的职责，core 的「不合并、不提升」裁决不变。文法以反汇编器自产文本为准做往返封闭，baksmali 特有而本库不发射的指令归已知边界。
 
 `const/4`、`const/16`、`const-string/jumbo` 这类形态选择属于使用方 adapter。库按调用方给定的 opcode 精确编码，不做合并或提升；不同需求对应不同 adapter，库不绑定其中一种。
 
@@ -112,9 +116,9 @@ redex 模式是双边管线对比：原文与重建产物走同一 ReDex 优化�
 
 - odex / vdex / art / compact dex。
 - APK、resources.arsc、AXML 与多 dex 模型。
-- ID 表条目新增与删除（字符串 intern 除外）；压缩与 vacuum。
-- visitor 形状与库内方法体 AST。
-- opcode 形态合并或自动提升。
+- ID 表条目新增与删除（字符串 intern 除外）；压缩与 vacuum 仅作为 canonical 路径的显式 opt-in（`BuildOptions::vacuumIds`）。
+- visitor 形状；方法体 AST 已翻案为 CodeDom（值句柄、无 visitor，见「分层」）。
+- opcode 形态合并或自动提升（core；libsmali 汇编器作为 adapter 显式选形态）。
 - 修改后字节 diff 最小化：增量重建保留源布局，输出 diff 小是布局保持的结果而非优化目标；库不提供字节级 patch。
 
 ## 相关

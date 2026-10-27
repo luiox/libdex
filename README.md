@@ -89,7 +89,8 @@ auto rebuilt = buildDex(*file);  // canonical 布局 + 校验字段重算
 ## 文档
 
 - [doc/design.md](doc/design.md)：分层、契约与设计裁决。
-- [dev_plan.md](dev_plan.md)：当前能力、缺口与下一步。
+- [doc/roadmap.md](doc/roadmap.md)：补齐路线——场景矩阵、M0–M5 里程碑与 goal 边界。
+- [dev_plan.md](dev_plan.md)：当前能力、缺口与下一步（批次事实记账）。
 - [CONTRIBUTING.md](CONTRIBUTING.md)：构建、语料、对拍与提交约定。
 
 ## License
