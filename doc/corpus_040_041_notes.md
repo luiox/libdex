@@ -23,19 +23,19 @@
 SHA-256 清单与带设备指纹的报告。产物不入库；清单与报告入库（同
 gen_corpus 纪律）。
 
-## 041 container 字段语义（待实物核对）
+## 041 container 字段语义（写回裁决已冻结，实物待复核）
 
 - 标准 dex 041：header 尾部两个 u32——`container_size`（整个容器文件
   大小）、`header_offset`（本 dex header 在容器中的偏移）；独立文件时
   约定 `container_size == file_size`、`header_offset == 0`。
 - cdex0015：header 布局与标准 dex 不同（含 quickening 信息，数据区排布
   独立）；libdex 明确不做 compact dex（design.md「不做」）。
-- 对 libdex 的含义（决策点，等 041 实物进 reparse 后定）：
-  - 读：041 标准 dex 若只是 header 多两个字段，reader 应接受并把两字段
-    作为 header 的一部分透传；
-  - 写：canonical 重建单文件输出时 container 字段应重置为
-    `(file_size, 0)` 还是保留原值——**待决问题**，由 041 实物 + ART
-    oracle 仲裁（规则见 tools/oracle/README.md）；
+- 对 libdex 的语义（已实现，实物到位时按 ART oracle 复核）：
+  - 读：041 标准 dex 的 container 字段作为 header 一部分透传；
+  - 写：canonical 重建输出单文件，container 字段重置为
+    `(file_size, 0)`（独立文件约定；canonical 产物不继承容器上下文，
+    version041_test 背书）；增量路径保持 `NotModeled`（041 布局未经
+    实物验证前不承诺字节恒等）；
   - 不做：vdex/cdex 容器解析与 cdex 重编码仍归库外。
 
 ## 验收清单（实物到手时）

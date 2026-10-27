@@ -20,6 +20,14 @@ option("with_tests")
     set_description("Build libdex_unittest (pulls gtest).")
 option_end()
 
+-- ASan 泄漏门：独立 target、不与 gtest 同链（MSVC /fsanitize=address 改
+-- STL ABI）。xmake f --with_asan=y 时插桩；不开也能编但门是假的。
+option("with_asan")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Instrument libdex_leak_check with AddressSanitizer.")
+option_end()
+
 -- 模块集与 mjbase/mjt 的 LUIOX_LIBCA_MODULES 保持一致。libjstr 包定义把
 -- libca 钉在同一超集上；这里取同一份，requireconfs 只负责版本收敛。
 LUIOX_LIBCA_VERSION = "0.0.16"
@@ -85,7 +93,50 @@ target("libdex")
         add_cxflags("/utf-8", {tools = "cl"})
     end
 
+    -- ASan 泄漏门要求全闭包插桩（MSVC 下混链即 LNK1319）；默认关闭，
+    -- 只有 leak_check 场景开 --with_asan=y。
+    if has_config("with_asan") then
+        if is_plat("windows") then
+            add_cxflags("/fsanitize=address", {tools = "cl"})
+            -- 预编译依赖（libca 包）未插桩：关容器注解对齐混链检查。
+            add_defines("_DISABLE_STRING_ANNOTATION", "_DISABLE_VECTOR_ANNOTATION")
+        else
+            add_cxflags("-fsanitize=address", "-fno-omit-frame-pointer")
+        end
+    end
+
 -- 对拍与人工排查用 CLI：与单测共享合成 fixture，不默认构建。
+-- libsmali：DEX 与 smali 文本互转（依赖 libdex）。
+target("libsmali")
+    set_kind("static")
+    set_group("libs")
+
+    add_deps("libdex")
+    add_packages("libjstr", {public = true})
+    add_files("src/smali/*.cpp")
+    add_headerfiles("src/(smali/**.hpp)")
+    add_includedirs("src", {public = true})
+    set_languages("cxx17")
+
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
+    -- ASan 全闭包要求：与 libdex 同步插桩（见 libdex 目标内的注释）。
+    if has_config("with_asan") then
+        if is_plat("windows") then
+            add_cxflags("/fsanitize=address", {tools = "cl"})
+            add_defines("_DISABLE_STRING_ANNOTATION", "_DISABLE_VECTOR_ANNOTATION")
+        else
+            add_cxflags("-fsanitize=address", "-fno-omit-frame-pointer")
+        end
+    end
+
+    if is_mode("releasedbg") then
+        add_cxflags("/Zi", "/FS", {force = true})
+        add_ldflags("/DEBUG", {force = true})
+    end
+
 target("dexbuild")
     set_kind("binary")
     set_group("tools")
@@ -103,6 +154,71 @@ target("dexbuild")
         add_cxflags("/utf-8", {tools = "cl"})
     end
 
+-- 大文件性能基线：合成 10 万方法级 dex，计时解析/走查/重建（M5）。
+target("dexperf")
+    set_kind("binary")
+    set_group("tools")
+    set_default(false)
+
+    add_deps("libdex")
+    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    add_files("tools/perf_baseline/*.cpp")
+    add_includedirs("src")
+
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
+-- ASan 泄漏门：真实 dex 读 → 全解码 → 重建 → 重读，零报告。
+target("libdex_leak_check")
+    set_kind("binary")
+    set_group("tools")
+    set_default(false)
+
+    add_deps("libdex", "libsmali")
+    binary_link_closure("libsmali", "libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    add_files("tools/leak_check/*.cpp")
+    add_includedirs("src")
+
+    if has_config("with_asan") then
+        if is_plat("windows") then
+            add_cxflags("/fsanitize=address", {tools = "cl"})
+            add_defines("_DISABLE_STRING_ANNOTATION", "_DISABLE_VECTOR_ANNOTATION")
+            add_ldflags("/fsanitize=address", {tools = "link"})
+        else
+            add_cxflags("-fsanitize=address", "-fno-omit-frame-pointer")
+            add_ldflags("-fsanitize=address")
+        end
+    end
+
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
+-- smalict：libsmali 的 CLI（反汇编/汇编/往返自检）。
+target("smalict")
+    set_kind("binary")
+    set_group("tools")
+    set_default(false)
+
+    add_deps("libdex", "libsmali")
+    binary_link_closure("libsmali", "libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    add_files("tools/smalict/*.cpp")
+    add_includedirs("src")
+
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
+    if is_plat("windows") then
+        add_cxflags("/utf-8", {tools = "cl"})
+    end
+
 -- gtest 面随 with_tests 门控：默认配置不定义本 target、不拉 gtest。
 if has_config("with_tests") then
 target("libdex_unittest")
@@ -110,9 +226,9 @@ target("libdex_unittest")
     set_group("libs/test")
     set_default(false)
 
-    add_deps("libdex")
+    add_deps("libdex", "libsmali")
     -- xmake 3.x 不会自动链静态依赖的二级传递闭包；显式列全。
-    binary_link_closure("libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
+    binary_link_closure("libsmali", "libdex", "libjstr", "libca_crypto", "libca_str", "libca_core")
     add_packages("gtest")
     add_files("test/unittest/*.cpp")
     add_includedirs("src")

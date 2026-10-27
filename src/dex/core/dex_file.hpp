@@ -272,6 +272,11 @@ public:
     DexFile(const DexFile&) = delete;
     DexFile& operator=(const DexFile&) = delete;
 
+    /// @brief 从零构建的起点：version 取 DEX 版本号（35/37/38/39…），
+    ///        endian_tag 置小端规范值。之后用 intern/add* 填表、push_back
+    ///        classDefs，经 @ref buildDex 产出字节。
+    static std::unique_ptr<DexFile> createEmpty(ca::u16 version);
+
     // ---- 骨架（eager）----
 
     DexHeader header;

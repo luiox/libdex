@@ -71,6 +71,11 @@ struct MethodAddition
     ca::u32 accessFlags = 0;
     CodeItem item;
     std::vector<ca::u8> insns;
+
+    /// @brief 预编码的 debug_info_item 字节（从零构建的文件没有源字节，
+    ///        无法走 lazy 解码路径）；空表示无 debug。重建时按需重排其中
+    ///        的字符串/类型索引并发射为新 debug_info_item。
+    std::vector<ca::u8> debugInfo;
 };
 
 /// @brief 覆盖一个已有成员的 access_flags。
@@ -106,6 +111,13 @@ struct BuildOptions
     /// addProtoWithParams），违反返回 @ref WriteError::NotIncremental，调用方应
     /// 改走 canonical。语义细节见 doc/design.md「增量重建」。
     bool incremental = false;
+    /// @brief 重建 static_values 时裁掉尾部的合成默认槽位；全默认则整个数组
+    /// 不写（class_def.static_values_off 置 0）。与 d8 输出约定一致，汇编器
+    /// 从文本重建时开启以保证往返文本稳定；增量编辑默认关闭（补齐语义）。
+    bool trimTrailingStaticDefaults = false;
+    /// @brief vacuum：计算引用闭包，剔除未引用的 string/type/proto/field/
+    /// method 表项并全量重写引用。class_defs 不裁。仅 canonical 路径生效。
+    bool vacuumIds = false;
 };
 
 /// @brief 把 DOM 重建为一份 canonical 布局的 .dex 字节。
