@@ -178,7 +178,7 @@ Result<std::string, SmaliError> protoText(DexFile& dex, ca::u32 protoIdx)
     const Result<std::vector<std::string>, SmaliError> params =
         protoParamTexts(dex, protoIdx);
     if (params.is_err()) {
-        return params.unwrap_err();
+        return Err(params.unwrap_err());
     }
     std::string out = "(";
     for (const std::string& t : params.unwrap()) {
@@ -947,13 +947,13 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
                 for (const ca::u32 poolIdx : pit->second[param]) {
                     out += ind(2) + ".parameter-annotation " +
                            std::to_string(param) + "\n";
-                    const Result<const AnnotationItem*, core::ReadError> item =
+                    const AnnotationItem* item =
                         dex.ownedAnnotationItem(poolIdx);
-                    if (item.is_err()) {
-                        return Err(fromRead(item.unwrap_err()));
+                    if (item == nullptr) {
+                        return Err(SmaliError::BadIndex);
                     }
                     if (Result<void, SmaliError> r =
-                            annotationBlock(dex, *item.unwrap(), 3, out);
+                            annotationBlock(dex, *item, 3, out);
                         r.is_err()) {
                         return r;
                     }
