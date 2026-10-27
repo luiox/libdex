@@ -38,7 +38,7 @@ lazy：string_data、class_data、code_item、type_list、注解族、encoded_ar
 
 未修改写回用 `writeDex` 原字节透传，连 checksum/signature 都不重算。`buildDex` 是修改后的唯一写回路径：按 canonical 布局重排，回填文件偏移，重建 map_list，重算 adler32 与 SHA-1。
 
-`buildDex` 只输出可达条目，不可达的建模条目会丢弃；string_data 原字节复制，其余条目精确重编码。未建模 section 默认透传，可选择丢弃；其中若含绝对偏移不会回填。041 与非空 link 区返回 `NotModeled`。
+`buildDex` 只输出可达条目，不可达的建模条目会丢弃；string_data 原字节复制，其余条目精确重编码。未建模 section 默认透传，可选择丢弃；其中若含绝对偏移不会回填。非空 link 区返回 `NotModeled`；041 的 canonical 重建已解冻——header 扩到 0x78，container 字段按独立文件约定重置 `(file_size, 0)`（canonical 产物是单文件，不继承容器上下文），增量路径在实物语料复核前保持 `NotModeled`。
 
 ## 增量重建
 
@@ -79,6 +79,12 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 已有成员的 access_flags 可用 `fieldAccessFlags`/`methodAccessFlags` 覆盖：方法按新标志在直接/虚方法列表间搬移；字段禁止改变 ACC_STATIC，因为分组与 static_values 槽位按静态性固定。
 
 元数据可以用 `stripDebugInfo` 与 `stripAnnotations` 整体剥离：前者不产出 debug_info 并把 code_item 的 debug_info_off 置 0，后者不产出注解族并把 class_def 的 annotations_off 置 0。剥离不影响 ID 表与指令。
+
+## 分析
+
+`buildCfg` 从解码指令流切块：leaders 取分支/switch 目标、try 边界、handler 入口与转移后继，块不跨 handler 集合变化点；流内边 + 异常边 + 前驱回填，悬垂目标不产假边（不崩溃、不误报）。
+
+`analyzeFrames` 是 best-effort 与 strict 同引擎的到达帧数据流：RegType 格上 cat1/cat2 按半寄存器配对（宽对两半都存 Long/Double，cat1 独立读写高半即 WidePairing）；引用带 type_idx，不同引用合并为引用顶，不解析继承层级（跨类归上层）。三条 ART 对齐的裁决：`const 0` 的字面量零并入引用或 cat1 同族（ART Constant(0)）；冲突合并静默进帧、寄存器被读取才报 TypeConflict（ART 延迟判废——d8 的原地 `aget` 等惯用法不误报）；new-instance 的 UninitRef 由 invoke-direct `<init>` 调用初始化。move-result 必须紧跟 invoke/filled-new-array（DEX 无 jsr/ret，等价约束即此），目标类型按前驱返回描述符定型。monitor 深度在方法出口检查。不做全程序视图与 SMT（对齐 libjbc 基线的裁决）。
 
 ## 错误
 
@@ -160,7 +166,7 @@ redex 模式是双边管线对比：原文与重建产物走同一 ReDex 优化�
 
 - odex / vdex / art / compact dex。
 - APK、resources.arsc、AXML 与多 dex 模型。
-- ID 表条目新增与删除（字符串 intern 除外）；压缩与 vacuum 仅作为 canonical 路径的显式 opt-in（`BuildOptions::vacuumIds`）。
+- 增量路径的 ID 表级新增与删除（intern/addType/addMethod 等触及 ID 表即 `NotIncremental`，改走 canonical）；vacuum 仅作为 canonical 路径的显式 opt-in（`BuildOptions::vacuumIds`）。
 - visitor 形状；方法体 AST 已翻案为 CodeDom（值句柄、无 visitor，见「分层」）。
 - opcode 形态合并或自动提升（core；libsmali 汇编器作为 adapter 显式选形态）。
 - 修改后字节 diff 最小化：增量重建保留源布局，输出 diff 小是布局保持的结果而非优化目标；库不提供字节级 patch。

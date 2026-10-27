@@ -109,19 +109,11 @@ int cmdAsm(int argc, char** argv)
     std::sort(files.begin(), files.end());
     for (const std::string& path : files) {
         std::vector<ca::u8> raw;
-        if (std::getenv("LIBDEX_SMALICT_DBG") != nullptr) {
-            std::fprintf(stderr, "smalict: reading %s\n", path.c_str());
-            std::fflush(stderr);
-        }
         if (!readFile(path.c_str(), &raw)) {
             std::fprintf(stderr, "smalict: cannot read %s\n", path.c_str());
             return 1;
         }
         std::string text(raw.begin(), raw.end());
-        if (std::getenv("LIBDEX_SMALICT_DBG") != nullptr) {
-            std::fprintf(stderr, "smalict: assembling (%zu bytes)\n", text.size());
-            std::fflush(stderr);
-        }
         const Result<ca::u32, dex::smali::AsmError> r = assembler.assembleClass(text);
         if (r.is_err()) {
             std::fprintf(stderr, "smalict: %s line %u: %s (%s)\n", path.c_str(),

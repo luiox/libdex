@@ -668,10 +668,6 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
     if (method.methodIndex >= dex.methodCount()) {
         return Err(SmaliError::BadIndex);
     }
-    if (std::getenv("LIBDEX_DIS_DBG") != nullptr) {
-        std::fprintf(stderr, "dis: method idx=%u codeOff=%u\n", method.methodIndex,
-                     method.codeOff);
-    }
     const core::MethodId& mid = dex.methodIds[method.methodIndex];
     const Result<std::string, SmaliError> name = toText(dex, mid.nameIdx);
     if (name.is_err()) {
@@ -1061,9 +1057,6 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
         out += ".source " + src.unwrap() + "\n";
     }
     if (def.interfacesOff != 0 || def.ownedInterfaces) {
-        if (std::getenv("LIBDEX_DIS_DBG") != nullptr) {
-            std::fprintf(stderr, "dis: ifaces\n");
-        }
         const Result<core::TypeListSpan, core::ReadError> ifaces = dex.interfaces(classDefIdx);
         if (ifaces.is_err()) {
             return Err(fromRead(ifaces.unwrap_err()));
@@ -1079,9 +1072,6 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
     }
 
     // 注解：源目录 + 自有覆盖层（自有优先；本反汇编器不合并两者）。
-    if (std::getenv("LIBDEX_DIS_DBG") != nullptr) {
-        std::fprintf(stderr, "dis: class ann\n");
-    }
     const auto* owned = &dex.annotationAttachments();
     const auto ownedIt = owned->find(classDefIdx);
     if (ownedIt != owned->end() && ownedIt->second.hasClass) {
@@ -1113,9 +1103,6 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
     out += "\n";
 
     const Result<const ClassData*, core::ReadError> data = dex.classData(classDefIdx);
-    if (std::getenv("LIBDEX_DIS_DBG") != nullptr) {
-        std::fprintf(stderr, "dis: classdata\n");
-    }
     if (data.is_err()) {
         return Err(fromRead(data.unwrap_err()));
     }

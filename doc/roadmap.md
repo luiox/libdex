@@ -4,6 +4,10 @@
 oracle 对拍背书，而不是"API 存在"。本文是 goal 边界的真源；每批完成的事实
 记账仍归 [dev_plan](../dev_plan.md)，裁决归 [design](design.md)。
 
+> **状态（2026-10-26）**：M0–M5 与 S1/S2 全部完成，场景矩阵除两条外部依赖
+> （ART 实物 oracle、041 实物复核——都不阻塞 API 面）外全绿。本文保留为
+> goal 边界的历史记录，后续新场景按批次追加矩阵行。
+
 ## 覆盖度口径
 
 覆盖度按场景矩阵计，计入标准是三条齐：库内 API 可完成、有测试背书、过
@@ -11,7 +15,7 @@ oracle 对拍（baksmali 门槛 + redex/ART 可用时）。矩阵：
 
 | # | 场景 | 现状 | 里程碑 |
 |---|---|---|---|
-| 1 | 读取/枚举 035–039 全条目（头、ID 表、类、注解、debug） | 已覆盖 | — |
+| 1 | 读取/枚举 035–041 全条目（头、ID 表、类、注解、debug） | 已覆盖 | — |
 | 2 | 保真透传写回（未修改字节恒等） | 已覆盖 | — |
 | 3 | canonical 重建（重排 + 校验字段重算） | 已覆盖 | — |
 | 4 | 增量编辑（保留源布局、无编辑字节恒等） | 已覆盖 | — |
@@ -20,22 +24,24 @@ oracle 对拍（baksmali 门槛 + redex/ART 可用时）。矩阵：
 | 7 | 方法体整段替换（按 method_idx 换字节） | 已覆盖 | — |
 | 8 | 注解/静态初值/字符串 intern 的读写与新建 | 已覆盖 | — |
 | 9 | 指令级解码/编码 + 寄存器域与 payload 原语 | 已覆盖 | — |
-| 10 | 方法体结构编辑（插删指令、改控制流、try/handler 联动） | 无 | M1 |
-| 11 | 从零构建 dex / 从零建方法（含控制流） | 无 | M2 |
-| 12 | ID 表生命周期（删除后回收、去重压缩 vacuum） | 无 | M3 |
-| 13 | 数据流分析（寄存器帧、CFG、可达性） | 无 | M4 |
-| 14 | 041 container 字段读/写语义 | 读入、写拒绝 | M5 |
-| 15 | 畸形输入防御：错误族全覆盖 + 诊断分类学 | 部分 | M0/M5 |
-| 16 | 泄漏/生命周期硬化（ASan 门禁） | 无 | M0 |
-| 17 | 大文件性能基线（防 decoder 回归） | 无 | M5 |
+| 10 | 方法体结构编辑（插删指令、改控制流、try/handler 联动） | 已覆盖 | M1 ✅ |
+| 11 | 从零构建 dex / 从零建方法（含控制流） | 已覆盖 | M2 ✅ |
+| 12 | ID 表生命周期（删除后回收、去重压缩 vacuum） | 已覆盖 | M3 ✅ |
+| 13 | 数据流分析（寄存器帧、CFG、可达性） | 已覆盖 | M4 ✅ |
+| 14 | 041 container 字段读/写语义 | 已覆盖（canonical 重置 `(file_size,0)`，实物复核待） | M5 ✅ |
+| 15 | 畸形输入防御：错误族全覆盖 + 诊断分类学 | 已覆盖 | M0/M5 ✅ |
+| 16 | 泄漏/生命周期硬化（ASan 门禁） | 已覆盖 | M0 ✅ |
+| 17 | 大文件性能基线（防 decoder 回归） | 已覆盖 | M5 ✅ |
 | 18 | oracle 常驻（baksmali 门禁 / redex / ART 设备） | baksmali 门槛，redex 观察期，ART 待设备 | M0 收口 |
 
-| 19 | smali 反汇编（DexFile → 文本，baksmali 兼容文法） | 无 | S1 |
-| 20 | smali 汇编（文本 → DexFile，label 解析 + 形态选择） | 无 | S2 |
+| 19 | smali 反汇编（DexFile → 文本，baksmali 兼容文法） | 已覆盖 | S1 ✅ |
+| 20 | smali 汇编（文本 → DexFile，label 解析 + 形态选择） | 已覆盖 | S2 ✅ |
 
 **库外事项（不计入缺口，即剩余 ~5%）**：APK/多 dex 容器、cdex/odex/vdex
 写回、跨文件全局索引。这是 libjbc 把跨类编排归 mbase 的同一裁决：单文件
 字节核的边界，上层持有。smali 文本层原列库外，随 libsmali 入仓翻案（S1/S2）。
+两条未闭环的外部依赖：ART 实物 oracle（待常驻设备）、041 实物复核（写回
+语义已按独立文件约定冻结，实物到位跑 ART oracle 复核）。
 
 ## 对照基线
 
@@ -43,16 +49,16 @@ libjbc（v0.4.x，src 约 2.1 万行）已验证的机制与 libdex 的差口：
 
 | libjbc 机制 | libdex 现状 | 差口 |
 |---|---|---|
-| lazy ClassFile DOM + 属性四态脏追踪 | lazy DexFile + incremental Entry 透传/重编码 | 布局层等价；条目级状态已用 `passthrough/encoded/removed` 表达 |
+| lazy ClassFile DOM + 属性四态脏追踪 | lazy DexFile + incremental Entry 透传/重编码 | 完成 |
 | attr/insn codec 分层（条目族一文件） | 已对齐（class_data/code_item 独立 codec） | 完成 |
-| CodeDom + `InsnId{owner,slot,gen}` 值句柄 | 无（`Insn` 裸数组，label/CFG 归 adapter） | M1 |
-| ClassSession promote/lower + relocation contract | `buildDex` 与 incremental 两条重建路径并存 | 发射逻辑未统一，M1 收口 |
-| CodeEditor（erase 双策略、StillUsed 协议） | 只有整段替换 + `recomputeInsnAddresses` | M1 |
-| 语义 intern 家族 + SemIndex 去重表 | intern 字符串/addType/addProto… 去重规则各自成文 | M2 统一 |
-| MethodEditor 门面（open/append/commit） | `methodAdditions` 字节级注入 | M2 |
-| cp_compact（死常量消除 + 全引用重映射） | 明确不做 | M3 翻案 |
-| analysis 帧引擎（到达帧、Strict 域、SMT） | 无 | M4 |
-| ASan 泄漏门（自检防假绿 + new/delete 平衡） | 无 | M0 |
+| CodeDom + `InsnId{owner,slot,gen}` 值句柄 | CodeUnit 槽表 + 值句柄（M1） | 完成 |
+| ClassSession promote/lower + relocation contract | CodeUnit ↔ decode/encode 为唯一 code 发射通道（M1 收口） | 完成 |
+| CodeEditor（erase 双策略、StillUsed 协议） | CodeUnit insert/erase 双策略 + 地址联动（M1） | 完成 |
+| 语义 intern 家族 + SemIndex 去重表 | intern 家族「命中复用、miss 追加」纪律成文；字符串有哈希 intern 索引，type/proto/field/method 去重为线性扫描（SemIndex 式哈希表留作优化项） | 完成（优化项遗留） |
+| MethodEditor 门面（open/append/commit） | MethodEditor open/append/label/commit（M2） | 完成 |
+| cp_compact（死常量消除 + 全引用重映射） | vacuumIds 显式 opt-in（M3 翻案落地） | 完成 |
+| analysis 帧引擎（到达帧、Strict 域） | buildCfg + analyzeFrames 双档帧引擎（M4；SMT 不做） | 完成 |
+| ASan 泄漏门（自检防假绿 + new/delete 平衡） | libdex_leak_check 自检 + 语料走查（M0；M4 路径已纳入） | 完成 |
 | visitor 禁令门禁 | 无 visitor，design 已成文禁令 | 保持 |
 
 ## 里程碑
