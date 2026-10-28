@@ -260,6 +260,46 @@ TEST(DexCodeDom, MisalignedPayloadWithoutAutoAlignFails)
     ASSERT_TRUE(unit.lower(true).is_ok());
 }
 
+TEST(DexCodeDom, BindPayloadRejectsKindMismatch)
+{
+    // packed-switch 绑 sparse payload：lower 按 opcode 种类读 payload 字段
+    // 会静默产出全 0 key 的错误流，bindPayload 必须拒绝。
+    CodeUnit unit;
+    unit.setRegistersSize(2);
+    const InsnId sw = unit.append(f31t(0x2b, PayloadKind::PackedSwitch));
+    unit.append(f10x(0x0e));
+    unit.append(f10x(0x0e));
+    Result<PayloadInsn, InsnEncodeError> p = makeSparseSwitchPayload({1, 5}, {0, 0});
+    ASSERT_TRUE(p.is_ok());
+    PayloadInsn built = std::move(p).unwrap();
+    const InsnId payload = unit.append(built.insn, std::move(built.storage));
+    const auto r = unit.bindPayload(sw, payload, {});
+    ASSERT_TRUE(r.is_err());
+    EXPECT_EQ(r.unwrap_err(), CodeDomError::BadShape);
+}
+
+TEST(DexCodeDom, PromoteRejectsSwitchTargetingNonPayload)
+{
+    // 31t 指向普通指令（畸形流）：promote 若收下，lower 会把目标槽改写成
+    // 重建 payload，静默破坏指令流——必须当场拒绝。
+    // 手工编码：addr0 packed-switch（branchOffset=+2 → addr2），addr2 nop，
+    // addr4 return-void。insnsSize = 5 units。
+    const std::vector<ca::u8> bytes = {
+        0x2b, 0x00,  // packed-switch v0
+        0x02, 0x00,  // branch target +2
+        0x00, 0x00,  // nop @2
+        0x00, 0x00,  // nop @3
+        0x0e, 0x00,  // return-void @4
+    };
+    CodeItem item;
+    item.insnsSize = 5;
+    item.registersSize = 2;
+    const Result<CodeUnit, CodeDomError> unit =
+        CodeUnit::promote(item, ByteSlice{bytes.data(), bytes.size()});
+    ASSERT_TRUE(unit.is_err());
+    EXPECT_EQ(unit.unwrap_err(), CodeDomError::Unencodable);
+}
+
 /// @brief payload 数据只存在 payload 伪指令上；lower 不得用 31t 槽上的
 ///        默认 0 重建 payload，promote 的 target 须以 switch 地址为基。
 TEST(DexCodeDom, SwitchPayloadDataSurvivesLowerAndPromote)

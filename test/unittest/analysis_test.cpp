@@ -322,6 +322,49 @@ TEST(DexAnalysis, WidePairingViolation)
     EXPECT_EQ(tail[1].kind, RegKind::IntLike);
 }
 
+TEST(DexAnalysis, WideBinop23xSourcesAreClean)
+{
+    // add-long/add-double（23x）的源与目标同族同宽：strict 不得把合法宽
+    // 源误报成 WidePairing（回归：binop 3reg 曾按 unop 的 long-/double-
+    // 前缀判源宽，add-long 走进了 cat1 检查分支）。
+    Built b = assemble(
+        ".class public LWideBinop;\n"
+        ".super Ljava/lang/Object;\n"
+        ".method public static calc(JJ)J\n"
+        "    .registers 6\n"
+        "    add-long v0, v2, v4\n"
+        "    return-wide v0\n"
+        ".end method\n"
+        ".method public static fmul(DD)D\n"
+        "    .registers 6\n"
+        "    mul-double v0, v2, v4\n"
+        "    return-wide v0\n"
+        ".end method\n");
+    ASSERT_NE(b.dex, nullptr);
+
+    auto addLong = findMethod(b, "calc");
+    ASSERT_TRUE(addLong.has_value());
+    auto strictAdd = analyze(b, *addLong, true);
+    ASSERT_TRUE(strictAdd.has_value());
+    EXPECT_TRUE(strictAdd->diagnostics.empty())
+        << diagText(*strictAdd);
+    // 目标寄存器落在宽格上。
+    auto decodedAdd = decode(b, *addLong);
+    ASSERT_GE(decodedAdd.size(), 2u);
+    ASSERT_EQ(strictAdd->entryFrames.size(), decodedAdd.size());
+    const std::vector<RegType>& afterAdd = strictAdd->entryFrames[1];
+    ASSERT_GE(afterAdd.size(), 2u);
+    EXPECT_EQ(afterAdd[0].kind, RegKind::Long);
+    EXPECT_EQ(afterAdd[1].kind, RegKind::Long);
+
+    auto mulDouble = findMethod(b, "fmul");
+    ASSERT_TRUE(mulDouble.has_value());
+    auto strictMul = analyze(b, *mulDouble, true);
+    ASSERT_TRUE(strictMul.has_value());
+    EXPECT_TRUE(strictMul->diagnostics.empty())
+        << diagText(*strictMul);
+}
+
 TEST(DexAnalysis, MoveResultPairing)
 {
     Built b = assemble(

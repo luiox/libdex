@@ -904,8 +904,8 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
                     } else {
                         checkCat1(insn.registers[1]);
                     }
-                } else if (insn.opcode <= 0xaf) {  // binop 3reg
-                    if (srcWide) {
+                } else if (insn.opcode <= 0xaf) {  // binop 3reg：源与目标同族同宽
+                    if (wide) {
                         checkWide(insn.registers[1]);
                         checkWide(insn.registers[2]);
                     } else {

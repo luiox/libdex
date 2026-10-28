@@ -3,6 +3,7 @@
 #include "smali/assemble.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -150,7 +151,25 @@ R<ca::i64> parseInt(std::string_view t, ca::u32 line)
         return Err(fail(AsmErrorCode::BadValue, line, "empty integer"));
     }
     std::string s(t);
-    ca::i64 v = std::strtoll(s.c_str(), nullptr, 0);
+    // 0x 前缀按无符号解析后按补码回卷：反汇编端对宽字面量按位模式渲染
+    // （如 const/high16 的 0xffff0000），超出 i64 的形式 strtoll 会静默
+    // 钳位成 LLONG_MAX。其余进制 ERANGE 显式报错。
+    if (s.rfind("0x", 0) == 0 || s.rfind("0X", 0) == 0 ||
+        s.rfind("-0x", 0) == 0 || s.rfind("-0X", 0) == 0) {
+        const bool neg = s[0] == '-';
+        errno = 0;
+        const ca::u64 u = std::strtoull(neg ? s.c_str() + 1 : s.c_str(), nullptr, 0);
+        if (errno == ERANGE) {
+            return Err(fail(AsmErrorCode::Overflow, line, s));
+        }
+        const ca::i64 v = static_cast<ca::i64>(neg ? 0u - u : u);
+        return Ok(v);
+    }
+    errno = 0;
+    const ca::i64 v = std::strtoll(s.c_str(), nullptr, 0);
+    if (errno == ERANGE) {
+        return Err(fail(AsmErrorCode::Overflow, line, s));
+    }
     return Ok(v);
 }
 
@@ -212,16 +231,23 @@ R<Ref> parseRef(const std::string& tok, ca::u32 line)
     }
     const std::string params = rest.substr(paren + 1, close - paren - 1);
     r.type = rest.substr(close + 1);
-    // 参数描述符逐个切分（J/D 双宽不影响文本切分）。
+    // 参数描述符逐个切分（J/D 双宽不影响文本切分）；畸形截断显式报错，
+    // 不能让 ';' 扫描越过字符串末尾。
     for (std::size_t i = 0; i < params.size();) {
         std::size_t j = i;
-        while (params[j] == '[') {
+        while (j < params.size() && params[j] == '[') {
             ++j;
+        }
+        if (j >= params.size()) {
+            return Err(fail(AsmErrorCode::BadRef, line, tok));
         }
         j += 1;  // 基类型或 L
         if (params[j - 1] == 'L') {
-            while (params[j] != ';') {
+            while (j < params.size() && params[j] != ';') {
                 ++j;
+            }
+            if (j >= params.size()) {
+                return Err(fail(AsmErrorCode::BadRef, line, tok));
             }
             j += 1;
         }
@@ -962,12 +988,18 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             ctx.events.push_back(e);
             continue;
         }
-        if (t0 == ".local" || t0 == ".end local" || t0 == ".restart local") {
+        // ".end local"/".restart local" 含空格，按空白切分后 t0 只是
+        // ".end"/".restart"；拼接第二个 token 还原完整指令名。
+        std::string localDir = t0;
+        if ((t0 == ".end" || t0 == ".restart") && toks.size() >= 2 && toks[1] == "local") {
+            localDir = t0 + " local";
+        }
+        if (localDir == ".local" || localDir == ".end local" || localDir == ".restart local") {
             DebugEvent e;
-            e.kind = t0 == ".local"       ? DebugEvent::LocalStart
-                     : t0 == ".end local" ? DebugEvent::LocalEnd
-                                          : DebugEvent::LocalRestart;
-            if (t0 == ".local") {
+            e.kind = localDir == ".local"        ? DebugEvent::LocalStart
+                     : localDir == ".end local" ? DebugEvent::LocalEnd
+                                                : DebugEvent::LocalRestart;
+            if (localDir == ".local") {
                 if (toks.size() < 3) {
                     return Err(fail(AsmErrorCode::Syntax, ln, raw));
                 }
@@ -1123,9 +1155,10 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             const ca::u32 param =
                 static_cast<ca::u32>(std::strtoul(toks[1].c_str(), nullptr, 10));
             std::vector<AnnotationItem> items;
+            // 注解块收集到下一个非 .annotation 行为止——反汇编输出不生成
+            // .end parameter-annotation 终结符；若出现则按终结符消费。
             while (bi + 1 < bodyLines.size() &&
-                   bodyLines[bi + 1].find(".end parameter-annotation") ==
-                       std::string::npos) {
+                   bodyLines[bi + 1].compare(0, 11, ".annotation") == 0) {
                 ++bi;
                 std::string acc = bodyLines[bi];
                 if (acc.find(".end annotation") == std::string::npos) {
@@ -1164,7 +1197,11 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                 item.annotation = std::move(*val.annotation);
                 items.push_back(std::move(item));
             }
-            ++bi;
+            if (bi + 1 < bodyLines.size() &&
+                bodyLines[bi + 1].find(".end parameter-annotation") !=
+                    std::string::npos) {
+                ++bi;  // 显式终结符（本仓库反汇编不生成，容忍手写）
+            }
             ctx.parameterAnnotations.emplace(param, std::move(items));
             continue;
         }
@@ -1472,9 +1509,11 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             if (a.is_err() || b.is_err()) {
                 return Err(a.is_err() ? a.unwrap_err() : b.unwrap_err());
             }
-            insn.registerCount = 1;
+            // F22x/F32x 的第二寄存器在 List 布局的 registers[1]；startRegister
+            // 是 Range 布局（3rc/4rcc）专用，编码器不读它。
+            insn.registerCount = 2;
             insn.registers[0] = a.unwrap();
-            insn.startRegister = b.unwrap();
+            insn.registers[1] = b.unwrap();
             break;
         }
         case core::InsnFormat::F10t:
@@ -2069,8 +2108,8 @@ Result<ca::u32, AsmError> SmaliAssembler::assembleClass(std::string_view text)
                            trimTok(lines[i + 1]) != ".end annotation") {
                         acc += " " + trimTok(lines[++i]);
                     }
+                    ++i;  // .end annotation；单行时终结符在行内，不多吃
                 }
-                ++i;  // .end annotation
                 const std::size_t sp1 = acc.find(' ');
                 const std::size_t sp2 = acc.find(' ', sp1 + 1);
                 const std::string vis = acc.substr(sp1 + 1, sp2 - sp1 - 1);

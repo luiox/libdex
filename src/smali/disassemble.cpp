@@ -422,9 +422,15 @@ std::string literalText(ca::i64 literal, core::InsnFormat format)
 {
     char buf[32];
     if (format == core::InsnFormat::F21h) {
-        // 已移位的 high16：按位模式十六进制渲染，保证无歧义。
-        std::snprintf(buf, sizeof(buf), "0x%llx",
-                      static_cast<unsigned long long>(literal));
+        // 已移位的 high16：按位模式十六进制渲染，保证无歧义。负值必须带
+        // 符号前缀——纯 0x%llx 形式超过 i64 上界，汇编端 strtoll 会钳位。
+        if (literal < 0) {
+            std::snprintf(buf, sizeof(buf), "-0x%llx",
+                          static_cast<unsigned long long>(0u - static_cast<ca::u64>(literal)));
+        } else {
+            std::snprintf(buf, sizeof(buf), "0x%llx",
+                          static_cast<unsigned long long>(literal));
+        }
         return buf;
     }
     std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(literal));
@@ -521,11 +527,11 @@ Result<std::string, SmaliError> insnText(DexFile& dex, const Insn& i,
     }
     case core::InsnFormat::F22x:
         push(reg(i.registers[0]));
-        push(reg(i.startRegister));
+        push(reg(i.registers[1]));  // List 布局第二寄存器，见 insn.hpp
         break;
     case core::InsnFormat::F32x:
         push(reg(i.registers[0]));
-        push(reg(i.startRegister));
+        push(reg(i.registers[1]));
         break;
     case core::InsnFormat::F10t:
     case core::InsnFormat::F20t:
@@ -852,7 +858,11 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
             }
         }
         if (i.isPayload()) {
-            out += ind(2) + labels.at(i.address) + "\n";
+            // 锚点 label 已由 namesAt 主循环输出；这里只给孤儿 payload
+            // （无 switch 引用、不在预扫注册表里）兜底命名，避免重复行。
+            if (labels.namesAt.find(i.address) == labels.namesAt.end()) {
+                out += ind(2) + labels.at(i.address) + "\n";
+            }
             const auto baseIt = switchBaseOfPayload.find(i.address);
             const ca::u32 targetBase =
                 baseIt != switchBaseOfPayload.end() ? baseIt->second : i.address;
@@ -1145,6 +1155,11 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
 
     auto renderField = [&](const core::EncodedField& f, bool isStatic,
                            ca::u32 valueSlot) -> Result<void, SmaliError> {
+        if (f.fieldIndex >= dex.fieldCount()) {
+            // class_data 引用了不存在的 field id（畸形 dex）：走声明的
+            // BadIndex 通道，而不是 vector 越界读。
+            return Err(SmaliError::BadIndex);
+        }
         const core::FieldId& fid = dex.fieldIds[f.fieldIndex];
         const Result<std::string, SmaliError> name = toText(dex, fid.nameIdx);
         const Result<std::string, SmaliError> type = typeText(dex, fid.typeIdx);
