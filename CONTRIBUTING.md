@@ -1,6 +1,6 @@
 # Contributing
 
-libdex 处于施工中（Under Construction）：API、文件布局与错误码会变，提交前先跑完整门禁。改动应保持一条边界：库只提供保真 DOM 与逐条目 codec，不引入方法体 AST、label、CFG 或 try 展平，细节见 [doc/design.md](doc/design.md)。
+libdex 处于施工中（Under Construction）：API、文件布局与错误码会变，提交前先跑完整门禁。改动应保持分层边界：保真 DOM 与逐条目 codec 是底座，方法体编辑走 CodeDom（值句柄 + label），CFG 由分析层从指令流派生，DEX 与 smali 文本互转归仓内 libsmali；不引入 visitor 与方法体 AST。细节见 [doc/design.md](doc/design.md)。
 
 ## 构建与测试
 
@@ -40,7 +40,7 @@ baksmali 文本对拍不等于 ART 接受；涉及布局、对齐或未建模 se
 - 错误走 `Result` 值语义，不抛异常；库内禁用 RTTI。
 - 公开类型用 `ca::i32`/`ca::u32`/`ca::usize`，字符串视图用 `std::string_view`，不新增 `std::string` 存储。
 - 头注释用 `///`，不用 `/** */`；模块内 include `"file.hpp"`，跨模块 `"module/path/file.hpp"`，不用 `../`。
-- 不改写用户数据：未修改写回原字节透传，重建走 `buildDex` 单一 canonical 路径。
+- 不改写用户数据：未修改写回原字节透传；重建走 `buildDex`（默认 canonical，或用 `BuildOptions::incremental` 显式选择增量布局）。
 - 新增行为必须带测试；真实语料修复要加合成回归用例。
 
 ## 提交

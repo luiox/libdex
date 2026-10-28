@@ -40,7 +40,7 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 - baksmali 2.5.2 文本对拍：合成 fixture、level1（5528 B）与 level2（719560 B）在方法块顺序规范化后 diff 均为空；真实语料 035–039 的 canonical 重建与增量产物对拍通过。
 - oracle 模式：`tools/oracle/check.sh` 按 `LIBDEX_ORACLE_MODE` 分派 baksmali（门槛）/redex/art（环境缺席明确 skip）；redex 是双边管线对比（原文与重建产物走同一 ReDex 管线后反汇编比较），`LIBDEX_REDEX_BIN` 可指定二进制；仲裁规则见 `tools/oracle/README.md`（ART 终审、规范裁决工具分歧）。
 - CI 在 Ubuntu 与 Windows 上跑单测和 fixture 对拍；Ubuntu 另跑 d8 语料生成与语料上的 baksmali 对拍（门禁）、redex 对拍（`continue-on-error` 观察期，绿稳后转门槛）。真实语料不提交。
-- 本地带 d8 语料 157 个用例全绿；语料上的成员/类型改名、成员增删、元数据剥离、增量-源字节恒等与二次重建固定点通过。
+- 本地全量单测全绿（未设置 `LIBDEX_REAL_DEX_DIR` 时 11 个语料用例 skip）；语料上的成员/类型改名、成员增删、元数据剥离、增量-源字节恒等与二次重建固定点通过。
 
 ## 已知缺口
 
@@ -60,7 +60,7 @@ libdex 的当前能力、缺口与下一步。只记已经跑通的事实，不�
 补齐路线全文见 [doc/roadmap.md](doc/roadmap.md)（场景矩阵、M0–M5 里程碑与
 验收即 goal 边界）。当前批次：
 
-- 场景矩阵 M0–M5 与 S1/S2 已全部完成（见 doc/roadmap.md 状态横幅）。
+- 场景矩阵 M0–M5 与 S1/S2 已完成，redex 观察期、ART 设备与 041 实物仍在闭环（见 doc/roadmap.md 状态横幅）。
 - 外部依赖两条：ART 常驻设备（art oracle + 040/041 实物语料 + 提取脚本真机
   跑通）；redex 双边对比观察期转门禁。
 - 优化项：add* 家族哈希去重索引（SemIndex 对应物）；如需超越 64K method_ids
