@@ -19,22 +19,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # ubuntu-latest 开始迁往 Ubuntu 26；d8 语料依赖 runner 预装的
+        # Android SDK，镜像换代前固定在已验证的 24.04。
+        os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: 3.0.9
           package-cache: true
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .oracle-cache
           key: oracle-baksmali-2.5.2-${{ runner.os }}
