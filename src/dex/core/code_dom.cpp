@@ -91,10 +91,10 @@ InsnId CodeUnit::next(InsnId id) const
 
 const CodeUnit::Slot& CodeUnit::slotOf(InsnId id) const
 {
-    // end()/空单元 first() 等失效句柄回落哑槽：取值入口可能被误用
-    // （end() 是一等句柄），兜底保证内存安全；正常路径一律先 valid()。
+    // end()、已擦除句柄与跨单元句柄都回落哑槽：owner/gen/slot 任一不符都不能
+    // 读到别的槽。取值入口按约定应先 valid()，这里只做内存安全兜底。
     static const Slot dummy{};
-    if (id.slot >= slots_.size()) {
+    if (!valid(id)) {
         return dummy;
     }
     return slots_[id.slot];
@@ -103,7 +103,7 @@ const CodeUnit::Slot& CodeUnit::slotOf(InsnId id) const
 CodeUnit::Slot& CodeUnit::slotOf(InsnId id)
 {
     static Slot dummy{};
-    if (id.slot >= slots_.size()) {
+    if (!valid(id)) {
         return dummy;
     }
     return slots_[id.slot];

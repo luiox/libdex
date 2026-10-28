@@ -549,3 +549,20 @@ TEST(DexCodeDom, FixtureMethodRoundtripsThroughDom)
     }
     EXPECT_EQ(out.unwrap().item.insnsSize, item->insnsSize);
 }
+
+TEST(DexCodeDom, InvalidHandlesYieldDummy)
+{
+    // end()、已擦除句柄与跨单元句柄都不能读到别的槽；get() 只做内存安全兜底。
+    CodeUnit unit;
+    const InsnId id = unit.append(f10x(0x0e));
+    ASSERT_TRUE(unit.erase(id, ErasePolicy::Fail).is_ok());
+    EXPECT_FALSE(unit.valid(id));
+    EXPECT_EQ(unit.get(id).format, InsnFormat::Unknown);
+    EXPECT_EQ(unit.get(unit.end()).format, InsnFormat::Unknown);
+
+    CodeUnit other;
+    const InsnId foreign = other.append(f10x(0x0e));
+    const InsnId local = unit.append(f10x(0x0e));
+    EXPECT_EQ(unit.get(foreign).format, InsnFormat::Unknown);
+    EXPECT_TRUE(unit.valid(local));
+}
