@@ -246,14 +246,14 @@ std::unique_ptr<DexFile> buildFrom(const char* text)
                      to_string(ar.unwrap_err().code), ar.unwrap_err().detail.c_str());
         return nullptr;
     }
-    const Result<std::vector<ca::u8>, WriteError> built =
-        buildDex(*fresh, assembler.options());
+    Result<std::vector<ca::u8>, WriteError> built = buildDex(*fresh, assembler.options());
     if (built.is_err()) {
         std::fprintf(stderr, "step: buildDex failed\n");
         return nullptr;
     }
+    const std::vector<ca::u8> bytes = std::move(built).unwrap();
     Result<std::unique_ptr<DexFile>, ReadError> reparsed =
-        readDex(ByteSlice{built.unwrap().data(), built.unwrap().size()});
+        readDex(ByteSlice{bytes.data(), bytes.size()});
     if (reparsed.is_err()) {
         std::fprintf(stderr, "step: reparse failed\n");
         return nullptr;
@@ -272,18 +272,20 @@ std::unique_ptr<DexFile> buildFrom(const char* text)
     if (t1.is_err()) {
         return ::testing::AssertionFailure() << "first disasm failed";
     }
-    std::unique_ptr<DexFile> twice = buildFrom(t1.unwrap().c_str());
+    const std::string first = t1.unwrap();
+    std::unique_ptr<DexFile> twice = buildFrom(first.c_str());
     if (twice == nullptr) {
-        return ::testing::AssertionFailure() << "re-assemble failed:\n" << t1.unwrap();
+        return ::testing::AssertionFailure() << "re-assemble failed:\n" << first;
     }
     const Result<std::string, SmaliError> t2 = disassembleClass(*twice, 0);
     if (t2.is_err()) {
         return ::testing::AssertionFailure() << "second disasm failed";
     }
-    if (t1.unwrap() != t2.unwrap()) {
+    const std::string second = t2.unwrap();
+    if (first != second) {
         return ::testing::AssertionFailure()
-               << "text mismatch:\n--- first ---\n" << t1.unwrap()
-               << "--- second ---\n" << t2.unwrap();
+               << "text mismatch:\n--- first ---\n" << first
+               << "--- second ---\n" << second;
     }
     return ::testing::AssertionSuccess();
 }
@@ -432,4 +434,78 @@ TEST(DexSmaliRoundtrip, ParameterAnnotationRoundtrip)
     ASSERT_TRUE(t1.is_ok());
     EXPECT_NE(t1.unwrap().find(".parameter-annotation"), std::string::npos);
     EXPECT_TRUE(textRoundtrips(kSrc));
+}
+
+TEST(DexSmaliRoundtrip, FourByteUtf8StringRoundtrips)
+{
+    // 4 字节 UTF-8（non-BMP）须转成代理对；此前的 2/3 字节分支会把残留
+    // 续字节当新首字节，产出错误码点并越界读。
+    const char* kSrc =
+        ".class public LEmoji;\n"
+        ".super Ljava/lang/Object;\n"
+        ".method public static f()Ljava/lang/String;\n"
+        "    .registers 1\n"
+        "    const-string v0, \"\xF0\x9F\x98\x80\"\n"
+        "    return-object v0\n"
+        ".end method\n";
+    std::unique_ptr<DexFile> dex = buildFrom(kSrc);
+    ASSERT_NE(dex, nullptr);
+    const Result<std::string, SmaliError> text = disassembleClass(*dex, 0);
+    ASSERT_TRUE(text.is_ok());
+    EXPECT_NE(text.unwrap().find("\\ud83d\\ude00"), std::string::npos)
+        << text.unwrap();
+    EXPECT_TRUE(textRoundtrips(kSrc));
+}
+
+TEST(DexSmaliRoundtrip, EscapedSurrogatePairRoundtrips)
+{
+    const char* kSrc =
+        ".class public LEscapedEmoji;\n"
+        ".super Ljava/lang/Object;\n"
+        ".method public static f()Ljava/lang/String;\n"
+        "    .registers 1\n"
+        "    const-string v0, \"\\ud83d\\ude00\"\n"
+        "    return-object v0\n"
+        ".end method\n";
+    std::unique_ptr<DexFile> dex = buildFrom(kSrc);
+    ASSERT_NE(dex, nullptr);
+    const Result<std::string, SmaliError> text = disassembleClass(*dex, 0);
+    ASSERT_TRUE(text.is_ok());
+    EXPECT_NE(text.unwrap().find("\\ud83d\\ude00"), std::string::npos);
+    EXPECT_TRUE(textRoundtrips(kSrc));
+}
+
+TEST(DexSmaliRoundtrip, MalformedUtf8IsRejected)
+{
+    // 截断的 3 字节序列：必须报 BadValue，不能越界读到字符串末尾之后。
+    const char* kSrc =
+        ".class public LBadUtf8;\n"
+        ".super Ljava/lang/Object;\n"
+        ".method public static f()Ljava/lang/String;\n"
+        "    .registers 1\n"
+        "    const-string v0, \"\xE4\"\n"
+        "    return-object v0\n"
+        ".end method\n";
+    std::unique_ptr<DexFile> fresh = DexFile::createEmpty(35);
+    SmaliAssembler assembler(*fresh);
+    const auto r = assembler.assembleClass(kSrc);
+    ASSERT_TRUE(r.is_err());
+    EXPECT_EQ(r.unwrap_err().code, AsmErrorCode::BadValue);
+}
+
+TEST(DexSmaliRoundtrip, ShortUnicodeEscapeIsRejected)
+{
+    const char* kSrc =
+        ".class public LBadEscape;\n"
+        ".super Ljava/lang/Object;\n"
+        ".method public static f()Ljava/lang/String;\n"
+        "    .registers 1\n"
+        "    const-string v0, \"\\u12\"\n"
+        "    return-object v0\n"
+        ".end method\n";
+    std::unique_ptr<DexFile> fresh = DexFile::createEmpty(35);
+    SmaliAssembler assembler(*fresh);
+    const auto r = assembler.assembleClass(kSrc);
+    ASSERT_TRUE(r.is_err());
+    EXPECT_EQ(r.unwrap_err().code, AsmErrorCode::BadValue);
 }

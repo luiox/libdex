@@ -257,32 +257,84 @@ R<Ref> parseRef(const std::string& tok, ca::u32 line)
     return Ok(std::move(r));
 }
 
+/// @brief 解一个 UTF-8 码点；成功返回消耗的字节数，非法或截断返回 0。
+std::size_t decodeUtf8(const std::string& s, std::size_t at, char32_t* out) noexcept
+{
+    const auto byteAt = [&s](std::size_t k) {
+        return static_cast<ca::u32>(static_cast<unsigned char>(s[k]));
+    };
+    const ca::u32 lead = byteAt(at);
+    if (lead < 0x80u) {
+        *out = static_cast<char32_t>(lead);
+        return 1;
+    }
+    std::size_t need = 0;
+    ca::u32 cp = 0;
+    if (lead >= 0xC2u && lead <= 0xDFu) {  // C0/C1 是 overlong
+        need = 2;
+        cp = lead & 0x1Fu;
+    } else if (lead >= 0xE0u && lead <= 0xEFu) {
+        need = 3;
+        cp = lead & 0x0Fu;
+    } else if (lead >= 0xF0u && lead <= 0xF4u) {
+        need = 4;
+        cp = lead & 0x07u;
+    } else {
+        return 0;
+    }
+    if (at + need > s.size()) {
+        return 0;
+    }
+    for (std::size_t k = 1; k < need; ++k) {
+        const ca::u32 cc = byteAt(at + k);
+        if ((cc & 0xC0u) != 0x80u) {
+            return 0;
+        }
+        cp = (cp << 6) | (cc & 0x3Fu);
+    }
+    if ((need == 2 && cp < 0x80u) || (need == 3 && cp < 0x800u) ||
+        (need == 4 && cp < 0x10000u) || cp > 0x10FFFFu ||
+        (cp >= 0xD800u && cp <= 0xDFFFu)) {
+        return 0;
+    }
+    *out = static_cast<char32_t>(cp);
+    return need;
+}
+
+int hexValue(char c) noexcept
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 R<ca::u32> internString(DexFile& dex, const std::string& escaped, ca::u32 line)
 {
     // 文本层的转义还原成 UTF-16，再编码为 MUTF-8 intern。
     std::u16string u16;
     for (std::size_t i = 0; i < escaped.size();) {
-        char c = escaped[i];
-        if (c != '\\') {
-            // UTF-8 多字节 → UTF-16。
-            if ((c & 0x80) == 0) {
-                u16.push_back(static_cast<char16_t>(c));
-                i += 1;
-            } else if ((c & 0xE0) == 0xC0) {
-                const char16_t cp = static_cast<char16_t>(((c & 0x1F) << 6) |
-                                                          (escaped[i + 1] & 0x3F));
-                u16.push_back(cp);
-                i += 2;
-            } else {
-                const char16_t cp = static_cast<char16_t>(
-                    ((c & 0x0F) << 12) | ((escaped[i + 1] & 0x3F) << 6) |
-                    (escaped[i + 2] & 0x3F));
-                u16.push_back(cp);
-                i += 3;
+        if (escaped[i] != '\\') {
+            char32_t cp = 0;
+            const std::size_t used = decodeUtf8(escaped, i, &cp);
+            if (used == 0) {
+                return Err(fail(AsmErrorCode::BadValue, line, "invalid UTF-8"));
             }
+            if (cp >= 0x10000) {
+                const char32_t v = cp - 0x10000;
+                u16.push_back(static_cast<char16_t>(0xD800u + (v >> 10)));
+                u16.push_back(static_cast<char16_t>(0xDC00u + (v & 0x3FFu)));
+            } else {
+                u16.push_back(static_cast<char16_t>(cp));
+            }
+            i += used;
             continue;
         }
-        c = escaped[++i];
+        ++i;
+        if (i >= escaped.size()) {
+            return Err(fail(AsmErrorCode::BadValue, line, "dangling backslash"));
+        }
+        const char c = escaped[i];
         switch (c) {
         case 'n': u16.push_back(u'\n'); ++i; break;
         case 'r': u16.push_back(u'\r'); ++i; break;
@@ -290,8 +342,17 @@ R<ca::u32> internString(DexFile& dex, const std::string& escaped, ca::u32 line)
         case '"': u16.push_back(u'"'); ++i; break;
         case '\\': u16.push_back(u'\\'); ++i; break;
         case 'u': {
-            const ca::u32 cp =
-                static_cast<ca::u32>(std::strtoul(escaped.c_str() + i + 1, nullptr, 16));
+            if (i + 4 >= escaped.size()) {
+                return Err(fail(AsmErrorCode::BadValue, line, "short \\u escape"));
+            }
+            ca::u32 cp = 0;
+            for (std::size_t k = 1; k <= 4; ++k) {
+                const int v = hexValue(escaped[i + k]);
+                if (v < 0) {
+                    return Err(fail(AsmErrorCode::BadValue, line, "bad \\u escape"));
+                }
+                cp = (cp << 4) | static_cast<ca::u32>(v);
+            }
             u16.push_back(static_cast<char16_t>(cp));
             i += 5;
             break;
