@@ -269,7 +269,8 @@ Result<std::string, SmaliError> valueText(DexFile& dex, const EncodedValue& v,
         }
         return Ok(std::string(buf));
     case core::EncodedValueType::Char:
-        std::snprintf(buf, sizeof(buf), "'\\u%04x'", v.bits & 0xFFFFu);
+        std::snprintf(buf, sizeof(buf), "'\\u%04x'",
+                      static_cast<unsigned>(v.bits & 0xFFFFu));
         return Ok(std::string(buf));
     case core::EncodedValueType::Float:
         std::snprintf(buf, sizeof(buf), "0x%08xF", static_cast<ca::u32>(v.bits));

@@ -506,8 +506,6 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
 
     // 定长表与固定区（表条目 key 即表起始偏移）。
     {
-        const ca::u32 fixed = static_cast<ca::u32>(source.size());
-        (void)fixed;
         Entry head;
         head.kind = Kind::Header;
         head.oldOff = 0;
