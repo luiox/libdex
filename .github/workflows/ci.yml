@@ -48,9 +48,29 @@ jobs:
         run: |
           xmake build libdex_unittest
           xmake build dexbuild
+          xmake build smalict
 
       - name: unit tests
         run: xmake run libdex_unittest --gtest_brief=1
+
+      - name: smalict smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          smalict="$(find build -maxdepth 4 -type f \( -name smalict -o -name smalict.exe \) | head -n 1)"
+          test -n "$smalict"
+          mkdir -p "$tmp/smali"
+          printf '%s\n' \
+            '.class public LSmoke;' \
+            '.super Ljava/lang/Object;' \
+            '.method public static f()Ljava/lang/String;' \
+            '    .registers 1' \
+            '    const-string v0, "hi"' \
+            '    return-object v0' \
+            '.end method' > "$tmp/smali/Smoke.smali"
+          "$smalict" asm "$tmp/smali" "$tmp/smoke.dex"
+          "$smalict" roundtrip "$tmp/smoke.dex" "$tmp"
 
       - name: oracle (synthetic fixture)
         shell: bash

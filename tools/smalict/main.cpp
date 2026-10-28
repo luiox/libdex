@@ -78,7 +78,8 @@ int cmdDis(int argc, char** argv)
                      dex::smali::to_string(files.unwrap_err()));
         return 1;
     }
-    for (const auto& [name, text] : files.unwrap()) {
+    const std::vector<std::pair<std::string, std::string>> fileList = files.unwrap();
+    for (const auto& [name, text] : fileList) {
         const std::string path = std::string(argv[3]) + "/" + name;
         if (!writeFile(path.c_str(), text)) {
             std::fprintf(stderr, "smalict: cannot write %s\n", path.c_str());
@@ -86,7 +87,7 @@ int cmdDis(int argc, char** argv)
         }
         std::printf("dis %s\n", path.c_str());
     }
-    std::printf("smalict: %zu class(es) -> %s\n", files.unwrap().size(), argv[3]);
+    std::printf("smalict: %zu class(es) -> %s\n", fileList.size(), argv[3]);
     return 0;
 }
 
@@ -124,13 +125,15 @@ int cmdAsm(int argc, char** argv)
         }
         std::printf("asm %s -> class %u\n", path.c_str(), r.unwrap());
     }
-    const Result<std::vector<ca::u8>, WriteError> built = buildDex(*dex, assembler.options());
+    Result<std::vector<ca::u8>, WriteError> built = buildDex(*dex, assembler.options());
     if (built.is_err()) {
         std::fprintf(stderr, "smalict: buildDex failed: %s\n",
                      dex::core::to_string(built.unwrap_err()));
         return 1;
     }
-    const std::string outData(built.unwrap().begin(), built.unwrap().end());
+    // unwrap() 按值返回：只取一次，避免 begin()/end() 落在两个临时副本上。
+    const std::vector<ca::u8> bytesOut = std::move(built).unwrap();
+    const std::string outData(bytesOut.begin(), bytesOut.end());
     if (!writeFile(argv[3], outData)) {
         std::fprintf(stderr, "smalict: cannot write %s\n", argv[3]);
         return 1;
@@ -166,9 +169,10 @@ int cmdRoundtrip(int argc, char** argv)
         return 1;
     }
 
+    const std::vector<std::pair<std::string, std::string>> first = t1.unwrap();
     std::unique_ptr<DexFile> fresh = DexFile::createEmpty(35);
     dex::smali::SmaliAssembler assembler(*fresh);
-    for (const auto& [name, text] : t1.unwrap()) {
+    for (const auto& [name, text] : first) {
         const Result<ca::u32, dex::smali::AsmError> r = assembler.assembleClass(text);
         if (r.is_err()) {
             std::fprintf(stderr, "smalict: %s line %u: %s (%s)\n", name.c_str(),
@@ -178,14 +182,15 @@ int cmdRoundtrip(int argc, char** argv)
             return 1;
         }
     }
-    const Result<std::vector<ca::u8>, WriteError> built = buildDex(*fresh, assembler.options());
+    Result<std::vector<ca::u8>, WriteError> built = buildDex(*fresh, assembler.options());
     if (built.is_err()) {
         std::fprintf(stderr, "smalict: buildDex failed: %s\n",
                      dex::core::to_string(built.unwrap_err()));
         return 1;
     }
+    const std::vector<ca::u8> builtBytes = std::move(built).unwrap();
     Result<std::unique_ptr<DexFile>, ReadError> reparsed =
-        readDex(ByteSlice{built.unwrap().data(), built.unwrap().size()}, ReadOptions{});
+        readDex(ByteSlice{builtBytes.data(), builtBytes.size()}, ReadOptions{});
     if (reparsed.is_err()) {
         std::fprintf(stderr, "smalict: reparsed dex unreadable\n");
         return 1;
@@ -198,17 +203,18 @@ int cmdRoundtrip(int argc, char** argv)
                      dex::smali::to_string(t2.unwrap_err()));
         return 1;
     }
-    if (t1.unwrap().size() != t2.unwrap().size()) {
+    const std::vector<std::pair<std::string, std::string>> second = t2.unwrap();
+    if (first.size() != second.size()) {
         std::fprintf(stderr, "smalict: class count differs\n");
         return 1;
     }
     {
         // 类顺序可因重排不同；按名字对齐比较。
         std::map<std::string, std::string> t2ByName;
-        for (const auto& [name, text] : t2.unwrap()) {
+        for (const auto& [name, text] : second) {
             t2ByName.emplace(name, text);
         }
-        for (const auto& [name, text] : t1.unwrap()) {
+        for (const auto& [name, text] : first) {
             auto it = t2ByName.find(name);
             if (it == t2ByName.end()) {
                 std::fprintf(stderr, "smalict: missing class %s in rebuild\n",
@@ -225,7 +231,7 @@ int cmdRoundtrip(int argc, char** argv)
         }
     }
     std::printf("smalict roundtrip ok: %s (%zu classes, %zu bytes)\n", argv[2],
-                t1.unwrap().size(), built.unwrap().size());
+                first.size(), builtBytes.size());
     return 0;
 }
 
