@@ -128,8 +128,9 @@ struct BuildOptions
 /// code_item、class_data、unknown sections、map_list。所有模型内偏移按新布局
 /// 回填，checksum/signature 重算。
 ///
-/// 失败原因见 @ref WriteError：版本 041（container 语义未冻结）或非空 link
-/// 区返回 `NotModeled`；重建期间再次解码源条目失败返回 `SourceUnreadable`；
+/// 失败原因见 @ref WriteError：非空 link 区返回 `NotModeled`；041 的 canonical
+/// 重建按独立文件约定重置 container 字段，但增量路径仍返回 `NotModeled`
+/// （实物复核前不承诺字节恒等）；重建期间再次解码源条目失败返回 `SourceUnreadable`；
 /// 替换项指向不存在或无可替换方法体的方法返回 `InvalidModel`；新增成员重复
 /// 定义、索引越界、表内键重复或条目无法重编码返回 `InvalidModel`；条目超出
 /// 编码域宽返回 `Unencodable`；索引变化与保留的未建模 section 冲突返回
