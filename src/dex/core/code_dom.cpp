@@ -91,11 +91,21 @@ InsnId CodeUnit::next(InsnId id) const
 
 const CodeUnit::Slot& CodeUnit::slotOf(InsnId id) const
 {
+    // end()/空单元 first() 等失效句柄回落哑槽：取值入口可能被误用
+    // （end() 是一等句柄），兜底保证内存安全；正常路径一律先 valid()。
+    static const Slot dummy{};
+    if (id.slot >= slots_.size()) {
+        return dummy;
+    }
     return slots_[id.slot];
 }
 
 CodeUnit::Slot& CodeUnit::slotOf(InsnId id)
 {
+    static Slot dummy{};
+    if (id.slot >= slots_.size()) {
+        return dummy;
+    }
     return slots_[id.slot];
 }
 
@@ -313,6 +323,11 @@ Result<void, CodeDomError> CodeUnit::bindPayload(InsnId switchInsn, InsnId paylo
         return Err(CodeDomError::BadShape);
     }
     const PayloadKind kind = switchKindOf(sw.opcode);
+    if (kind != pl.payloadKind) {
+        // 种类错配（如 packed-switch 绑 sparse payload）：lower 按 opcode
+        // 种类读 payload 字段会静默错码——在这里拒绝。
+        return Err(CodeDomError::BadShape);
+    }
     if (kind == PayloadKind::PackedSwitch || kind == PayloadKind::SparseSwitch) {
         if (targets.size() != pl.payloadCount) {
             return Err(CodeDomError::BadShape);
@@ -425,6 +440,14 @@ Result<CodeUnit, CodeDomError> CodeUnit::promote(const CodeItem& item, ByteSlice
             if (payloadHandle.slot == kEndSlot) {
                 return Err(CodeDomError::Unencodable);
             }
+            const Insn& payload = unit.get(payloadHandle);
+            const PayloadKind kind = switchKindOf(insn.opcode);
+            if (payloadHandle.slot == handles[i].slot || !payload.isPayload() ||
+                payload.payloadKind != kind) {
+                // 31t 指向普通指令/异种 payload：lower 会把目标槽无条件改
+                // 写成重建的 payload，当场拒绝而不是静默破坏指令流。
+                return Err(CodeDomError::Unencodable);
+            }
             const auto existingOwner = unit.payloadOwner_.find(payloadHandle.slot);
             if (existingOwner != unit.payloadOwner_.end() &&
                 existingOwner->second != handles[i].slot) {
@@ -438,11 +461,10 @@ Result<CodeUnit, CodeDomError> CodeUnit::promote(const CodeItem& item, ByteSlice
             unit.branchLabel_[handles[i].slot] = label.unwrap();
 
             std::vector<LabelId> targets;
-            const PayloadKind kind = switchKindOf(insn.opcode);
             if (kind == PayloadKind::PackedSwitch || kind == PayloadKind::SparseSwitch) {
                 // size/target 表在 payload 伪指令上（decode 只填它）；
                 // target 值相对 switch 指令地址（DEX 规范）。
-                const Insn& pl = unit.get(payloadHandle);
+                const Insn& pl = payload;
                 targets.reserve(pl.payloadCount);
                 for (ca::u32 t = 0; t < pl.payloadCount; ++t) {
                     const ca::i32 rel =

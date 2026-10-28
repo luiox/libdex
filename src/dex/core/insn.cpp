@@ -536,12 +536,19 @@ Result<void, InsnEncodeError> encodeInsn(const Insn& insn, std::vector<ca::u8>& 
         if (!fitsU8(a)) {
             return Err(InsnEncodeError::OperandOverflow);
         }
-        const ca::i64 unit = insn.opcode == 0x19 ? 0x0001000000000000LL : 0x10000LL;
-        if (insn.literal % unit != 0 || !fitsI16(insn.literal / unit)) {
+        // high16 的观测语义是寄存器原始位模式（32/64 位的高 16 位 = u1，
+        // 其余为 0）：接受完整位模式书写（如 const/high16 的 0xffff0000），
+        // 按 16 位半字自然截断；低 16+ 位非零或超出位宽才拒绝。
+        const unsigned shift = insn.opcode == 0x19 ? 48u : 16u;
+        const ca::u64 raw = static_cast<ca::u64>(insn.literal);
+        const bool fitsWidth = insn.opcode == 0x19 ||
+                               (insn.literal >= -0x80000000LL && insn.literal <= 0xFFFFFFFFLL);
+        const ca::u64 u1 = (raw >> shift) & 0xFFFFu;
+        if (!fitsWidth || (raw & ((static_cast<ca::u64>(1) << shift) - 1u)) != 0) {
             return Err(InsnEncodeError::OperandOverflow);
         }
         appendU16(out, static_cast<ca::u16>(op | (a << 8)));
-        appendU16(out, static_cast<ca::u16>(insn.literal / unit));
+        appendU16(out, static_cast<ca::u16>(u1));
         return Ok();
     }
     case InsnFormat::F21c:
