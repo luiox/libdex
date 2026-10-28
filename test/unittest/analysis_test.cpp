@@ -574,3 +574,102 @@ TEST(DexRealCorpus, FramesParseEveryMethod)
     }
     EXPECT_GT(methodTotal, 0u);
 }
+
+TEST(DexAnalysis, WideUnopShapesAreClean)
+{
+    // unop 的源宽不能按名字前缀判定：neg-long/not-long/neg-double 的源是
+    // cat2，long-to-int 等转换的源同样是 cat2；合法帧不得误报 WidePairing。
+    Built b = assemble(
+        ".class public LWideUnop;\n"
+        ".super Ljava/lang/Object;\n"
+        ".method public static neg()J\n"
+        "    .registers 6\n"
+        "    const-wide v2, 1\n"
+        "    neg-long v0, v2\n"
+        "    return-wide v0\n"
+        ".end method\n"
+        ".method public static notl()J\n"
+        "    .registers 6\n"
+        "    const-wide v2, 1\n"
+        "    not-long v0, v2\n"
+        "    return-wide v0\n"
+        ".end method\n"
+        ".method public static dneg()D\n"
+        "    .registers 6\n"
+        "    const-wide v2, 1\n"
+        "    neg-double v0, v2\n"
+        "    return-wide v0\n"
+        ".end method\n"
+        ".method public static widen()J\n"
+        "    .registers 4\n"
+        "    const/4 v2, 1\n"
+        "    int-to-long v0, v2\n"
+        "    return-wide v0\n"
+        ".end method\n"
+        ".method public static narrow()I\n"
+        "    .registers 4\n"
+        "    const-wide v2, 1\n"
+        "    long-to-int v0, v2\n"
+        "    return v0\n"
+        ".end method\n");
+    ASSERT_NE(b.dex, nullptr);
+    for (const char* n : {"neg", "notl", "dneg", "widen", "narrow"}) {
+        auto m = findMethod(b, n);
+        ASSERT_TRUE(m.has_value()) << n;
+        auto a = analyze(b, *m, true);
+        ASSERT_TRUE(a.has_value()) << n;
+        EXPECT_TRUE(a->diagnostics.empty()) << n << ": " << diagText(*a);
+    }
+}
+
+TEST(DexAnalysis, WideShiftShapesAreClean)
+{
+    // long 移位与 2addr 移位的第二源是 cat1：23x 的 C、2addr 的 B 不能按
+    // 目标族套 checkWide。
+    Built b = assemble(
+        ".class public LWideShift;\n"
+        ".super Ljava/lang/Object;\n"
+        ".method public static shl()J\n"
+        "    .registers 6\n"
+        "    const-wide v2, 1\n"
+        "    const/4 v4, 1\n"
+        "    shl-long v0, v2, v4\n"
+        "    return-wide v0\n"
+        ".end method\n"
+        ".method public static shr()J\n"
+        "    .registers 6\n"
+        "    const-wide v2, 1\n"
+        "    const/4 v4, 1\n"
+        "    shr-long v0, v2, v4\n"
+        "    return-wide v0\n"
+        ".end method\n"
+        ".method public static ushr()J\n"
+        "    .registers 6\n"
+        "    const-wide v2, 1\n"
+        "    const/4 v4, 1\n"
+        "    ushr-long v0, v2, v4\n"
+        "    return-wide v0\n"
+        ".end method\n"
+        ".method public static shl2()J\n"
+        "    .registers 6\n"
+        "    const-wide v0, 1\n"
+        "    const/4 v2, 1\n"
+        "    shl-long/2addr v0, v2\n"
+        "    return-wide v0\n"
+        ".end method\n"
+        ".method public static ushr2()J\n"
+        "    .registers 6\n"
+        "    const-wide v0, 1\n"
+        "    const/4 v2, 1\n"
+        "    ushr-long/2addr v0, v2\n"
+        "    return-wide v0\n"
+        ".end method\n");
+    ASSERT_NE(b.dex, nullptr);
+    for (const char* n : {"shl", "shr", "ushr", "shl2", "ushr2"}) {
+        auto m = findMethod(b, n);
+        ASSERT_TRUE(m.has_value()) << n;
+        auto a = analyze(b, *m, true);
+        ASSERT_TRUE(a.has_value()) << n;
+        EXPECT_TRUE(a->diagnostics.empty()) << n << ": " << diagText(*a);
+    }
+}
