@@ -3,13 +3,11 @@
 #include "dex/core/analysis.hpp"
 
 #include <algorithm>
-#include <cstring>
 #include <set>
 #include <unordered_map>
 
 #include "dex/core/bytes.hpp"
 #include "dex/core/insn.hpp"
-#include "dex/core/opcode.hpp"
 
 namespace dex::core {
 namespace {
@@ -410,6 +408,127 @@ bool isRefish(const RegType& t) noexcept
            t.kind == RegKind::Unknown;
 }
 
+/// @brief 算术指令的目标族与源宽。
+///
+/// 宽度必须按操作码区间判定：`neg-long`、`shl-long`、`long-to-int` 这类名字
+/// 前缀/子串都不能可靠表达源与目标是否 cat2，且移位的第二源恒为 cat1。
+struct ArithShape
+{
+    RegKind dest = RegKind::IntLike;
+    bool destWide = false;
+    bool srcWide = false;   ///< unop 的源 / 23x 与 2addr 的第一源
+    bool src2Wide = false;  ///< 23x 的第二源
+};
+
+bool unopShape(ca::u8 opcode, ArithShape* out) noexcept
+{
+    switch (opcode) {
+        case 0x7b: case 0x7c:  // neg-int / not-int
+            *out = ArithShape{RegKind::IntLike, false, false, false};
+            return true;
+        case 0x7d: case 0x7e:  // neg-long / not-long
+            *out = ArithShape{RegKind::Long, true, true, false};
+            return true;
+        case 0x7f:  // neg-float
+            *out = ArithShape{RegKind::Float, false, false, false};
+            return true;
+        case 0x80:  // neg-double
+            *out = ArithShape{RegKind::Double, true, true, false};
+            return true;
+        case 0x81:  // int-to-long
+            *out = ArithShape{RegKind::Long, true, false, false};
+            return true;
+        case 0x82:  // int-to-float
+            *out = ArithShape{RegKind::Float, false, false, false};
+            return true;
+        case 0x83:  // int-to-double
+            *out = ArithShape{RegKind::Double, true, false, false};
+            return true;
+        case 0x84:  // long-to-int
+            *out = ArithShape{RegKind::IntLike, false, true, false};
+            return true;
+        case 0x85:  // long-to-float
+            *out = ArithShape{RegKind::Float, false, true, false};
+            return true;
+        case 0x86:  // long-to-double
+            *out = ArithShape{RegKind::Double, true, true, false};
+            return true;
+        case 0x87:  // float-to-int
+            *out = ArithShape{RegKind::IntLike, false, false, false};
+            return true;
+        case 0x88:  // float-to-long
+            *out = ArithShape{RegKind::Long, true, false, false};
+            return true;
+        case 0x89:  // float-to-double
+            *out = ArithShape{RegKind::Double, true, false, false};
+            return true;
+        case 0x8a:  // double-to-int
+            *out = ArithShape{RegKind::IntLike, false, true, false};
+            return true;
+        case 0x8b:  // double-to-long
+            *out = ArithShape{RegKind::Long, true, true, false};
+            return true;
+        case 0x8c:  // double-to-float
+            *out = ArithShape{RegKind::Float, false, true, false};
+            return true;
+        case 0x8d: case 0x8e: case 0x8f:  // int-to-byte/char/short
+            *out = ArithShape{RegKind::IntLike, false, false, false};
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool binop23Shape(ca::u8 opcode, ArithShape* out) noexcept
+{
+    if (opcode >= 0x90 && opcode <= 0x9a) {  // int
+        *out = ArithShape{RegKind::IntLike, false, false, false};
+        return true;
+    }
+    if (opcode >= 0x9b && opcode <= 0xa2) {  // long 算术
+        *out = ArithShape{RegKind::Long, true, true, true};
+        return true;
+    }
+    if (opcode >= 0xa3 && opcode <= 0xa5) {  // long 移位：第二源是 cat1
+        *out = ArithShape{RegKind::Long, true, true, false};
+        return true;
+    }
+    if (opcode >= 0xa6 && opcode <= 0xaa) {  // float
+        *out = ArithShape{RegKind::Float, false, false, false};
+        return true;
+    }
+    if (opcode >= 0xab && opcode <= 0xaf) {  // double
+        *out = ArithShape{RegKind::Double, true, true, true};
+        return true;
+    }
+    return false;
+}
+
+bool binop2addrShape(ca::u8 opcode, ArithShape* out) noexcept
+{
+    if (opcode >= 0xb0 && opcode <= 0xba) {  // int
+        *out = ArithShape{RegKind::IntLike, false, false, false};
+        return true;
+    }
+    if (opcode >= 0xbb && opcode <= 0xc2) {  // long 算术：A/B 都宽
+        *out = ArithShape{RegKind::Long, true, true, false};
+        return true;
+    }
+    if (opcode >= 0xc3 && opcode <= 0xc5) {  // long 移位：B 是 cat1
+        *out = ArithShape{RegKind::Long, true, false, false};
+        return true;
+    }
+    if (opcode >= 0xc6 && opcode <= 0xca) {  // float
+        *out = ArithShape{RegKind::Float, false, false, false};
+        return true;
+    }
+    if (opcode >= 0xcb && opcode <= 0xcf) {  // double：A/B 都宽
+        *out = ArithShape{RegKind::Double, true, true, false};
+        return true;
+    }
+    return false;
+}
+
 /// @brief move-result 的目标类型：按前驱 invoke 的返回描述符；不可知即顶。
 RegType moveResultType(DexFile& dex, const Insn& prev, bool wide)
 {
@@ -533,7 +652,6 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
     const auto step = [&](ca::u32 i, Frame& cur) {
         const Insn& insn = insns[i];
         const ca::u32 addr = insn.address;
-        const char* name = opcodeInfo(insn.opcode).name;
         const auto checkCat1 = [&](ca::u32 reg) -> RegType {
             if (reg >= code.registersSize) {
                 diag(addr, FrameDiagnostic::Code::BadOperand);
@@ -885,51 +1003,43 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
             }
             if ((insn.opcode >= 0x7b && insn.opcode <= 0x8f) ||   // unop 12x
                 (insn.opcode >= 0x90 && insn.opcode <= 0xaf) ||   // binop 23x
-                (insn.opcode >= 0xb0 && insn.opcode <= 0xcf) ||   // binop 12x
+                (insn.opcode >= 0xb0 && insn.opcode <= 0xcf) ||   // binop 2addr
                 (insn.opcode >= 0xd0 && insn.opcode <= 0xe2)) {   // binop lit
-                RegKind family = RegKind::IntLike;
-                if (std::strstr(name, "-long") != nullptr) {
-                    family = RegKind::Long;
-                } else if (std::strstr(name, "-double") != nullptr) {
-                    family = RegKind::Double;
-                } else if (std::strstr(name, "-float") != nullptr) {
-                    family = RegKind::Float;
-                }
-                const bool wide = family == RegKind::Long || family == RegKind::Double;
-                const bool srcWide = std::strncmp(name, "long-", 5) == 0 ||
-                                     std::strncmp(name, "double-", 7) == 0;
-                if (insn.opcode <= 0x8f) {  // unop
-                    if (srcWide) {
-                        checkWide(insn.registers[1]);
-                    } else {
-                        checkCat1(insn.registers[1]);
-                    }
-                } else if (insn.opcode <= 0xaf) {  // binop 3reg：源与目标同族同宽
+                const auto checkSrc = [&](ca::u32 reg, bool wide) {
                     if (wide) {
-                        checkWide(insn.registers[1]);
-                        checkWide(insn.registers[2]);
+                        checkWide(reg);
                     } else {
-                        checkCat1(insn.registers[1]);
-                        checkCat1(insn.registers[2]);
+                        checkCat1(reg);
                     }
+                };
+                ArithShape shape;
+                if (insn.opcode <= 0x8f) {  // unop 12x
+                    if (!unopShape(insn.opcode, &shape)) {
+                        break;
+                    }
+                    checkSrc(insn.registers[1], shape.srcWide);
+                } else if (insn.opcode <= 0xaf) {  // binop 23x
+                    if (!binop23Shape(insn.opcode, &shape)) {
+                        break;
+                    }
+                    checkSrc(insn.registers[1], shape.srcWide);
+                    checkSrc(insn.registers[2], shape.src2Wide);
                 } else if (insn.opcode <= 0xcf) {  // binop 2addr：A 兼源
-                    if (wide) {
-                        checkWide(insn.registers[0]);
-                        checkWide(insn.registers[1]);
-                    } else {
-                        checkCat1(insn.registers[0]);
-                        checkCat1(insn.registers[1]);
+                    if (!binop2addrShape(insn.opcode, &shape)) {
+                        break;
                     }
+                    checkSrc(insn.registers[0], shape.destWide);
+                    checkSrc(insn.registers[1], shape.srcWide);
+                    break;  // A 就是目标，形状不变
                 } else {  // lit16/lit8：源恒 cat1
                     checkCat1(insn.registers[1]);
+                    writeSingle(insn.registers[0], RegType::ofKind(RegKind::IntLike));
+                    break;
                 }
-                if (insn.opcode >= 0xb0 && insn.opcode <= 0xcf) {
-                    break;  // 2addr 目标即源 A，形状不变
-                }
-                if (wide) {
-                    writeWide(insn.registers[0], RegType::ofKind(family));
+                if (shape.destWide) {
+                    writeWide(insn.registers[0], RegType::ofKind(shape.dest));
                 } else {
-                    writeSingle(insn.registers[0], RegType::ofKind(family));
+                    writeSingle(insn.registers[0], RegType::ofKind(shape.dest));
                 }
                 break;
             }
