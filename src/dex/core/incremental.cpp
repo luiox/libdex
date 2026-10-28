@@ -917,6 +917,11 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
                 // 任何条目，走查按 kind 对齐跳过；padding 落在条目间隙，
                 // 由 gap 透传保留。
                 off = alignUp(off, alignmentOf(kind));
+                if (off > end) {
+                    // map 声明的条目数多于段内实际条目：继续走会跨段读取，
+                    // 且 end - off 无符号下溢。
+                    return Err(WriteError::NotIncremental);
+                }
                 Result<Entry*, WriteError> ensured = ensureEntry(kind, off);
                 if (ensured.is_err()) {
                     return Err(ensured.unwrap_err());
@@ -1466,14 +1471,17 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
         entryIndexByKey.emplace(entries[i].key, i);
     }
 
-    // 源条目必须互不重叠（重叠说明发现自相矛盾）。
+    // 源条目必须落在文件内且互不重叠：重叠或尾部越界会让布局的
+    // gap/tailGap 无符号下溢（入口已排除 >= kSourceOffsetLimit 的源）。
     {
+        const ca::u32 sourceSize = static_cast<ca::u32>(source.size());
         ca::u32 prevEnd = 0;
         for (const Entry& e : entries) {
             if (e.synthetic) {
                 continue;
             }
-            if (e.oldOff < prevEnd) {
+            if (e.oldOff > sourceSize || e.oldLen > sourceSize - e.oldOff ||
+                e.oldOff < prevEnd) {
                 return Err(WriteError::SourceUnreadable);
             }
             prevEnd = e.oldOff + e.oldLen;
@@ -2118,6 +2126,9 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
             } else {
                 appendSpan(e.encoded.data(), static_cast<ca::u32>(e.encoded.size()));
             }
+        }
+        if (prevEnd > fileSize) {
+            return Err(WriteError::SourceUnreadable);
         }
         if (const ca::u32 tailGap = fileSize - prevEnd; tailGap != 0) {
             appendSpan(source.data() + prevEnd, tailGap);
