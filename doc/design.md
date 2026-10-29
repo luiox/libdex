@@ -1,6 +1,6 @@
 # libdex 设计
 
-状态：施工中，未发布。本文只记边界、契约与裁决；实现进度见 [dev_plan](../dev_plan.md)。
+状态：施工中，未发布。本文只记分层契约与行为裁决；范围外清单见 doc/non_goals.md，剩余工作见 dev_plan.md。
 
 ## 定位
 
@@ -8,9 +8,9 @@ libdex 是 DEX 字节核：输入单个 `.dex`，输出保真 DOM 与写回字�
 
 ## 分层
 
-库三层：保真 DOM、逐条目 codec、方法体 CodeDom；同仓另有 libsmali 文本层。条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；`dex_file` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
+库三层：保真 DOM、逐条目 codec、方法体 CodeDom；同仓另有 libsmali 文本层。源码布局与库目标对齐：`src/dex` 是 libdex、`src/smali` 是 libsmali，库内扁平不设子目录——模块化落在文件级，条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；`dex_file` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
 
-CodeDom（`code_dom`）是方法体的结构编辑模型：`CodeUnit` 拥有指令槽表与程序序，分支/try/handler/payload 用 label 与值句柄（`InsnId{owner,slot,gen}`）引用，insert/replace/erase 后地址与 try 区间联动重算。它是 libsmali 与上层方法体编辑的唯一底座——smali 汇编没有 label 承载的模型做不出来，原「CFG 归 adapter」的裁决随 libsmali 入仓翻案：libsmali 是那个 adapter，建在库内 CodeDom 上，不在库外私养第二套方法体模型。
+CodeDom（`code_dom`）是方法体的结构编辑模型：`CodeUnit` 拥有指令槽表与程序序，分支/try/handler/payload 用 label 与值句柄（`InsnId{owner,slot,gen}`）引用，insert/replace/erase 后地址与 try 区间联动重算。它是 libsmali 与上层方法体编辑的唯一底座：libsmali 就是那个 adapter，建在库内 CodeDom 上，不在库外私养第二套方法体模型。
 
 libsmali（`smali`）是 DEX 与 smali 文本的互转层：反汇编 DexFile → baksmali 兼容文法子集的 `.smali` 文本，汇编文本 → DexFile 编辑。形态选择（`const/4` vs `const/16` vs `const`、分支 10t/20t/30t）在汇编器里按字面量与距离选择——这是 adapter 的职责，core 的「不合并、不提升」裁决不变。文法以反汇编器自产文本为准做往返封闭，baksmali 特有而本库不发射的指令归已知边界。
 
@@ -84,7 +84,7 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 `buildCfg` 从解码指令流切块：leaders 取分支/switch 目标、try 边界、handler 入口与转移后继，块不跨 handler 集合变化点；流内边 + 异常边 + 前驱回填，悬垂目标不产假边（不崩溃、不误报）。
 
-`analyzeFrames` 是 best-effort 与 strict 同引擎的到达帧数据流：RegType 格上 cat1/cat2 按半寄存器配对（宽对两半都存 Long/Double，cat1 独立读写高半即 WidePairing）；引用带 type_idx，不同引用合并为引用顶，不解析继承层级（跨类归上层）。三条 ART 对齐的裁决：`const 0` 的字面量零并入引用或 cat1 同族（ART Constant(0)）；冲突合并静默进帧、寄存器被读取才报 TypeConflict（ART 延迟判废——d8 的原地 `aget` 等惯用法不误报）；new-instance 的 UninitRef 由 invoke-direct `<init>` 调用初始化。move-result 必须紧跟 invoke/filled-new-array（DEX 无 jsr/ret，等价约束即此），目标类型按前驱返回描述符定型。monitor 深度在方法出口检查。不做全程序视图与 SMT（对齐 libjbc 基线的裁决）。
+`analyzeFrames` 是 best-effort 与 strict 同引擎的到达帧数据流：RegType 格上 cat1/cat2 按半寄存器配对（宽对两半都存 Long/Double，cat1 独立读写高半即 WidePairing）；引用带 type_idx，不同引用合并为引用顶，不解析继承层级（跨类归上层）。三条 ART 对齐的裁决：`const 0` 的字面量零并入引用或 cat1 同族（ART Constant(0)）；冲突合并静默进帧、寄存器被读取才报 TypeConflict（ART 延迟判废——d8 的原地 `aget` 等惯用法不误报）；new-instance 的 UninitRef 由 invoke-direct `<init>` 调用初始化。move-result 必须紧跟 invoke/filled-new-array（DEX 无 jsr/ret，等价约束即此），目标类型按前驱返回描述符定型。monitor 深度在方法出口检查。不做全程序视图与 SMT。
 
 ## 错误
 
@@ -92,7 +92,7 @@ ID 表追加走 `addType`/`addProto`/`addField`/`addMethod`：按内容复用已
 
 `ParseState` 只有 `Validated` 与 `Recovered`；结构损坏不产出半截模型。
 
-### ReadError 逐码语义（M5 分类学收口）
+### ReadError 逐码语义
 
 错误码分四档，判定「读入被拒 / 带病可读 / 延迟到访问 / 构建期」：
 
@@ -150,8 +150,6 @@ payload 不展开成 target 数组，保留源字节视图；switch target 相�
 
 type 层只解析字段类型与方法描述符，不查 ID 表、不解析泛型签名。
 
-单文件职责；classes2.dex、APK 容器、resources.arsc 与 AXML 都在库外。
-
 ## 对拍
 
 文本 oracle 是 baksmali 2.5.2（dexlib2）：原文件与 `buildDex` 产物分别反汇编，smali 文本必须一致。canonical 重建按规范重排 method_ids 后，class_data 的方法顺序会变；方法块顺序不是语义，脚本按块排序后再 diff，字段、注解与指令文本仍逐字节比较。它覆盖指令、try/catch、注解、静态初值、debug 行号与访问标志。
@@ -160,18 +158,4 @@ baksmali 不覆盖未建模 section，也不等于 ART 接受。仲裁规则（A
 
 redex 模式是双边管线对比：原文与重建产物走同一 ReDex 优化管线，管线自身的改写（内联、DCE 等）对两侧等价生效而抵消，两侧产物反汇编后必须一致——单边对比会被管线自身改写污染。CI（Linux）用 Homebrew bottle 装 redex，并用 runner 预装 Android SDK 的 d8 生成语料跑 baksmali/redex 对拍；art 的常驻设备配方见 oracle README。
 
-真实语料不入库，通过 `LIBDEX_REAL_DEX_DIR` 注入；第三方 APK 只允许哈希清单与复现脚本。040/041 由设备提取（`tools/corpus/extract_art.sh`），container 语义的评估与待决问题见 [corpus_040_041_notes](corpus_040_041_notes.md)。
-
-## 不做
-
-- odex / vdex / art / compact dex。
-- APK、resources.arsc、AXML 与多 dex 模型。
-- 增量路径的 ID 表级新增与删除（intern/addType/addMethod 等触及 ID 表即 `NotIncremental`，改走 canonical）；vacuum 仅作为 canonical 路径的显式 opt-in（`BuildOptions::vacuumIds`）。
-- visitor 形状；方法体 AST 已翻案为 CodeDom（值句柄、无 visitor，见「分层」）。
-- opcode 形态合并或自动提升（core；libsmali 汇编器作为 adapter 显式选形态）。
-- 修改后字节 diff 最小化：增量重建保留源布局，输出 diff 小是布局保持的结果而非优化目标；库不提供字节级 patch。
-
-## 相关
-
-- [README](../README.md)：构建与最小示例。
-- [dev_plan](../dev_plan.md)：实现进度与下一步。
+真实语料不入库，通过 `LIBDEX_REAL_DEX_DIR` 注入；第三方 APK 只允许哈希清单与复现脚本。040/041 由设备提取（`tools/corpus/extract_art.sh`）。
