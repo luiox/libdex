@@ -17,6 +17,7 @@
 #include "dex/encoded_value.hpp"
 #include "dex/error.hpp"
 #include "dex/insn.hpp"
+#include "dex/insn_edit.hpp"
 #include "dex/integrity.hpp"
 #include "dex/leb128.hpp"
 #include "dex/opcode.hpp"

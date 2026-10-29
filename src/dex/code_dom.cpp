@@ -2,6 +2,8 @@
 /// @brief       CodeUnit 的 promote/lower 与编辑实现。
 #include "dex/code_dom.hpp"
 
+#include "dex/insn_edit.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <functional>

@@ -175,4 +175,19 @@ inline void putU32(std::vector<ca::u8>& out, ca::usize offset, ca::u32 value)
     out[offset + 3] = static_cast<ca::u8>(value >> 24);
 }
 
+/// @brief 无符号值能否落在 4/8/16/32 位域宽内。
+inline bool fitsU4(ca::u64 value) noexcept { return value <= 0xFu; }
+inline bool fitsU8(ca::u64 value) noexcept { return value <= 0xFFu; }
+inline bool fitsU16(ca::u64 value) noexcept { return value <= 0xFFFFu; }
+inline bool fitsU32(ca::u64 value) noexcept { return value <= 0xFFFFFFFFu; }
+
+/// @brief 有符号值能否落在 4/8/16/32 位域宽内。
+inline bool fitsI4(ca::i64 value) noexcept { return value >= -8 && value <= 7; }
+inline bool fitsI8(ca::i64 value) noexcept { return value >= -128 && value <= 127; }
+inline bool fitsI16(ca::i64 value) noexcept { return value >= -32768 && value <= 32767; }
+inline bool fitsI32(ca::i64 value) noexcept
+{
+    return value >= -2147483647LL - 1 && value <= 2147483647LL;
+}
+
 }   // namespace dex::core

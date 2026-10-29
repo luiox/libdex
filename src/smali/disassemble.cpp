@@ -17,6 +17,7 @@
 #include "dex/debug_info.hpp"
 #include "dex/encoded_value.hpp"
 #include "dex/insn.hpp"
+#include "dex/insn_edit.hpp"
 #include "smali/opcodes.hpp"
 
 namespace dex::smali {

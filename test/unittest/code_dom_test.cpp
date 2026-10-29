@@ -7,6 +7,7 @@
 
 #include "dex/dex_file.hpp"
 #include "dex/insn.hpp"
+#include "dex/insn_edit.hpp"
 #include "dex/reader.hpp"
 
 #include <gtest/gtest.h>

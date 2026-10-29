@@ -18,6 +18,7 @@
 #include "dex/code_dom.hpp"
 #include "dex/encoded_value.hpp"
 #include "dex/error.hpp"
+#include "dex/insn_edit.hpp"
 #include "dex/method_editor.hpp"
 #include "dex/debug_info.hpp"
 #include "smali/opcodes.hpp"
