@@ -63,15 +63,15 @@ std::unique_ptr<DexFile> DexFile::createEmpty(ca::u16 version)
 void DexFile::adoptSource(ByteSlice bytes)
 {
     if (bytes.empty()) {
-        sourceBytes_ = ca::core::Bytes{};
+        pools_.sourceBytes = ca::core::Bytes{};
         return;
     }
-    sourceBytes_ = ca::core::Bytes::copy_from_slice(bytes.data(), bytes.size());
+    pools_.sourceBytes = ca::core::Bytes::copy_from_slice(bytes.data(), bytes.size());
 }
 
 void DexFile::adoptBorrowedSource(ByteSlice bytes) noexcept
 {
-    sourceBytes_ = ca::core::Bytes::from_static(bytes.data(), bytes.size());
+    pools_.sourceBytes = ca::core::Bytes::from_static(bytes.data(), bytes.size());
 }
 
 const MapItem* DexFile::findMapItem(MapType type) const noexcept
@@ -118,10 +118,10 @@ Result<jstr::MUtf8StringRef, ReadError> DexFile::string(ca::u32 index)
         return Err(ReadError::BadIndex);
     }
 
-    if (stringCache_.size() != stringIds.size()) {
-        stringCache_.resize(stringIds.size());
+    if (caches_.strings.size() != stringIds.size()) {
+        caches_.strings.resize(stringIds.size());
     }
-    LazyString& slot = stringCache_[index];
+    LazyString& slot = caches_.strings[index];
     if (slot.state == LazyString::State::Decoded) {
         return Ok(slot.view);
     }
@@ -139,10 +139,10 @@ Result<jstr::MUtf8StringRef, ReadError> DexFile::string(ca::u32 index)
     ByteSlice storage;
     ca::u32 offset = 0;
     if (id.owned) {
-        if (id.ownedIndex >= ownedStrings_.size()) {
+        if (id.ownedIndex >= pools_.strings.size()) {
             return fail(ReadError::BadStringData);
         }
-        const std::vector<ca::u8>& bytes = ownedStrings_[id.ownedIndex];
+        const std::vector<ca::u8>& bytes = pools_.strings[id.ownedIndex];
         storage = ByteSlice{bytes.data(), bytes.size()};
     } else {
         storage = source();
@@ -169,10 +169,10 @@ Result<std::vector<ca::u8>, ReadError> DexFile::stringData(ca::u32 index) const
     }
     const StringId& id = stringIds[index];
     if (id.owned) {
-        if (id.ownedIndex >= ownedStrings_.size()) {
+        if (id.ownedIndex >= pools_.strings.size()) {
             return Err(ReadError::BadStringData);
         }
-        const std::vector<ca::u8>& bytes = ownedStrings_[id.ownedIndex];
+        const std::vector<ca::u8>& bytes = pools_.strings[id.ownedIndex];
         return Ok(std::vector<ca::u8>(bytes.begin(), bytes.end()));
     }
 
@@ -197,7 +197,7 @@ Result<ca::u32, ReadError> DexFile::internString(jstr::MUtf8StringRef mutf8)
         return Err(ReadError::BadStringData);
     }
 
-    if (internIndexedCount_ != stringIds.size()) {
+    if (pools_.stringInternedCount != stringIds.size()) {
         refreshInternIndex();
     }
 
@@ -205,8 +205,8 @@ Result<ca::u32, ReadError> DexFile::internString(jstr::MUtf8StringRef mutf8)
     if (!mutf8.empty()) {
         key.assign(mutf8.data(), mutf8.size());
     }
-    const auto found = internIndex_.find(key);
-    if (found != internIndex_.end()) {
+    const auto found = pools_.stringIntern.find(key);
+    if (found != pools_.stringIntern.end()) {
         return Ok(found->second);
     }
 
@@ -214,16 +214,16 @@ Result<ca::u32, ReadError> DexFile::internString(jstr::MUtf8StringRef mutf8)
     writeUleb128(item, static_cast<ca::u32>(units.size()));
     item.insert(item.end(), mutf8.begin(), mutf8.end());
     item.push_back(0);
-    ownedStrings_.push_back(std::move(item));
+    pools_.strings.push_back(std::move(item));
 
     StringId id;
     id.owned = true;
-    id.ownedIndex = static_cast<ca::u32>(ownedStrings_.size() - 1);
+    id.ownedIndex = static_cast<ca::u32>(pools_.strings.size() - 1);
     stringIds.push_back(id);
 
     const ca::u32 index = static_cast<ca::u32>(stringIds.size() - 1);
-    internIndex_.emplace(std::move(key), index);
-    internIndexedCount_ = stringIds.size();
+    pools_.stringIntern.emplace(std::move(key), index);
+    pools_.stringInternedCount = stringIds.size();
     return Ok(index);
 }
 
@@ -246,8 +246,8 @@ Result<ca::u32, ReadError> DexFile::addType(std::string_view descriptor)
     }
     const ca::u32 descriptorIdx = interned.unwrap();
     ensureIdIndexes();
-    const auto found = typeIndexByKey_.find(descriptorIdx);
-    if (found != typeIndexByKey_.end()) {
+    const auto found = pools_.typeIndexByKey.find(descriptorIdx);
+    if (found != pools_.typeIndexByKey.end()) {
         return Ok(found->second);
     }
     if (typeIds.size() >= kIdTableLimit) {
@@ -255,8 +255,8 @@ Result<ca::u32, ReadError> DexFile::addType(std::string_view descriptor)
     }
     const ca::u32 index = static_cast<ca::u32>(typeIds.size());
     typeIds.push_back(TypeId{descriptorIdx});
-    typeIndexByKey_.emplace(descriptorIdx, index);
-    typeIndexedCount_ = typeIds.size();
+    pools_.typeIndexByKey.emplace(descriptorIdx, index);
+    pools_.typeIndexedCount = typeIds.size();
     return Ok(index);
 }
 
@@ -285,8 +285,8 @@ Result<ca::u32, ReadError> DexFile::addProto(ca::u32 shortyIdx, ca::u32 returnTy
     for (ca::u32 i = 0; i < params.size; ++i) {
         key.params.push_back(params.at(i));
     }
-    const auto found = protoIndexByKey_.find(key);
-    if (found != protoIndexByKey_.end()) {
+    const auto found = pools_.protoIndexByKey.find(key);
+    if (found != pools_.protoIndexByKey.end()) {
         return Ok(found->second);
     }
     if (protoIds.size() >= kIdTableLimit) {
@@ -294,8 +294,8 @@ Result<ca::u32, ReadError> DexFile::addProto(ca::u32 shortyIdx, ca::u32 returnTy
     }
     const ca::u32 index = static_cast<ca::u32>(protoIds.size());
     protoIds.push_back(ProtoId{shortyIdx, returnTypeIdx, parametersOff});
-    protoIndexByKey_.emplace(std::move(key), index);
-    protoIndexedCount_ = protoIds.size();
+    pools_.protoIndexByKey.emplace(std::move(key), index);
+    pools_.protoIndexedCount = protoIds.size();
     return Ok(index);
 }
 
@@ -309,8 +309,8 @@ Result<ca::u32, ReadError> DexFile::addField(ca::u32 classIdx, ca::u32 typeIdx,
     ensureIdIndexes();
     const ca::u64 key = (static_cast<ca::u64>(classIdx) << 48)
                         | (static_cast<ca::u64>(typeIdx) << 32) | nameIdx;
-    const auto found = fieldIndexByKey_.find(key);
-    if (found != fieldIndexByKey_.end()) {
+    const auto found = pools_.fieldIndexByKey.find(key);
+    if (found != pools_.fieldIndexByKey.end()) {
         return Ok(found->second);
     }
     if (fieldIds.size() >= kIdTableLimit) {
@@ -319,8 +319,8 @@ Result<ca::u32, ReadError> DexFile::addField(ca::u32 classIdx, ca::u32 typeIdx,
     const ca::u32 index = static_cast<ca::u32>(fieldIds.size());
     fieldIds.push_back(FieldId{static_cast<ca::u16>(classIdx),
                                static_cast<ca::u16>(typeIdx), nameIdx});
-    fieldIndexByKey_.emplace(key, index);
-    fieldIndexedCount_ = fieldIds.size();
+    pools_.fieldIndexByKey.emplace(key, index);
+    pools_.fieldIndexedCount = fieldIds.size();
     return Ok(index);
 }
 
@@ -334,8 +334,8 @@ Result<ca::u32, ReadError> DexFile::addMethod(ca::u32 classIdx, ca::u32 protoIdx
     ensureIdIndexes();
     const ca::u64 key = (static_cast<ca::u64>(classIdx) << 48)
                         | (static_cast<ca::u64>(protoIdx) << 32) | nameIdx;
-    const auto found = methodIndexByKey_.find(key);
-    if (found != methodIndexByKey_.end()) {
+    const auto found = pools_.methodIndexByKey.find(key);
+    if (found != pools_.methodIndexByKey.end()) {
         return Ok(found->second);
     }
     if (methodIds.size() >= kIdTableLimit) {
@@ -344,8 +344,8 @@ Result<ca::u32, ReadError> DexFile::addMethod(ca::u32 classIdx, ca::u32 protoIdx
     const ca::u32 index = static_cast<ca::u32>(methodIds.size());
     methodIds.push_back(MethodId{static_cast<ca::u16>(classIdx),
                                  static_cast<ca::u16>(protoIdx), nameIdx});
-    methodIndexByKey_.emplace(key, index);
-    methodIndexedCount_ = methodIds.size();
+    pools_.methodIndexByKey.emplace(key, index);
+    pools_.methodIndexedCount = methodIds.size();
     return Ok(index);
 }
 
@@ -401,30 +401,30 @@ Result<ca::u32, ReadError> DexFile::addTypeList(const std::vector<ca::u32>& type
     encoded[1] = static_cast<ca::u8>((typeIdxs.size() >> 8) & 0xFFu);
     encoded[2] = static_cast<ca::u8>((typeIdxs.size() >> 16) & 0xFFu);
     encoded[3] = static_cast<ca::u8>((typeIdxs.size() >> 24) & 0xFFu);
-    if (typeListIndexedCount_ != ownedTypeLists_.size()) {
-        typeListIndexByKey_.clear();
-        for (ca::u32 i = 0; i < ownedTypeLists_.size(); ++i) {
-            typeListIndexByKey_.emplace(ownedTypeLists_[i], i);
+    if (pools_.typeListIndexedCount != pools_.typeLists.size()) {
+        pools_.typeListIndexByKey.clear();
+        for (ca::u32 i = 0; i < pools_.typeLists.size(); ++i) {
+            pools_.typeListIndexByKey.emplace(pools_.typeLists[i], i);
         }
-        typeListIndexedCount_ = ownedTypeLists_.size();
+        pools_.typeListIndexedCount = pools_.typeLists.size();
     }
-    const auto found = typeListIndexByKey_.find(encoded);
-    if (found != typeListIndexByKey_.end()) {
+    const auto found = pools_.typeListIndexByKey.find(encoded);
+    if (found != pools_.typeListIndexByKey.end()) {
         return Ok(found->second);
     }
-    ownedTypeLists_.push_back(std::move(encoded));
-    typeListIndexByKey_.emplace(ownedTypeLists_.back(),
-                                static_cast<ca::u32>(ownedTypeLists_.size() - 1));
-    typeListIndexedCount_ = ownedTypeLists_.size();
-    return Ok(static_cast<ca::u32>(ownedTypeLists_.size() - 1));
+    pools_.typeLists.push_back(std::move(encoded));
+    pools_.typeListIndexByKey.emplace(pools_.typeLists.back(),
+                                static_cast<ca::u32>(pools_.typeLists.size() - 1));
+    pools_.typeListIndexedCount = pools_.typeLists.size();
+    return Ok(static_cast<ca::u32>(pools_.typeLists.size() - 1));
 }
 
 TypeListSpan DexFile::ownedTypeListSpan(ca::u32 index) const noexcept
 {
-    if (index >= ownedTypeLists_.size() || ownedTypeLists_[index].size() < 4u) {
+    if (index >= pools_.typeLists.size() || pools_.typeLists[index].size() < 4u) {
         return TypeListSpan{};
     }
-    const std::vector<ca::u8>& bytes = ownedTypeLists_[index];
+    const std::vector<ca::u8>& bytes = pools_.typeLists[index];
     TypeListSpan out;
     out.size = readU32Le(bytes.data());
     out.entries = bytes.data() + 4u;
@@ -478,8 +478,8 @@ Result<ca::u32, ReadError> DexFile::addProtoWithParams(ca::u32 returnTypeIdx,
     key.shortyIdx = interned.unwrap();
     key.returnTypeIdx = returnTypeIdx;
     key.params = parameters;
-    const auto found = protoIndexByKey_.find(key);
-    if (found != protoIndexByKey_.end()) {
+    const auto found = pools_.protoIndexByKey.find(key);
+    if (found != pools_.protoIndexByKey.end()) {
         return Ok(found->second);
     }
     Result<ca::u32, ReadError> ownedIdx = Ok(kNoIndex);
@@ -495,8 +495,8 @@ Result<ca::u32, ReadError> DexFile::addProtoWithParams(ca::u32 returnTypeIdx,
     const ca::u32 index = static_cast<ca::u32>(protoIds.size());
     protoIds.push_back(ProtoId{interned.unwrap(), returnTypeIdx, 0, ownedIdx.unwrap(),
                                ownedIdx.unwrap() != kNoIndex});
-    protoIndexByKey_.emplace(std::move(key), index);
-    protoIndexedCount_ = protoIds.size();
+    pools_.protoIndexByKey.emplace(std::move(key), index);
+    pools_.protoIndexedCount = protoIds.size();
     return Ok(index);
 }
 
@@ -728,21 +728,21 @@ Result<ca::u32, ReadError> DexFile::addAnnotationItem(const AnnotationItem& item
             return Err(value.unwrap_err());
         }
     }
-    for (ca::u32 i = 0; i < ownedAnnotationItems_.size(); ++i) {
-        if (sameAnnotation(ownedAnnotationItems_[i], normalized)) {
+    for (ca::u32 i = 0; i < pools_.annotationItems.size(); ++i) {
+        if (sameAnnotation(pools_.annotationItems[i], normalized)) {
             return Ok(i);
         }
     }
-    ownedAnnotationItems_.push_back(std::move(normalized));
-    return Ok(static_cast<ca::u32>(ownedAnnotationItems_.size() - 1));
+    pools_.annotationItems.push_back(std::move(normalized));
+    return Ok(static_cast<ca::u32>(pools_.annotationItems.size() - 1));
 }
 
 const AnnotationItem* DexFile::ownedAnnotationItem(ca::u32 index) const noexcept
 {
-    if (index >= ownedAnnotationItems_.size()) {
+    if (index >= pools_.annotationItems.size()) {
         return nullptr;
     }
-    return &ownedAnnotationItems_[index];
+    return &pools_.annotationItems[index];
 }
 
 Result<void, ReadError> DexFile::setClassAnnotations(ca::u32 classDefIdx,
@@ -752,11 +752,11 @@ Result<void, ReadError> DexFile::setClassAnnotations(ca::u32 classDefIdx,
         return Err(ReadError::BadIndex);
     }
     for (ca::u32 item : items) {
-        if (item >= ownedAnnotationItems_.size()) {
+        if (item >= pools_.annotationItems.size()) {
             return Err(ReadError::BadIndex);
         }
     }
-    AnnotationAttachments& attachments = ownedAnnotations_[classDefIdx];
+    AnnotationAttachments& attachments = edits_.annotations[classDefIdx];
     attachments.hasClass = true;
     attachments.classItems = items;
     return Ok();
@@ -784,7 +784,7 @@ Result<void, ReadError> DexFile::setFieldAnnotations(ca::u32 classDefIdx, ca::u3
         !validAnnotationHandles(items, *this)) {
         return Err(ReadError::BadIndex);
     }
-    ownedAnnotations_[classDefIdx].fields[fieldIdx] = items;
+    edits_.annotations[classDefIdx].fields[fieldIdx] = items;
     return Ok();
 }
 
@@ -796,7 +796,7 @@ Result<void, ReadError> DexFile::setMethodAnnotations(ca::u32 classDefIdx,
         !validAnnotationHandles(items, *this)) {
         return Err(ReadError::BadIndex);
     }
-    ownedAnnotations_[classDefIdx].methods[methodIdx] = items;
+    edits_.annotations[classDefIdx].methods[methodIdx] = items;
     return Ok();
 }
 
@@ -812,7 +812,7 @@ Result<void, ReadError> DexFile::setParameterAnnotations(
             return Err(ReadError::BadIndex);
         }
     }
-    ownedAnnotations_[classDefIdx].parameters[methodIdx] = perParameter;
+    edits_.annotations[classDefIdx].parameters[methodIdx] = perParameter;
     return Ok();
 }
 
@@ -868,31 +868,31 @@ Result<void, ReadError> DexFile::setStaticFieldValue(ca::u32 classDefIdx, ca::u3
     if (done.is_err()) {
         return Err(done.unwrap_err());
     }
-    staticValueEdits_[classDefIdx][fieldIdx] = std::move(normalized);
+    edits_.staticValues[classDefIdx][fieldIdx] = std::move(normalized);
     return Ok();
 }
 
 void DexFile::refreshInternIndex()
 {
-    internIndex_.clear();
-    internIndexedCount_ = stringIds.size();
+    pools_.stringIntern.clear();
+    pools_.stringInternedCount = stringIds.size();
     for (ca::u32 i = 0; i < stringIds.size(); ++i) {
         Result<jstr::MUtf8StringRef, ReadError> text = string(i);
         if (text.is_err()) {
             continue;  // 坏条目不能作为查重目标
         }
-        internIndex_.emplace(std::string(text.unwrap().as_std_view()), i);
+        pools_.stringIntern.emplace(std::string(text.unwrap().as_std_view()), i);
     }
 }
 
 void DexFile::refreshIdIndexes()
 {
-    typeIndexByKey_.clear();
-    protoIndexByKey_.clear();
-    fieldIndexByKey_.clear();
-    methodIndexByKey_.clear();
+    pools_.typeIndexByKey.clear();
+    pools_.protoIndexByKey.clear();
+    pools_.fieldIndexByKey.clear();
+    pools_.methodIndexByKey.clear();
     for (ca::u32 i = 0; i < typeIds.size(); ++i) {
-        typeIndexByKey_.emplace(typeIds[i].descriptorIdx, i);
+        pools_.typeIndexByKey.emplace(typeIds[i].descriptorIdx, i);
     }
     for (ca::u32 i = 0; i < protoIds.size(); ++i) {
         const ProtoId& proto = protoIds[i];
@@ -917,42 +917,42 @@ void DexFile::refreshIdIndexes()
         for (ca::u32 j = 0; j < span.size; ++j) {
             key.params.push_back(span.at(j));
         }
-        protoIndexByKey_.emplace(std::move(key), i);
+        pools_.protoIndexByKey.emplace(std::move(key), i);
     }
     for (ca::u32 i = 0; i < fieldIds.size(); ++i) {
         const FieldId& field = fieldIds[i];
         const ca::u64 key = (static_cast<ca::u64>(field.classIdx) << 48)
                             | (static_cast<ca::u64>(field.typeIdx) << 32) | field.nameIdx;
-        fieldIndexByKey_.emplace(key, i);
+        pools_.fieldIndexByKey.emplace(key, i);
     }
     for (ca::u32 i = 0; i < methodIds.size(); ++i) {
         const MethodId& method = methodIds[i];
         const ca::u64 key = (static_cast<ca::u64>(method.classIdx) << 48)
                             | (static_cast<ca::u64>(method.protoIdx) << 32)
                             | method.nameIdx;
-        methodIndexByKey_.emplace(key, i);
+        pools_.methodIndexByKey.emplace(key, i);
     }
-    typeIndexedCount_ = typeIds.size();
-    protoIndexedCount_ = protoIds.size();
-    fieldIndexedCount_ = fieldIds.size();
-    methodIndexedCount_ = methodIds.size();
+    pools_.typeIndexedCount = typeIds.size();
+    pools_.protoIndexedCount = protoIds.size();
+    pools_.fieldIndexedCount = fieldIds.size();
+    pools_.methodIndexedCount = methodIds.size();
 }
 
 void DexFile::ensureIdIndexes()
 {
-    if (typeIndexedCount_ != typeIds.size() || protoIndexedCount_ != protoIds.size()
-        || fieldIndexedCount_ != fieldIds.size()
-        || methodIndexedCount_ != methodIds.size()) {
+    if (pools_.typeIndexedCount != typeIds.size() || pools_.protoIndexedCount != protoIds.size()
+        || pools_.fieldIndexedCount != fieldIds.size()
+        || pools_.methodIndexedCount != methodIds.size()) {
         refreshIdIndexes();
     }
 }
 
 const jstr::MUtf8StringRef* DexFile::peekString(ca::u32 index) const noexcept
 {
-    if (index >= stringCache_.size()) {
+    if (index >= caches_.strings.size()) {
         return nullptr;
     }
-    const LazyString& slot = stringCache_[index];
+    const LazyString& slot = caches_.strings[index];
     return slot.state == LazyString::State::Decoded ? &slot.view : nullptr;
 }
 
@@ -1001,11 +1001,11 @@ Result<TypeListSpan, ReadError> DexFile::typeList(ca::u32 offset)
     if (offset == 0) {
         return Ok(TypeListSpan{});
     }
-    if (offset >= sourceBytes_.len()) {
+    if (offset >= pools_.sourceBytes.len()) {
         return Err(ReadError::BadTableSpan);
     }
 
-    Result<Reader, ReadError> reader = Reader::at(sourceBytes_, offset);
+    Result<Reader, ReadError> reader = Reader::at(pools_.sourceBytes, offset);
     if (reader.is_err()) {
         return Err(ReadError::BadTableSpan);
     }
@@ -1017,14 +1017,14 @@ Result<TypeListSpan, ReadError> DexFile::typeList(ca::u32 offset)
     const ca::u32 count = rs.unwrap();
 
     const ca::u64 bytes = 4u + static_cast<ca::u64>(count) * 2u;
-    if (bytes > static_cast<ca::u64>(sourceBytes_.len() - offset)) {
+    if (bytes > static_cast<ca::u64>(pools_.sourceBytes.len() - offset)) {
         return Err(ReadError::BadTableSpan);
     }
 
     TypeListSpan out;
     out.raw = ByteSpan{offset, static_cast<ca::u32>(bytes)};
     out.size = count;
-    out.entries = sourceBytes_.as_ptr() + offset + 4;
+    out.entries = pools_.sourceBytes.as_ptr() + offset + 4;
     return Ok(out);
 }
 
@@ -1105,11 +1105,11 @@ Result<const ClassData*, ReadError> DexFile::classData(ca::u32 classDefIdx)
     if (classDefIdx >= classDefs.size()) {
         return Err(ReadError::BadIndex);
     }
-    if (classDataCache_.size() != classDefs.size()) {
-        classDataCache_.resize(classDefs.size());
+    if (caches_.classDatas.size() != classDefs.size()) {
+        caches_.classDatas.resize(classDefs.size());
     }
 
-    LazyClassData& slot = classDataCache_[classDefIdx];
+    LazyClassData& slot = caches_.classDatas[classDefIdx];
     if (slot.state == LazyClassData::State::Decoded) {
         return Ok(static_cast<const ClassData*>(slot.data.get()));
     }
@@ -1137,10 +1137,10 @@ Result<const ClassData*, ReadError> DexFile::classData(ca::u32 classDefIdx)
 
 const ClassData* DexFile::peekClassData(ca::u32 classDefIdx) const noexcept
 {
-    if (classDefIdx >= classDataCache_.size()) {
+    if (classDefIdx >= caches_.classDatas.size()) {
         return nullptr;
     }
-    const LazyClassData& slot = classDataCache_[classDefIdx];
+    const LazyClassData& slot = caches_.classDatas[classDefIdx];
     return slot.state == LazyClassData::State::Decoded ? slot.data.get() : nullptr;
 }
 
@@ -1160,32 +1160,32 @@ Result<const CodeItem*, ReadError> DexFile::codeItem(ca::u32 codeOff)
         return Ok(static_cast<const CodeItem*>(nullptr));
     }
 
-    const auto it = codeCache_.find(codeOff);
-    if (it != codeCache_.end()) {
+    const auto it = caches_.code.find(codeOff);
+    if (it != caches_.code.end()) {
         return Ok(static_cast<const CodeItem*>(it->second.get()));
     }
-    const auto failed = codeFailures_.find(codeOff);
-    if (failed != codeFailures_.end()) {
+    const auto failed = caches_.codeFailures.find(codeOff);
+    if (failed != caches_.codeFailures.end()) {
         return Err(failed->second);
     }
 
     Result<std::unique_ptr<CodeItem>, ReadError> decoded = decodeCodeItem(codeOff);
     if (decoded.is_err()) {
         const ReadError error = decoded.unwrap_err();
-        codeFailures_.emplace(codeOff, error);
+        caches_.codeFailures.emplace(codeOff, error);
         return Err(error);
     }
 
     std::unique_ptr<CodeItem> item = std::move(decoded).unwrap();
     const CodeItem* view = item.get();
-    codeCache_.emplace(codeOff, std::move(item));
+    caches_.code.emplace(codeOff, std::move(item));
     return Ok(view);
 }
 
 const CodeItem* DexFile::peekCodeItem(ca::u32 codeOff) const noexcept
 {
-    const auto it = codeCache_.find(codeOff);
-    return it == codeCache_.end() ? nullptr : it->second.get();
+    const auto it = caches_.code.find(codeOff);
+    return it == caches_.code.end() ? nullptr : it->second.get();
 }
 
 Result<std::unique_ptr<CodeItem>, ReadError> DexFile::decodeCodeItem(ca::u32 offset)
@@ -1230,27 +1230,27 @@ Result<const T*, ReadError> DexFile::decodeLazy(
 
 Result<const AnnotationsDirectory*, ReadError> DexFile::annotationsDirectory(ca::u32 offset)
 {
-    return decodeLazy(annotationsDirectoryCache_, offset, &readAnnotationsDirectory);
+    return decodeLazy(caches_.annotationsDirectory, offset, &readAnnotationsDirectory);
 }
 
 Result<const AnnotationSetItem*, ReadError> DexFile::annotationSet(ca::u32 offset)
 {
-    return decodeLazy(annotationSetCache_, offset, &readAnnotationSet);
+    return decodeLazy(caches_.annotationSet, offset, &readAnnotationSet);
 }
 
 Result<const AnnotationSetRefList*, ReadError> DexFile::annotationSetRefList(ca::u32 offset)
 {
-    return decodeLazy(annotationSetRefCache_, offset, &readAnnotationSetRefList);
+    return decodeLazy(caches_.annotationSetRef, offset, &readAnnotationSetRefList);
 }
 
 Result<const AnnotationItem*, ReadError> DexFile::annotationItem(ca::u32 offset)
 {
-    return decodeLazy(annotationItemCache_, offset, &readAnnotationItem);
+    return decodeLazy(caches_.annotationItem, offset, &readAnnotationItem);
 }
 
 Result<const EncodedArrayItem*, ReadError> DexFile::encodedArray(ca::u32 offset)
 {
-    return decodeLazy(encodedArrayCache_, offset, &readEncodedArrayItem);
+    return decodeLazy(caches_.encodedArray, offset, &readEncodedArrayItem);
 }
 
 Result<const AnnotationsDirectory*, ReadError> DexFile::classAnnotations(ca::u32 classDefIdx)
@@ -1271,7 +1271,7 @@ Result<const EncodedArrayItem*, ReadError> DexFile::staticValues(ca::u32 classDe
 
 Result<const DebugInfo*, ReadError> DexFile::debugInfo(ca::u32 offset)
 {
-    return decodeLazy(debugInfoCache_, offset, &readDebugInfo);
+    return decodeLazy(caches_.debugInfo, offset, &readDebugInfo);
 }
 
 Result<const EncodedArrayItem*, ReadError> DexFile::callSiteValues(ca::u32 index)
