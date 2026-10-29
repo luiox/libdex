@@ -55,6 +55,37 @@ const char* to_string(AsmErrorCode e) noexcept
     return "unknown";
 }
 
+/// CodeDomError → AsmErrorCode 的唯一桥。switch 穷举且无 default：新增
+/// CodeDomError 枚举值而不同步这里，libsmali 目标在编译期直接报错。
+AsmErrorCode mapCodeDom(core::CodeDomError e) noexcept
+{
+    switch (e) {
+        case core::CodeDomError::Ok: return AsmErrorCode::ModelError;
+        case core::CodeDomError::StaleHandle: return AsmErrorCode::ModelError;
+        case core::CodeDomError::UnknownLabel: return AsmErrorCode::BadLabel;
+        case core::CodeDomError::StillUsed: return AsmErrorCode::ModelError;
+        case core::CodeDomError::DanglingLabel: return AsmErrorCode::BadLabel;
+        case core::CodeDomError::Unencodable: return AsmErrorCode::Overflow;
+        case core::CodeDomError::MisalignedPayload: return AsmErrorCode::Overflow;
+        case core::CodeDomError::BadTryRegion: return AsmErrorCode::BadLabel;
+        case core::CodeDomError::BadShape: return AsmErrorCode::ModelError;
+    }
+    return AsmErrorCode::ModelError;
+}
+
+/// InsnEncodeError → AsmErrorCode 的唯一桥，穷举约束同 mapCodeDom。
+AsmErrorCode mapInsnEncode(core::InsnEncodeError e) noexcept
+{
+    switch (e) {
+        case core::InsnEncodeError::Ok: return AsmErrorCode::ModelError;
+        case core::InsnEncodeError::BadFormat: return AsmErrorCode::ModelError;
+        case core::InsnEncodeError::OperandOverflow: return AsmErrorCode::Overflow;
+        case core::InsnEncodeError::BadPayload: return AsmErrorCode::ModelError;
+        case core::InsnEncodeError::MisalignedPayload: return AsmErrorCode::Overflow;
+    }
+    return AsmErrorCode::ModelError;
+}
+
 namespace {
 
 template <typename T>
@@ -1302,7 +1333,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                     core::makePackedSwitchPayload(
                         static_cast<ca::i32>(key.unwrap()), zeros);
                 if (p.is_err()) {
-                    return Err(fail(AsmErrorCode::Overflow, ln, "packed payload"));
+                    return Err(fail(mapInsnEncode(p.unwrap_err()), ln, "packed payload"));
                 }
                 core::PayloadInsn built = std::move(p).unwrap();
                 for (const std::string& n : targetNames) {
@@ -1334,7 +1365,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                 Result<core::PayloadInsn, core::InsnEncodeError> p =
                     core::makeSparseSwitchPayload(keys, zeros);
                 if (p.is_err()) {
-                    return Err(fail(AsmErrorCode::Overflow, ln, "sparse payload"));
+                    return Err(fail(mapInsnEncode(p.unwrap_err()), ln, "sparse payload"));
                 }
                 core::PayloadInsn built = std::move(p).unwrap();
                 for (const std::string& n : targetNames) {
@@ -1376,7 +1407,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                     core::makeFillArrayDataPayload(static_cast<ca::u16>(width),
                                                    std::move(data));
                 if (p.is_err()) {
-                    return Err(fail(AsmErrorCode::Overflow, ln, "fill payload"));
+                    return Err(fail(mapInsnEncode(p.unwrap_err()), ln, "fill payload"));
                 }
                 core::PayloadInsn built = std::move(p).unwrap();
                 payloadSlot = unit.append(built.insn, std::move(built.storage));
@@ -1385,7 +1416,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             if (Result<void, core::CodeDomError> b =
                     unit.bindPayload(ctx.pendingSwitch, payloadSlot, targets);
                 b.is_err()) {
-                return Err(fail(AsmErrorCode::BadLabel, ln, payloadLabel));
+                return Err(fail(mapCodeDom(b.unwrap_err()), ln, payloadLabel));
             }
             ctx.pendingSwitch = InsnId{nullptr, core::kEndSlot, 0};
             ctx.lastAppended = payloadSlot;
@@ -1584,7 +1615,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             const LabelId id = ctx.label(unit, toks[1]);
             const InsnId slot = appendInsn(insn);
             if (Result<void, core::CodeDomError> b = unit.bindBranch(slot, id); b.is_err()) {
-                return Err(fail(AsmErrorCode::BadLabel, ln, toks[1]));
+                return Err(fail(mapCodeDom(b.unwrap_err()), ln, toks[1]));
             }
             handled = false;
             break;
@@ -1598,7 +1629,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             const LabelId id = ctx.label(unit, toks[2]);
             const InsnId slot = appendInsn(insn);
             if (Result<void, core::CodeDomError> b = unit.bindBranch(slot, id); b.is_err()) {
-                return Err(fail(AsmErrorCode::BadLabel, ln, toks[2]));
+                return Err(fail(mapCodeDom(b.unwrap_err()), ln, toks[2]));
             }
             handled = false;
             break;
@@ -1616,7 +1647,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             const LabelId id = ctx.label(unit, toks[3]);
             const InsnId slot = appendInsn(insn);
             if (Result<void, core::CodeDomError> bd = unit.bindBranch(slot, id); bd.is_err()) {
-                return Err(fail(AsmErrorCode::BadLabel, ln, toks[3]));
+                return Err(fail(mapCodeDom(bd.unwrap_err()), ln, toks[3]));
             }
             handled = false;
             break;
@@ -1786,14 +1817,14 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
         if (Result<void, core::CodeDomError> r =
                 unit.addTry(ctx.label(unit, c.start), ctx.label(unit, c.end), hidx);
             r.is_err()) {
-            return Err(fail(AsmErrorCode::BadLabel, ctx.line, c.start));
+            return Err(fail(mapCodeDom(r.unwrap_err()), ctx.line, c.start));
         }
     }
 
     // commit：lower（payload 对齐）+ 产物。
     const Result<core::MethodBody, core::CodeDomError> body = ctx.editor->commit();
     if (body.is_err()) {
-        return Err(fail(AsmErrorCode::Overflow, ctx.line,
+        return Err(fail(mapCodeDom(body.unwrap_err()), ctx.line,
                         core::to_string(body.unwrap_err())));
     }
     MethodBody out = std::move(body).unwrap();
@@ -1829,7 +1860,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             }
             const Result<ca::u32, core::CodeDomError> a = unit.addressOf(after);
             if (a.is_err()) {
-                return Err(fail(AsmErrorCode::BadLabel, ctx.line, "anchor"));
+                return Err(fail(mapCodeDom(a.unwrap_err()), ctx.line, "anchor"));
             }
             return Ok(a.unwrap() + unit.get(after).width);
         };

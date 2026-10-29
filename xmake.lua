@@ -120,6 +120,10 @@ target("libsmali")
 
     if is_plat("windows") then
         add_cxflags("/utf-8", {tools = "cl"})
+        -- smali 错误桥的穷举约束：switch 漏枚举值即编译错误。
+        add_cxflags("/we4062", {tools = "cl"})
+    else
+        add_cxxflags("-Werror=switch")
     end
 
     -- ASan 全闭包要求：与 libdex 同步插桩（见 libdex 目标内的注释）。
