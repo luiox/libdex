@@ -616,14 +616,71 @@ private:
 
     void refreshInternIndex();
 
+    /// add* 家族的表内查重索引：内容键 → 表下标。失效口径与 internIndex_
+    /// 相同：表大小与记录不符时整体重建；直接改写表条目内容是调用方违约。
+    struct ProtoKey
+    {
+        ca::u32 shortyIdx = 0;
+        ca::u32 returnTypeIdx = 0;
+        std::vector<ca::u32> params;
+
+        bool operator==(const ProtoKey& other) const noexcept
+        {
+            return shortyIdx == other.shortyIdx && returnTypeIdx == other.returnTypeIdx
+                   && params == other.params;
+        }
+    };
+    struct ProtoKeyHash
+    {
+        ca::usize operator()(const ProtoKey& key) const noexcept
+        {
+            ca::usize h = 14695981039346656037ull;
+            const auto mix = [&h](ca::u32 v) {
+                h ^= v;
+                h *= 1099511628211ull;
+            };
+            mix(key.shortyIdx);
+            mix(key.returnTypeIdx);
+            for (const ca::u32 p : key.params) {
+                mix(p);
+            }
+            return h;
+        }
+    };
+    struct ByteVecHash
+    {
+        ca::usize operator()(const std::vector<ca::u8>& bytes) const noexcept
+        {
+            ca::usize h = 14695981039346656037ull;
+            for (const ca::u8 b : bytes) {
+                h ^= b;
+                h *= 1099511628211ull;
+            }
+            return h;
+        }
+    };
+
+    void refreshIdIndexes();
+    void ensureIdIndexes();
+
     ca::core::Bytes sourceBytes_;  ///< 源字节存储（自有 copy 或静态借用）
     /// 自有 string_data_item 块；deque保证追加时既有视图地址不变。
     std::deque<std::vector<ca::u8>> ownedStrings_;
     std::unordered_map<std::string, ca::u32> internIndex_;
     ca::usize internIndexedCount_ = 0;
+    std::unordered_map<ca::u32, ca::u32> typeIndexByKey_;
+    std::unordered_map<ProtoKey, ca::u32, ProtoKeyHash> protoIndexByKey_;
+    std::unordered_map<ca::u64, ca::u32> fieldIndexByKey_;
+    std::unordered_map<ca::u64, ca::u32> methodIndexByKey_;
+    ca::usize typeIndexedCount_ = 0;
+    ca::usize protoIndexedCount_ = 0;
+    ca::usize fieldIndexedCount_ = 0;
+    ca::usize methodIndexedCount_ = 0;
     /// 自有 type_list 池：已编码的 type_list 字节（u32 计数 + u16 LE 条目），
     /// 由 addTypeList/addProtoWithParams/setClassInterfaces 填充。
     std::deque<std::vector<ca::u8>> ownedTypeLists_;
+    std::unordered_map<std::vector<ca::u8>, ca::u32, ByteVecHash> typeListIndexByKey_;
+    ca::usize typeListIndexedCount_ = 0;
     /// 自有注解项池（按内容去重）与逐类覆盖表。
     std::deque<AnnotationItem> ownedAnnotationItems_;
     std::map<ca::u32, AnnotationAttachments> ownedAnnotations_;
