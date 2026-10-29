@@ -295,26 +295,26 @@ public:
 
     // ---- 源字节：lazy 与 copy-through 保真的共同前提 ----
 
-    bool hasSource() const noexcept { return !sourceBytes_.is_empty(); }
+    bool hasSource() const noexcept { return !pools_.sourceBytes.is_empty(); }
 
     /// @brief 整份源字节的零拷贝视图。
     ByteSlice source() const noexcept
     {
-        return sourceBytes_.is_empty()
+        return pools_.sourceBytes.is_empty()
                    ? ByteSlice{}
-                   : ByteSlice{sourceBytes_.as_ptr(), sourceBytes_.len()};
+                   : ByteSlice{pools_.sourceBytes.as_ptr(), pools_.sourceBytes.len()};
     }
 
     /// @brief libca Bytes 形态的源字节（共享存储），供需要随机访问的消费者
     ///        用 @ref Reader::at 切片。
-    const ca::core::Bytes& sourceBytes() const noexcept { return sourceBytes_; }
+    const ca::core::Bytes& sourceBytes() const noexcept { return pools_.sourceBytes; }
 
     /// @brief 复制入参字节进模型（libca Bytes 自有存储）。重复调用会使既有
     ///        span/视图失效，仅由 reader 调用。
     void adoptSource(ByteSlice bytes);
 
     /// @brief 接管一份已有的 libca Bytes（共享存储，不复制内容）。
-    void adoptSource(ca::core::Bytes bytes) noexcept { sourceBytes_ = std::move(bytes); }
+    void adoptSource(ca::core::Bytes bytes) noexcept { pools_.sourceBytes = std::move(bytes); }
 
     /// @brief 借用调用方字节（不复制）。调用方必须保证字节在模型存活期内有效。
     void adoptBorrowedSource(ByteSlice bytes) noexcept;
@@ -465,13 +465,13 @@ public:
     /// @brief 自有注解项池的条目数（越界判断用）。
     ca::u32 ownedAnnotationItemCount() const noexcept
     {
-        return static_cast<ca::u32>(ownedAnnotationItems_.size());
+        return static_cast<ca::u32>(pools_.annotationItems.size());
     }
 
     /// @brief 逐类注解覆盖表（classDefIdx → 附件），供 builder 与查询用。
     const std::map<ca::u32, AnnotationAttachments>& annotationAttachments() const noexcept
     {
-        return ownedAnnotations_;
+        return edits_.annotations;
     }
 
     /// @brief 覆盖一个静态字段的初值；重建时替换源数组槽位或新增字段的默认值。
@@ -489,7 +489,7 @@ public:
     const std::map<ca::u32, std::map<ca::u32, EncodedValue>>& staticFieldValueEdits()
         const noexcept
     {
-        return staticValueEdits_;
+        return edits_.staticValues;
     }
 
     /// @brief 自有 type_list 的零拷贝视图；下标越界返回 size=0、entries=nullptr。
@@ -588,11 +588,6 @@ private:
         std::unique_ptr<T> item;
     };
 
-    template <typename T>
-    Result<const T*, ReadError> decodeLazy(std::unordered_map<ca::u32, LazyItem<T>>& cache,
-                                           ca::u32 offset,
-                                           Result<T, ReadError> (*decode)(ByteSlice, ca::u32));
-
     struct LazyString
     {
         enum class State : ca::u8 { Untouched, Decoded, Failed };
@@ -611,13 +606,8 @@ private:
         std::unique_ptr<ClassData> data;  ///< Decoded 且类无 class_data 时为 nullptr
     };
 
-    Result<std::unique_ptr<ClassData>, ReadError> decodeClassData(ca::u32 offset);
-    Result<std::unique_ptr<CodeItem>, ReadError> decodeCodeItem(ca::u32 offset);
-
-    void refreshInternIndex();
-
-    /// add* 家族的表内查重索引：内容键 → 表下标。失效口径与 internIndex_
-    /// 相同：表大小与记录不符时整体重建；直接改写表条目内容是调用方违约。
+    /// add* 家族的表内查重键。失效口径与 stringIntern 相同：表大小与
+    /// 记录不符时整体重建；直接改写表条目内容是调用方违约。
     struct ProtoKey
     {
         ca::u32 shortyIdx = 0;
@@ -660,47 +650,72 @@ private:
         }
     };
 
+    /// @brief 自有存储池：编辑追加的字符串/type_list/注解项与其查重索引。
+    ///
+    /// deque 存块保证追加时既有视图地址不变。
+    struct Pools
+    {
+        ca::core::Bytes sourceBytes;  ///< 源字节存储（自有 copy 或静态借用）
+        std::deque<std::vector<ca::u8>> strings;                  ///< string_data 块
+        std::unordered_map<std::string, ca::u32> stringIntern;
+        ca::usize stringInternedCount = 0;
+        std::unordered_map<ca::u32, ca::u32> typeIndexByKey;
+        std::unordered_map<ProtoKey, ca::u32, ProtoKeyHash> protoIndexByKey;
+        std::unordered_map<ca::u64, ca::u32> fieldIndexByKey;
+        std::unordered_map<ca::u64, ca::u32> methodIndexByKey;
+        ca::usize typeIndexedCount = 0;
+        ca::usize protoIndexedCount = 0;
+        ca::usize fieldIndexedCount = 0;
+        ca::usize methodIndexedCount = 0;
+        /// 自有 type_list 池：已编码字节（u32 计数 + u16 LE 条目），
+        /// 由 addTypeList/addProtoWithParams/setClassInterfaces 填充。
+        std::deque<std::vector<ca::u8>> typeLists;
+        std::unordered_map<std::vector<ca::u8>, ca::u32, ByteVecHash> typeListIndexByKey;
+        ca::usize typeListIndexedCount = 0;
+        std::deque<AnnotationItem> annotationItems;  ///< 按内容去重的注解项
+    };
+
+    /// @brief 懒解码缓存：数据区条目 offset → 解码结果，同偏移只解一次。
+    struct Caches
+    {
+        std::vector<LazyString> strings;
+        std::vector<LazyClassData> classDatas;
+        std::unordered_map<ca::u32, std::unique_ptr<CodeItem>> code;
+        std::unordered_map<ca::u32, ReadError> codeFailures;
+        std::unordered_map<ca::u32, LazyItem<AnnotationsDirectory>> annotationsDirectory;
+        std::unordered_map<ca::u32, LazyItem<AnnotationSetItem>> annotationSet;
+        std::unordered_map<ca::u32, LazyItem<AnnotationSetRefList>> annotationSetRef;
+        std::unordered_map<ca::u32, LazyItem<AnnotationItem>> annotationItem;
+        std::unordered_map<ca::u32, LazyItem<EncodedArrayItem>> encodedArray;
+        std::unordered_map<ca::u32, LazyItem<DebugInfo>> debugInfo;
+    };
+
+    /// @brief 编辑层覆盖表：按 classDefIdx/fieldIdx 粒度记录写侧改动，重建时套用。
+    struct Edits
+    {
+        /// 逐类注解覆盖（项体存 pools.annotationItems）。
+        std::map<ca::u32, AnnotationAttachments> annotations;
+        /// 静态初值覆盖：classDefIdx → fieldIdx → 值（已归一化）。
+        std::map<ca::u32, std::map<ca::u32, EncodedValue>> staticValues;
+    };
+
+    template <typename T>
+    Result<const T*, ReadError> decodeLazy(std::unordered_map<ca::u32, LazyItem<T>>& cache,
+                                           ca::u32 offset,
+                                           Result<T, ReadError> (*decode)(ByteSlice, ca::u32));
+
+    Result<std::unique_ptr<ClassData>, ReadError> decodeClassData(ca::u32 offset);
+    Result<std::unique_ptr<CodeItem>, ReadError> decodeCodeItem(ca::u32 offset);
+
+    void refreshInternIndex();
     void refreshIdIndexes();
     void ensureIdIndexes();
 
-    ca::core::Bytes sourceBytes_;  ///< 源字节存储（自有 copy 或静态借用）
-    /// 自有 string_data_item 块；deque保证追加时既有视图地址不变。
-    std::deque<std::vector<ca::u8>> ownedStrings_;
-    std::unordered_map<std::string, ca::u32> internIndex_;
-    ca::usize internIndexedCount_ = 0;
-    std::unordered_map<ca::u32, ca::u32> typeIndexByKey_;
-    std::unordered_map<ProtoKey, ca::u32, ProtoKeyHash> protoIndexByKey_;
-    std::unordered_map<ca::u64, ca::u32> fieldIndexByKey_;
-    std::unordered_map<ca::u64, ca::u32> methodIndexByKey_;
-    ca::usize typeIndexedCount_ = 0;
-    ca::usize protoIndexedCount_ = 0;
-    ca::usize fieldIndexedCount_ = 0;
-    ca::usize methodIndexedCount_ = 0;
-    /// 自有 type_list 池：已编码的 type_list 字节（u32 计数 + u16 LE 条目），
-    /// 由 addTypeList/addProtoWithParams/setClassInterfaces 填充。
-    std::deque<std::vector<ca::u8>> ownedTypeLists_;
-    std::unordered_map<std::vector<ca::u8>, ca::u32, ByteVecHash> typeListIndexByKey_;
-    ca::usize typeListIndexedCount_ = 0;
-    /// 自有注解项池（按内容去重）与逐类覆盖表。
-    std::deque<AnnotationItem> ownedAnnotationItems_;
-    std::map<ca::u32, AnnotationAttachments> ownedAnnotations_;
-    /// 静态初值覆盖：classDefIdx → fieldIdx → 值（已归一化）。
-    std::map<ca::u32, std::map<ca::u32, EncodedValue>> staticValueEdits_;
+    Pools pools_;
+    Caches caches_;
+    Edits edits_;
     ParseState state_ = ParseState::Validated;
     Diagnostics diag_;
-
-    std::vector<LazyString> stringCache_;
-    std::vector<LazyClassData> classDataCache_;
-    std::unordered_map<ca::u32, std::unique_ptr<CodeItem>> codeCache_;
-    std::unordered_map<ca::u32, ReadError> codeFailures_;
-
-    /// @brief 数据区条目的 offset → 解码结果缓存（同一偏移只解一次）。
-    std::unordered_map<ca::u32, LazyItem<AnnotationsDirectory>> annotationsDirectoryCache_;
-    std::unordered_map<ca::u32, LazyItem<AnnotationSetItem>> annotationSetCache_;
-    std::unordered_map<ca::u32, LazyItem<AnnotationSetRefList>> annotationSetRefCache_;
-    std::unordered_map<ca::u32, LazyItem<AnnotationItem>> annotationItemCache_;
-    std::unordered_map<ca::u32, LazyItem<EncodedArrayItem>> encodedArrayCache_;
-    std::unordered_map<ca::u32, LazyItem<DebugInfo>> debugInfoCache_;
 };
 
 }   // namespace dex::core
