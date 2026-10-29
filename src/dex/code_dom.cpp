@@ -33,18 +33,6 @@ std::unordered_map<ca::u32, ca::u32> addressIndex(const std::vector<Insn>& insns
     return byAddr;
 }
 
-/// @brief 31t 操作码对应的 payload 种类；decodeInsns 只在 payload 伪指令上
-/// 标 payloadKind，31t 指令本身要按 opcode 判。
-PayloadKind switchKindOf(ca::u8 opcode) noexcept
-{
-    switch (opcode) {
-    case 0x2b: return PayloadKind::PackedSwitch;
-    case 0x2c: return PayloadKind::SparseSwitch;
-    case 0x2d: return PayloadKind::FillArrayData;
-    default: return PayloadKind::None;
-    }
-}
-
 }   // namespace
 
 const char* to_string(CodeDomError e) noexcept

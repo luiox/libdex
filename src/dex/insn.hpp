@@ -45,14 +45,6 @@ enum class InsnEncodeError {
 /// @brief 错误码的可读文本。
 const char* to_string(InsnEncodeError e) noexcept;
 
-/// @brief payload 伪指令种类。
-enum class PayloadKind : ca::u8 {
-    None = 0,
-    PackedSwitch,
-    SparseSwitch,
-    FillArrayData,
-};
-
 /// @brief 单条 DEX 指令（含 payload 伪指令）。
 ///
 /// 寄存器操作数统一放在 @ref registers，@ref registerCount 表示有效个数：
