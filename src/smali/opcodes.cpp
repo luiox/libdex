@@ -15,8 +15,8 @@ constexpr Mnemonic kTable[] = {
     {0x0e, "return-void", core::InsnFormat::F10x},
     // 12x
     {0x01, "move", core::InsnFormat::F12x},
-    {0x06, "move-wide", core::InsnFormat::F12x},
-    {0x09, "move-object", core::InsnFormat::F12x},
+    {0x04, "move-wide", core::InsnFormat::F12x},
+    {0x07, "move-object", core::InsnFormat::F12x},
     {0x21, "array-length", core::InsnFormat::F12x},
     // 11x
     {0x0a, "move-result", core::InsnFormat::F11x},
@@ -66,12 +66,12 @@ constexpr Mnemonic kTable[] = {
     {0x18, "const-wide", core::InsnFormat::F51l},
     // 22x
     {0x02, "move/from16", core::InsnFormat::F22x},
-    {0x04, "move-wide/from16", core::InsnFormat::F22x},
-    {0x07, "move-object/from16", core::InsnFormat::F22x},
+    {0x05, "move-wide/from16", core::InsnFormat::F22x},
+    {0x08, "move-object/from16", core::InsnFormat::F22x},
     // 32x
     {0x03, "move/16", core::InsnFormat::F32x},
-    {0x05, "move-wide/16", core::InsnFormat::F32x},
-    {0x08, "move-object/16", core::InsnFormat::F32x},
+    {0x06, "move-wide/16", core::InsnFormat::F32x},
+    {0x09, "move-object/16", core::InsnFormat::F32x},
     // 22c
     {0x1f, "check-cast", core::InsnFormat::F21c},
     {0x20, "instance-of", core::InsnFormat::F22c},
@@ -260,6 +260,29 @@ constexpr Mnemonic kTable[] = {
 };
 
 constexpr ca::usize kTableSize = sizeof(kTable) / sizeof(kTable[0]);
+
+constexpr bool cstrEq(const char* a, const char* b)
+{
+    while (*a != '\0' && *a == *b) {
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+// 名字与格式必须与 core 的 kOpcodes 一致；core 侧改了这里不同步，
+// 编译期直接失败，不再依赖人工对表。
+static_assert([]() constexpr {
+    for (const auto& m : kTable) {
+        const core::OpcodeInfo& info = core::opcodeInfo(m.opcode);
+        if (info.format != m.format || !cstrEq(info.name, m.name)) {
+            return false;
+        }
+    }
+    return true;
+}(),
+             "smali kTable 与 core kOpcodes 漂移：名字或格式不一致");
+
 
 struct FlagName
 {
