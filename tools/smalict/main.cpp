@@ -15,8 +15,8 @@
 #include <string>
 #include <vector>
 
-#include "dex/core/builder.hpp"
-#include "dex/core/reader.hpp"
+#include "dex/builder.hpp"
+#include "dex/reader.hpp"
 #include "smali/assemble.hpp"
 #include "smali/disassemble.hpp"
 

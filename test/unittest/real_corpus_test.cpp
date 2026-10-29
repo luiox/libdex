@@ -2,8 +2,7 @@
 /// @brief       真实 dex 语料门控测试（LIBDEX_REAL_DEX_DIR）。
 ///
 /// 语料不在仓内：环境变量指向一个目录时，逐个 .dex 做解析 + 未修改往返 +
-/// 摘要 + 全方法体指令解码；变量缺席或目录为空时 skip，而不是硬失败（与
-/// libjbc 真实语料政策同型）。
+/// 摘要 + 全方法体指令解码；变量缺席或目录为空时 skip，而不是硬失败。
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>

@@ -1,7 +1,7 @@
 // vacuum 闭包测试：未引用表项被剔除、引用点全部重写、二次重建固定。
-#include "dex/core/builder.hpp"
-#include "dex/core/reader.hpp"
-#include "dex/core/vacuum.hpp"
+#include "dex/builder.hpp"
+#include "dex/reader.hpp"
+#include "dex/vacuum.hpp"
 #include "smali/assemble.hpp"
 #include "smali/disassemble.hpp"
 #include "dex_fixture.hpp"

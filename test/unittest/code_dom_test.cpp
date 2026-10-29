@@ -1,13 +1,13 @@
 /// @file        code_dom_test.cpp
 /// @brief       CodeUnit：编辑原语、label 解析、payload 对齐、try/handler、
 ///              promote/lower 往返与句柄纪律。
-#include "dex/core/code_dom.hpp"
+#include "dex/code_dom.hpp"
 
 #include <vector>
 
-#include "dex/core/dex_file.hpp"
-#include "dex/core/insn.hpp"
-#include "dex/core/reader.hpp"
+#include "dex/dex_file.hpp"
+#include "dex/insn.hpp"
+#include "dex/reader.hpp"
 
 #include <gtest/gtest.h>
 

@@ -12,7 +12,7 @@
 
 #include "libca/core/datatype.hpp"
 
-#include "dex/core/opcode.hpp"
+#include "dex/opcode.hpp"
 
 namespace dex::smali {
 

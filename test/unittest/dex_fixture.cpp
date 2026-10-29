@@ -5,7 +5,7 @@
 #include <cstring>
 #include <string_view>
 
-#include "dex/core/integrity.hpp"
+#include "dex/integrity.hpp"
 
 namespace dex_test {
 

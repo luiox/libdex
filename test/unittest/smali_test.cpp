@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "dex/core/reader.hpp"
+#include "dex/reader.hpp"
 
 #include <gtest/gtest.h>
 

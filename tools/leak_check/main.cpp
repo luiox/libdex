@@ -15,14 +15,14 @@
 #include <string>
 #include <vector>
 
-#include "dex/core/analysis.hpp"
-#include "dex/core/builder.hpp"
-#include "dex/core/dex_file.hpp"
-#include "dex/core/error.hpp"
-#include "dex/core/insn.hpp"
-#include "dex/core/reader.hpp"
-#include "dex/core/writer.hpp"
-#include "dex/type/descriptor.hpp"
+#include "dex/analysis.hpp"
+#include "dex/builder.hpp"
+#include "dex/dex_file.hpp"
+#include "dex/error.hpp"
+#include "dex/insn.hpp"
+#include "dex/reader.hpp"
+#include "dex/writer.hpp"
+#include "dex/descriptor.hpp"
 #include "smali/disassemble.hpp"
 #include "smali/opcodes.hpp"
 
@@ -58,7 +58,7 @@ void SmaliProbeInsnCheck(DexFile& dex, const EncodedMethod& m)
     }
 }
 
-/// @brief 帧分析走查（M4 路径进 ASan 门）。
+/// @brief 帧分析走查（纳入 ASan 门）。
 void AnalyzeFramesProbe(DexFile& dex, const EncodedMethod& m)
 {
     if (m.codeOff == 0) {

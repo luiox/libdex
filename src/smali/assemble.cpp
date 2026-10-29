@@ -13,13 +13,13 @@
 
 #include "jstr/conversion.hpp"
 
-#include "dex/core/annotation.hpp"
-#include "dex/core/code_item.hpp"
-#include "dex/core/code_dom.hpp"
-#include "dex/core/encoded_value.hpp"
-#include "dex/core/error.hpp"
-#include "dex/core/method_editor.hpp"
-#include "dex/core/debug_info.hpp"
+#include "dex/annotation.hpp"
+#include "dex/code_item.hpp"
+#include "dex/code_dom.hpp"
+#include "dex/encoded_value.hpp"
+#include "dex/error.hpp"
+#include "dex/method_editor.hpp"
+#include "dex/debug_info.hpp"
 #include "smali/opcodes.hpp"
 
 namespace dex::smali {

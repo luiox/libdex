@@ -1,12 +1,12 @@
 /// @file        method_editor_test.cpp
 /// @brief       MethodEditor 门面与从零构建 dex（createEmpty → buildDex）。
-#include "dex/core/method_editor.hpp"
+#include "dex/method_editor.hpp"
 
 #include <vector>
 
-#include "dex/core/builder.hpp"
-#include "dex/core/reader.hpp"
-#include "dex/core/writer.hpp"
+#include "dex/builder.hpp"
+#include "dex/reader.hpp"
+#include "dex/writer.hpp"
 
 #include <gtest/gtest.h>
 
