@@ -20,7 +20,6 @@
 #include "dex/error.hpp"
 #include "dex/insn_edit.hpp"
 #include "dex/method_editor.hpp"
-#include "dex/debug_info.hpp"
 #include "smali/opcodes.hpp"
 
 namespace dex::smali {
@@ -70,6 +69,7 @@ AsmErrorCode mapCodeDom(core::CodeDomError e) noexcept
         case core::CodeDomError::MisalignedPayload: return AsmErrorCode::Overflow;
         case core::CodeDomError::BadTryRegion: return AsmErrorCode::BadLabel;
         case core::CodeDomError::BadShape: return AsmErrorCode::ModelError;
+        case core::CodeDomError::BadDebugInfo: return AsmErrorCode::Overflow;
     }
     return AsmErrorCode::ModelError;
 }
@@ -773,17 +773,6 @@ R<EncodedValue> parseValue(DexFile& dex, const std::string& text, ca::u32 line)
 
 // ---- 方法体上下文 ----
 
-struct DebugEvent
-{
-    enum Kind { Line, LocalStart, LocalStartExt, LocalEnd, LocalRestart, Prologue, Epilogue } kind;
-    core::InsnId after{nullptr, core::kEndSlot, 0};  // 锚点：此槽之后（end = 流末）
-    ca::i32 line = 0;
-    ca::u32 reg = 0;
-    ca::u32 nameIdx = 0;
-    ca::u32 typeIdx = 0;
-    ca::u32 sigIdx = 0;
-};
-
 }   // namespace
 
 }   // namespace dex::smali
@@ -905,10 +894,7 @@ struct MethodCtx
     std::unique_ptr<MethodEditor> editor;
     std::unordered_map<std::string, LabelId> labels;
     std::vector<std::string> pendingLabels;
-    InsnId lastAppended{nullptr, core::kEndSlot, 0};
-    std::vector<DebugEvent> events;
-    std::vector<std::string> paramNames;
-    std::vector<DebugEvent::Kind> markers;  // prologue/epilogue 暂存
+    std::vector<ca::u32> debugParamNames;  ///< 已 intern 的参数名；kNoIndex = 无名
     struct CatchLine
     {
         std::string typeDesc;
@@ -1026,9 +1012,8 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             : 0u;
 
     const auto appendInsn = [&](Insn insn) -> InsnId {
-        const InsnId id = unit.append(std::move(insn));
+        const InsnId id = ctx.editor->append(std::move(insn));
         ctx.bindPending(unit, id);
-        ctx.lastAppended = id;
         return id;
     };
 
@@ -1058,27 +1043,34 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             for (std::size_t i = 1; i < toks.size(); ++i) {
                 if (toks[i].size() >= 2 && toks[i].front() == '"' &&
                     toks[i].back() == '"') {
-                    ctx.paramNames.push_back(toks[i].substr(1, toks[i].size() - 2));
+                    const std::string name = toks[i].substr(1, toks[i].size() - 2);
+                    if (name.empty()) {
+                        ctx.debugParamNames.push_back(MethodEditor::kNoIndex);
+                        continue;
+                    }
+                    R<ca::u32> idx = internString(dex, name, ln);
+                    if (idx.is_err()) {
+                        return Err(idx.unwrap_err());
+                    }
+                    ctx.debugParamNames.push_back(idx.unwrap());
                 }
             }
             continue;
         }
         if (t0 == ".prologue" || t0 == ".epilogue") {
-            DebugEvent e;
-            e.kind = t0 == ".prologue" ? DebugEvent::Prologue : DebugEvent::Epilogue;
-            e.after = ctx.lastAppended;
-            ctx.events.push_back(e);
+            if (t0 == ".prologue") {
+                ctx.editor->debugPrologueEnd();
+            } else {
+                ctx.editor->debugEpilogueBegin();
+            }
             continue;
         }
         if (t0 == ".line") {
             if (toks.size() != 2) {
                 return Err(fail(AsmErrorCode::Syntax, ln, raw));
             }
-            DebugEvent e;
-            e.kind = DebugEvent::Line;
-            e.line = static_cast<ca::i32>(std::strtol(toks[1].c_str(), nullptr, 10));
-            e.after = ctx.lastAppended;
-            ctx.events.push_back(e);
+            ctx.editor->debugLine(
+                static_cast<ca::i32>(std::strtol(toks[1].c_str(), nullptr, 10)));
             continue;
         }
         // ".end local"/".restart local" 含空格，按空白切分后 t0 只是
@@ -1088,19 +1080,19 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             localDir = t0 + " local";
         }
         if (localDir == ".local" || localDir == ".end local" || localDir == ".restart local") {
-            DebugEvent e;
-            e.kind = localDir == ".local"        ? DebugEvent::LocalStart
-                     : localDir == ".end local" ? DebugEvent::LocalEnd
-                                                : DebugEvent::LocalRestart;
+            ca::u32 reg = 0;
+            ca::u32 nameIdx = MethodEditor::kNoIndex;
+            ca::u32 typeIdx = 0;
+            ca::u32 sigIdx = MethodEditor::kNoIndex;
             if (localDir == ".local") {
                 if (toks.size() < 3) {
                     return Err(fail(AsmErrorCode::Syntax, ln, raw));
                 }
-                R<ca::u16> reg = parseReg(toks[1], firstParamReg, registersSize, ln);
-                if (reg.is_err()) {
-                    return Err(reg.unwrap_err());
+                R<ca::u16> regR = parseReg(toks[1], firstParamReg, registersSize, ln);
+                if (regR.is_err()) {
+                    return Err(regR.unwrap_err());
                 }
-                e.reg = reg.unwrap();
+                reg = regR.unwrap();
                 const std::size_t nameStart = raw.find('"');
                 const std::size_t nameEnd = raw.find('"', nameStart + 1);
                 if (nameStart == std::string::npos || nameEnd == std::string::npos) {
@@ -1129,15 +1121,13 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                 if (tIdx.is_err()) {
                     return Err(fail(AsmErrorCode::BadRef, ln, typeDesc));
                 }
-                e.typeIdx = tIdx.unwrap();
-                if (name.empty()) {
-                    e.nameIdx = DexFile::kNoIndex;
-                } else {
+                typeIdx = tIdx.unwrap();
+                if (!name.empty()) {
                     R<ca::u32> n = internString(dex, name, ln);
                     if (n.is_err()) {
                         return Err(n.unwrap_err());
                     }
-                    e.nameIdx = n.unwrap();
+                    nameIdx = n.unwrap();
                 }
                 if (!sigStr.empty()) {
                     std::string sig;
@@ -1146,25 +1136,27 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                             sig.push_back(c);
                         }
                     }
-                    e.kind = DebugEvent::LocalStartExt;
                     R<ca::u32> sg = internString(dex, sig, ln);
                     if (sg.is_err()) {
                         return Err(sg.unwrap_err());
                     }
-                    e.sigIdx = sg.unwrap();
+                    sigIdx = sg.unwrap();
                 }
+                ctx.editor->debugStartLocal(reg, nameIdx, typeIdx, sigIdx);
             } else {
                 if (toks.size() != 3) {
                     return Err(fail(AsmErrorCode::Syntax, ln, raw));
                 }
-                R<ca::u16> reg = parseReg(toks[2], firstParamReg, registersSize, ln);
-                if (reg.is_err()) {
-                    return Err(reg.unwrap_err());
+                R<ca::u16> regR = parseReg(toks[2], firstParamReg, registersSize, ln);
+                if (regR.is_err()) {
+                    return Err(regR.unwrap_err());
                 }
-                e.reg = reg.unwrap();
+                if (localDir == ".end local") {
+                    ctx.editor->debugEndLocal(regR.unwrap());
+                } else {
+                    ctx.editor->debugRestartLocal(regR.unwrap());
+                }
             }
-            e.after = ctx.lastAppended;
-            ctx.events.push_back(e);
             continue;
         }
         if (t0 == ".catch" || t0 == ".catchall") {
@@ -1340,7 +1332,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                 for (const std::string& n : targetNames) {
                     targets.push_back(ctx.label(unit, n));
                 }
-                payloadSlot = unit.append(built.insn, std::move(built.storage));
+                payloadSlot = ctx.editor->append(built.insn, std::move(built.storage));
             } else if (t0 == ".sparse-switch") {
                 std::vector<ca::i32> keys;
                 std::vector<ca::i32> zeros;
@@ -1372,7 +1364,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                 for (const std::string& n : targetNames) {
                     targets.push_back(ctx.label(unit, n));
                 }
-                payloadSlot = unit.append(built.insn, std::move(built.storage));
+                payloadSlot = ctx.editor->append(built.insn, std::move(built.storage));
             } else {
                 // .fill-array-data + .array-data w ... .end array-data
                 while (bi + 1 < bodyLines.size() &&
@@ -1411,7 +1403,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                     return Err(fail(mapInsnEncode(p.unwrap_err()), ln, "fill payload"));
                 }
                 core::PayloadInsn built = std::move(p).unwrap();
-                payloadSlot = unit.append(built.insn, std::move(built.storage));
+                payloadSlot = ctx.editor->append(built.insn, std::move(built.storage));
             }
             ctx.bindPending(unit, payloadSlot);
             if (Result<void, core::CodeDomError> b =
@@ -1420,7 +1412,6 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
                 return Err(fail(mapCodeDom(b.unwrap_err()), ln, payloadLabel));
             }
             ctx.pendingSwitch = InsnId{nullptr, core::kEndSlot, 0};
-            ctx.lastAppended = payloadSlot;
             continue;
         }
 
@@ -1822,7 +1813,8 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
         }
     }
 
-    // commit：lower（payload 对齐）+ 产物。
+    // commit：lower（payload 对齐）+ debug 事件降级 + 产物。
+    ctx.editor->setDebugParamNames(std::move(ctx.debugParamNames));
     const Result<core::MethodBody, core::CodeDomError> body = ctx.editor->commit();
     if (body.is_err()) {
         return Err(fail(mapCodeDom(body.unwrap_err()), ctx.line,
@@ -1830,157 +1822,6 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
     }
     MethodBody out = std::move(body).unwrap();
 
-    // debug 事件 → ops（commit 后地址已定）。
-    if (!ctx.events.empty() || !ctx.paramNames.empty()) {
-        struct Resolved
-        {
-            ca::u32 addr;
-            int order;
-            DebugEvent::Kind kind;
-            ca::i32 line = 0;
-            ca::u32 reg = 0;
-            ca::u32 nameIdx = 0;
-            ca::u32 typeIdx = 0;
-            ca::u32 sigIdx = 0;
-        };
-        std::vector<Resolved> resolved;
-        // 流末地址 = 最后一条槽的地址+宽度；空体为 0。
-        ca::u32 totalEnd = 0;
-        {
-            InsnId it = unit.first();
-            while (unit.valid(it)) {
-                const Result<ca::u32, core::CodeDomError> a = unit.addressOf(it);
-                totalEnd = a.is_err() ? 0 : a.unwrap() + unit.get(it).width;
-                it = unit.next(it);
-            }
-        }
-        const auto addrAfter = [&](const InsnId& after) -> R<ca::u32> {
-            if (after.slot == core::kEndSlot) {
-                // kEndSlot 锚 = 尚无前驱指令（方法开头）→ 地址 0，而非流末。
-                return Ok(static_cast<ca::u32>(0));
-            }
-            const Result<ca::u32, core::CodeDomError> a = unit.addressOf(after);
-            if (a.is_err()) {
-                return Err(fail(mapCodeDom(a.unwrap_err()), ctx.line, "anchor"));
-            }
-            return Ok(a.unwrap() + unit.get(after).width);
-        };
-        for (const DebugEvent& e : ctx.events) {
-            R<ca::u32> a = addrAfter(e.after);
-            if (a.is_err()) {
-                return Err(a.unwrap_err());
-            }
-            resolved.push_back(Resolved{a.unwrap(), 0, e.kind, e.line, e.reg,
-                                        e.nameIdx, e.typeIdx, e.sigIdx});
-        }
-        std::stable_sort(resolved.begin(), resolved.end(),
-                         [](const Resolved& x, const Resolved& y) {
-                             if (x.addr != y.addr) {
-                                 return x.addr < y.addr;
-                             }
-                             return x.order < y.order;
-                         });
-
-        core::DebugInfo info;
-        for (const std::string& n : ctx.paramNames) {
-            if (n.empty()) {
-                info.parameterNames.push_back(DexFile::kNoIndex);
-                continue;
-            }
-            R<ca::u32> idx = internString(dex, n, ctx.line);
-            if (idx.is_err()) {
-                return Err(idx.unwrap_err());
-            }
-            info.parameterNames.push_back(idx.unwrap());
-        }
-        ca::u32 lastAddr = 0;
-        ca::i32 lastLine = 0;
-        bool haveLine = false;
-        for (const Resolved& e : resolved) {
-            if (haveLine && e.addr == lastAddr &&
-                e.kind == DebugEvent::Line && e.line == lastLine) {
-                continue;
-            }
-            if (e.kind == DebugEvent::Line) {
-                if (!haveLine) {
-                    info.lineStart = static_cast<ca::u32>(e.line);
-                    lastAddr = e.addr;
-                    lastLine = e.line;
-                    haveLine = true;
-                    continue;
-                }
-                // 地址差 + 行差 → special / AdvancePC+AdvanceLine。
-                const ca::u32 addrDiff = e.addr - lastAddr;
-                const ca::i32 lineDiff = e.line - lastLine;
-                if (addrDiff == 0) {
-                    core::DebugOp op;
-                    op.opcode = core::kDbgAdvanceLine;
-                    op.lineDiff = lineDiff;
-                    info.ops.push_back(op);
-                } else {
-                    const ca::u32 step = addrDiff > 16 ? 16 : addrDiff;
-                    const ca::i32 adj = static_cast<ca::i32>(step * 15 + (lineDiff + 4));
-                    if (lineDiff >= -4 && lineDiff <= 10 && adj >= 0 &&
-                        adj <= 245) {
-                        core::DebugOp op;
-                        op.opcode = static_cast<ca::u8>(core::kDbgFirstSpecial + adj);
-                        // special opcode 的语义字段必须与编码自洽（writeDebugInfo 校验）。
-                        op.addressDiff = core::debugSpecialAddressDiff(op.opcode);
-                        op.lineDiff = core::debugSpecialLineDiff(op.opcode);
-                        info.ops.push_back(op);
-                    } else {
-                        core::DebugOp pc;
-                        pc.opcode = core::kDbgAdvancePc;
-                        pc.addressDiff = addrDiff;
-                        info.ops.push_back(pc);
-                        core::DebugOp ln2;
-                        ln2.opcode = core::kDbgAdvanceLine;
-                        ln2.lineDiff = lineDiff;
-                        info.ops.push_back(ln2);
-                    }
-                }
-                lastAddr = e.addr;
-                lastLine = e.line;
-                continue;
-            }
-            core::DebugOp op;
-            switch (e.kind) {
-            case DebugEvent::LocalStart:
-            case DebugEvent::LocalStartExt:
-                op.opcode = e.kind == DebugEvent::LocalStart
-                                ? core::kDbgStartLocal
-                                : core::kDbgStartLocalExtended;
-                op.reg = e.reg;
-                op.nameIdx = e.nameIdx;
-                op.typeIdx = e.typeIdx;
-                op.sigIdx = e.sigIdx;
-                break;
-            case DebugEvent::LocalEnd:
-                op.opcode = core::kDbgEndLocal;
-                op.reg = e.reg;
-                break;
-            case DebugEvent::LocalRestart:
-                op.opcode = core::kDbgRestartLocal;
-                op.reg = e.reg;
-                break;
-            case DebugEvent::Prologue:
-                op.opcode = core::kDbgSetPrologueEnd;
-                break;
-            case DebugEvent::Epilogue:
-                op.opcode = core::kDbgSetEpilogueBegin;
-                break;
-            default:
-                continue;
-            }
-            info.ops.push_back(op);
-            lastAddr = e.addr;
-        }
-        Result<std::vector<ca::u8>, WriteError> bytes = core::writeDebugInfo(info);
-        if (bytes.is_err()) {
-            return Err(fail(AsmErrorCode::Overflow, ctx.line, "debug info"));
-        }
-        out.debugBytes = std::move(bytes).unwrap();
-    }
 
     // 注解项入池 + 挂载。
     if (!ctx.methodAnnotations.empty()) {

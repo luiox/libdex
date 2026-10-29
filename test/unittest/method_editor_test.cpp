@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "dex/builder.hpp"
+#include "dex/debug_info.hpp"
 #include "dex/reader.hpp"
 #include "dex/writer.hpp"
 
@@ -53,6 +54,33 @@ TEST(DexMethodEditor, CommitProducesInjectableBody)
     const Result<MethodBody, CodeDomError> again = editor.commit();
     ASSERT_TRUE(again.is_ok());
     EXPECT_EQ(again.unwrap().insns, body.unwrap().insns);
+}
+
+TEST(DexMethodEditor, CommitLowersDebugEvents)
+{
+    MethodEditor editor(2, 0, 0);
+    editor.append(const4(0, 1));
+    editor.debugLine(1);  // 锚 const/4 之后（地址 1）→ lineStart，不产 op
+    editor.append(returnVoid());
+    editor.debugStartLocal(0, 7, 8, MethodEditor::kNoIndex);  // 地址 2
+    editor.debugPrologueEnd();
+    editor.setDebugParamNames({MethodEditor::kNoIndex});
+
+    const Result<MethodBody, CodeDomError> body = editor.commit();
+    ASSERT_TRUE(body.is_ok());
+    ASSERT_FALSE(body.unwrap().debugBytes.empty());
+
+    const std::vector<ca::u8>& bytes = body.unwrap().debugBytes;
+    const Result<DebugInfo, ReadError> info =
+        readDebugInfo(ByteSlice{bytes.data(), bytes.size()}, 0);
+    ASSERT_TRUE(info.is_ok()) << to_string(info.unwrap_err());
+    EXPECT_EQ(info.unwrap().lineStart, 1u);
+    EXPECT_EQ(info.unwrap().parameterNames,
+              (std::vector<ca::u32>{MethodEditor::kNoIndex}));
+    ASSERT_EQ(info.unwrap().ops.size(), 2u);
+    EXPECT_EQ(info.unwrap().ops[0].opcode, kDbgStartLocal);
+    EXPECT_EQ(info.unwrap().ops[0].reg, 0u);
+    EXPECT_EQ(info.unwrap().ops[1].opcode, kDbgSetPrologueEnd);
 }
 
 TEST(DexMethodEditor, CommitFailsCleanlyOnDanglingLabel)

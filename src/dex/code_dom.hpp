@@ -39,6 +39,7 @@ enum class CodeDomError {
     MisalignedPayload, ///< 关闭自动对齐时 payload 落在奇地址
     BadTryRegion,      ///< try 区间为空/交叠/乱序，或 handler 下标悬垂
     BadShape,          ///< 操作与指令形状不符（非分支用 branchTo 等）
+    BadDebugInfo,      ///< debug 事件降级编码失败（写侧溢出等）
 };
 
 /// @brief 错误码的可读文本。
