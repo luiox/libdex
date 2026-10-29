@@ -47,6 +47,7 @@ const char* to_string(CodeDomError e) noexcept
     case CodeDomError::MisalignedPayload: return "payload on odd address";
     case CodeDomError::BadTryRegion: return "try region invalid";
     case CodeDomError::BadShape: return "operation does not fit instruction shape";
+    case CodeDomError::BadDebugInfo: return "debug info not encodable";
     }
     return "unknown";
 }
