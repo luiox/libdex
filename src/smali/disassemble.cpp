@@ -12,11 +12,11 @@
 
 #include "jstr/conversion.hpp"
 
-#include "dex/core/annotation.hpp"
-#include "dex/core/code_item.hpp"
-#include "dex/core/debug_info.hpp"
-#include "dex/core/encoded_value.hpp"
-#include "dex/core/insn.hpp"
+#include "dex/annotation.hpp"
+#include "dex/code_item.hpp"
+#include "dex/debug_info.hpp"
+#include "dex/encoded_value.hpp"
+#include "dex/insn.hpp"
 #include "smali/opcodes.hpp"
 
 namespace dex::smali {

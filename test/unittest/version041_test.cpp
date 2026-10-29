@@ -1,10 +1,10 @@
 // 041 标准 dex 写回：canonical 重建解除拒绝，container 字段按独立文件
 // 约定重置为 (file_size, 0)，header_size 扩到 0x78。增量路径对 041 保持
-// NotModeled（实物语料未到，见 corpus_040_041_notes）。
+// NotModeled（实物语料未到，待 ART oracle 复核）。
 #include <gtest/gtest.h>
 
-#include "dex/core/builder.hpp"
-#include "dex/core/reader.hpp"
+#include "dex/builder.hpp"
+#include "dex/reader.hpp"
 #include "dex_fixture.hpp"
 #include "smali/assemble.hpp"
 

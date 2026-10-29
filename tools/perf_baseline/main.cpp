@@ -1,8 +1,8 @@
 /// @file        main.cpp
 /// @brief       大文件性能基线：合成 10 万方法级 dex，计时 解析/走查/重建。
 ///
-/// 只防回归不激进优化（roadmap M5）。基线数字记账进 dev_plan.md；换机器
-/// 或换编译器后重跑本工具重新入账。
+/// 只防回归不激进优化；换机器或换编译器后重跑本工具，
+/// 与上次输出对比判断回归。
 ///
 /// DEX 格式 method_ids 上限 65536（u16），单文件不可能超——基线按 64K
 /// 方法近满表 + 大字符串池（近似真实大文件体量）计时。
@@ -14,10 +14,10 @@
 #include <string>
 #include <vector>
 
-#include "dex/core/builder.hpp"
-#include "dex/core/dex_file.hpp"
-#include "dex/core/reader.hpp"
-#include "dex/core/writer.hpp"
+#include "dex/builder.hpp"
+#include "dex/dex_file.hpp"
+#include "dex/reader.hpp"
+#include "dex/writer.hpp"
 
 using namespace dex::core;
 

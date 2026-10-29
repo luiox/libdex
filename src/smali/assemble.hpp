@@ -20,8 +20,8 @@
 
 #include "libca/core/result.hpp"
 
-#include "dex/core/builder.hpp"
-#include "dex/core/dex_file.hpp"
+#include "dex/builder.hpp"
+#include "dex/dex_file.hpp"
 
 namespace dex::smali {
 

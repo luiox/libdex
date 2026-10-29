@@ -11,7 +11,7 @@
 
 #include "libca/core/datatype.hpp"
 
-#include "dex/core/bytes.hpp"
+#include "dex/bytes.hpp"
 
 namespace dex_test {
 

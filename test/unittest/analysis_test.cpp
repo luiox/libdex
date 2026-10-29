@@ -9,9 +9,9 @@
 
 #include <gtest/gtest.h>
 
-#include "dex/core/analysis.hpp"
-#include "dex/core/builder.hpp"
-#include "dex/core/reader.hpp"
+#include "dex/analysis.hpp"
+#include "dex/builder.hpp"
+#include "dex/reader.hpp"
 #include "dex_fixture.hpp"
 #include "smali/assemble.hpp"
 #include "smali/disassemble.hpp"

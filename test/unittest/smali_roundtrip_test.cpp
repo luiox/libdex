@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "dex/core/builder.hpp"
-#include "dex/core/insn.hpp"
-#include "dex/core/reader.hpp"
+#include "dex/builder.hpp"
+#include "dex/insn.hpp"
+#include "dex/reader.hpp"
 
 #include <cstdio>
 

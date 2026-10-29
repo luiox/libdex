@@ -1,5 +1,5 @@
 -- libdex：DEX 字节核（L1）——单 DexFile lazy DOM + 保真写回。
--- 设计见 doc/design.md；契约与 libjbc core 同族。
+-- 设计见 doc/design.md。
 --
 -- 依赖：libca（luiox-repo git 直连包）与 libjstr（MUTF-8 容器）经包仓消费；
 -- gtest 仅测试态。libca 模块集取 luiox 家族统一超集，避免同一消费图内
@@ -83,8 +83,8 @@ target("libdex")
 
     add_deps("libca_core", "libca_str", "libca_crypto")
     add_packages("libjstr", {public = true})
-    add_files("src/dex/core/*.cpp", "src/dex/type/*.cpp")
-    add_headerfiles("src/(dex/**.hpp)")
+    add_files("src/dex/*.cpp")
+    add_headerfiles("src/(dex/*.hpp)")
     add_includedirs("src", {public = true})
 
     set_languages("cxx17")

@@ -9,25 +9,25 @@
 /// integrity 层：adler32 checksum 与 SHA-1 signature 的核对/重算工具。
 #pragma once
 
-#include "dex/core/annotation.hpp"
-#include "dex/core/builder.hpp"
-#include "dex/core/bytes.hpp"
-#include "dex/core/debug_info.hpp"
-#include "dex/core/dex_file.hpp"
-#include "dex/core/encoded_value.hpp"
-#include "dex/core/error.hpp"
-#include "dex/core/insn.hpp"
-#include "dex/core/integrity.hpp"
-#include "dex/core/leb128.hpp"
-#include "dex/core/opcode.hpp"
-#include "dex/core/reader.hpp"
-#include "dex/core/writer.hpp"
+#include "dex/annotation.hpp"
+#include "dex/builder.hpp"
+#include "dex/bytes.hpp"
+#include "dex/debug_info.hpp"
+#include "dex/dex_file.hpp"
+#include "dex/encoded_value.hpp"
+#include "dex/error.hpp"
+#include "dex/insn.hpp"
+#include "dex/integrity.hpp"
+#include "dex/leb128.hpp"
+#include "dex/opcode.hpp"
+#include "dex/reader.hpp"
+#include "dex/writer.hpp"
 
-#include "dex/type/descriptor.hpp"
+#include "dex/descriptor.hpp"
 
 namespace dex {
 
-/// @brief 库版本（语义版本字符串，随 dev_plan 的版本节点推进）。
+/// @brief 库版本（语义版本字符串）。
 const char* get_lib_version() noexcept;
 
 }   // namespace dex
