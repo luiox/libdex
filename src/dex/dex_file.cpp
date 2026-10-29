@@ -245,16 +245,19 @@ Result<ca::u32, ReadError> DexFile::addType(std::string_view descriptor)
         return Err(interned.unwrap_err());
     }
     const ca::u32 descriptorIdx = interned.unwrap();
-    for (ca::u32 i = 0; i < typeIds.size(); ++i) {
-        if (typeIds[i].descriptorIdx == descriptorIdx) {
-            return Ok(i);
-        }
+    ensureIdIndexes();
+    const auto found = typeIndexByKey_.find(descriptorIdx);
+    if (found != typeIndexByKey_.end()) {
+        return Ok(found->second);
     }
     if (typeIds.size() >= kIdTableLimit) {
         return Err(ReadError::IdTableFull);
     }
+    const ca::u32 index = static_cast<ca::u32>(typeIds.size());
     typeIds.push_back(TypeId{descriptorIdx});
-    return Ok(static_cast<ca::u32>(typeIds.size() - 1));
+    typeIndexByKey_.emplace(descriptorIdx, index);
+    typeIndexedCount_ = typeIds.size();
+    return Ok(index);
 }
 
 Result<ca::u32, ReadError> DexFile::addProto(ca::u32 shortyIdx, ca::u32 returnTypeIdx,
@@ -274,36 +277,26 @@ Result<ca::u32, ReadError> DexFile::addProto(ca::u32 shortyIdx, ca::u32 returnTy
         }
     }
 
-    for (ca::u32 i = 0; i < protoIds.size(); ++i) {
-        const ProtoId& existing = protoIds[i];
-        if (existing.shortyIdx != shortyIdx || existing.returnTypeIdx != returnTypeIdx) {
-            continue;
-        }
-        Result<TypeListSpan, ReadError> other = typeList(existing.parametersOff);
-        if (other.is_err()) {
-            continue;  // 源条目损坏时不作为复用目标
-        }
-        const TypeListSpan candidate = other.unwrap();
-        if (candidate.size != params.size) {
-            continue;
-        }
-        bool same = true;
-        for (ca::u32 j = 0; j < params.size; ++j) {
-            if (candidate.at(j) != params.at(j)) {
-                same = false;
-                break;
-            }
-        }
-        if (same) {
-            return Ok(i);
-        }
+    ensureIdIndexes();
+    ProtoKey key;
+    key.shortyIdx = shortyIdx;
+    key.returnTypeIdx = returnTypeIdx;
+    key.params.reserve(params.size);
+    for (ca::u32 i = 0; i < params.size; ++i) {
+        key.params.push_back(params.at(i));
     }
-
+    const auto found = protoIndexByKey_.find(key);
+    if (found != protoIndexByKey_.end()) {
+        return Ok(found->second);
+    }
     if (protoIds.size() >= kIdTableLimit) {
         return Err(ReadError::IdTableFull);
     }
+    const ca::u32 index = static_cast<ca::u32>(protoIds.size());
     protoIds.push_back(ProtoId{shortyIdx, returnTypeIdx, parametersOff});
-    return Ok(static_cast<ca::u32>(protoIds.size() - 1));
+    protoIndexByKey_.emplace(std::move(key), index);
+    protoIndexedCount_ = protoIds.size();
+    return Ok(index);
 }
 
 Result<ca::u32, ReadError> DexFile::addField(ca::u32 classIdx, ca::u32 typeIdx,
@@ -313,19 +306,22 @@ Result<ca::u32, ReadError> DexFile::addField(ca::u32 classIdx, ca::u32 typeIdx,
         nameIdx >= stringIds.size()) {
         return Err(ReadError::BadIndex);
     }
-    for (ca::u32 i = 0; i < fieldIds.size(); ++i) {
-        const FieldId& field = fieldIds[i];
-        if (field.classIdx == classIdx && field.typeIdx == typeIdx &&
-            field.nameIdx == nameIdx) {
-            return Ok(i);
-        }
+    ensureIdIndexes();
+    const ca::u64 key = (static_cast<ca::u64>(classIdx) << 48)
+                        | (static_cast<ca::u64>(typeIdx) << 32) | nameIdx;
+    const auto found = fieldIndexByKey_.find(key);
+    if (found != fieldIndexByKey_.end()) {
+        return Ok(found->second);
     }
     if (fieldIds.size() >= kIdTableLimit) {
         return Err(ReadError::IdTableFull);
     }
+    const ca::u32 index = static_cast<ca::u32>(fieldIds.size());
     fieldIds.push_back(FieldId{static_cast<ca::u16>(classIdx),
                                static_cast<ca::u16>(typeIdx), nameIdx});
-    return Ok(static_cast<ca::u32>(fieldIds.size() - 1));
+    fieldIndexByKey_.emplace(key, index);
+    fieldIndexedCount_ = fieldIds.size();
+    return Ok(index);
 }
 
 Result<ca::u32, ReadError> DexFile::addMethod(ca::u32 classIdx, ca::u32 protoIdx,
@@ -335,19 +331,22 @@ Result<ca::u32, ReadError> DexFile::addMethod(ca::u32 classIdx, ca::u32 protoIdx
         nameIdx >= stringIds.size()) {
         return Err(ReadError::BadIndex);
     }
-    for (ca::u32 i = 0; i < methodIds.size(); ++i) {
-        const MethodId& method = methodIds[i];
-        if (method.classIdx == classIdx && method.protoIdx == protoIdx &&
-            method.nameIdx == nameIdx) {
-            return Ok(i);
-        }
+    ensureIdIndexes();
+    const ca::u64 key = (static_cast<ca::u64>(classIdx) << 48)
+                        | (static_cast<ca::u64>(protoIdx) << 32) | nameIdx;
+    const auto found = methodIndexByKey_.find(key);
+    if (found != methodIndexByKey_.end()) {
+        return Ok(found->second);
     }
     if (methodIds.size() >= kIdTableLimit) {
         return Err(ReadError::IdTableFull);
     }
+    const ca::u32 index = static_cast<ca::u32>(methodIds.size());
     methodIds.push_back(MethodId{static_cast<ca::u16>(classIdx),
                                  static_cast<ca::u16>(protoIdx), nameIdx});
-    return Ok(static_cast<ca::u32>(methodIds.size() - 1));
+    methodIndexByKey_.emplace(key, index);
+    methodIndexedCount_ = methodIds.size();
+    return Ok(index);
 }
 
 namespace {
@@ -402,12 +401,21 @@ Result<ca::u32, ReadError> DexFile::addTypeList(const std::vector<ca::u32>& type
     encoded[1] = static_cast<ca::u8>((typeIdxs.size() >> 8) & 0xFFu);
     encoded[2] = static_cast<ca::u8>((typeIdxs.size() >> 16) & 0xFFu);
     encoded[3] = static_cast<ca::u8>((typeIdxs.size() >> 24) & 0xFFu);
-    for (ca::u32 i = 0; i < ownedTypeLists_.size(); ++i) {
-        if (ownedTypeLists_[i] == encoded) {
-            return Ok(i);
+    if (typeListIndexedCount_ != ownedTypeLists_.size()) {
+        typeListIndexByKey_.clear();
+        for (ca::u32 i = 0; i < ownedTypeLists_.size(); ++i) {
+            typeListIndexByKey_.emplace(ownedTypeLists_[i], i);
         }
+        typeListIndexedCount_ = ownedTypeLists_.size();
+    }
+    const auto found = typeListIndexByKey_.find(encoded);
+    if (found != typeListIndexByKey_.end()) {
+        return Ok(found->second);
     }
     ownedTypeLists_.push_back(std::move(encoded));
+    typeListIndexByKey_.emplace(ownedTypeLists_.back(),
+                                static_cast<ca::u32>(ownedTypeLists_.size() - 1));
+    typeListIndexedCount_ = ownedTypeLists_.size();
     return Ok(static_cast<ca::u32>(ownedTypeLists_.size() - 1));
 }
 
@@ -460,45 +468,19 @@ Result<ca::u32, ReadError> DexFile::addProtoWithParams(ca::u32 returnTypeIdx,
         shorty.push_back(ch.unwrap());
     }
 
-    // 与全部既有 proto 按（返回类型，参数内容）比较；自有与源参数都参与。
-    const auto matchesExisting = [&](const ProtoId& proto) -> bool {
-        if (proto.returnTypeIdx != returnTypeIdx) {
-            return false;
-        }
-        TypeListSpan span;
-        if (proto.ownedParameters) {
-            // 池内不存在空列表；entries 为空说明池下标悬垂。
-            span = ownedTypeListSpan(proto.ownedParametersIdx);
-            if (span.entries == nullptr) {
-                return false;
-            }
-        } else {
-            Result<TypeListSpan, ReadError> list = typeList(proto.parametersOff);
-            if (list.is_err()) {
-                return false;  // 源条目损坏时不作为复用目标
-            }
-            span = list.unwrap();
-        }
-        if (span.size != parameters.size()) {
-            return false;
-        }
-        for (ca::u32 i = 0; i < span.size; ++i) {
-            if (span.at(i) != parameters[i]) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    for (ca::u32 i = 0; i < protoIds.size(); ++i) {
-        if (matchesExisting(protoIds[i])) {
-            return Ok(i);
-        }
-    }
-
+    // 与既有 proto 按（shorty，返回类型，参数内容）查重；自有与源参数都参与。
     const Result<ca::u32, ReadError> interned = internUtf8(shorty);
     if (interned.is_err()) {
         return Err(interned.unwrap_err());
+    }
+    ensureIdIndexes();
+    ProtoKey key;
+    key.shortyIdx = interned.unwrap();
+    key.returnTypeIdx = returnTypeIdx;
+    key.params = parameters;
+    const auto found = protoIndexByKey_.find(key);
+    if (found != protoIndexByKey_.end()) {
+        return Ok(found->second);
     }
     Result<ca::u32, ReadError> ownedIdx = Ok(kNoIndex);
     if (!parameters.empty()) {
@@ -510,9 +492,12 @@ Result<ca::u32, ReadError> DexFile::addProtoWithParams(ca::u32 returnTypeIdx,
     if (protoIds.size() >= kIdTableLimit) {
         return Err(ReadError::IdTableFull);
     }
+    const ca::u32 index = static_cast<ca::u32>(protoIds.size());
     protoIds.push_back(ProtoId{interned.unwrap(), returnTypeIdx, 0, ownedIdx.unwrap(),
                                ownedIdx.unwrap() != kNoIndex});
-    return Ok(static_cast<ca::u32>(protoIds.size() - 1));
+    protoIndexByKey_.emplace(std::move(key), index);
+    protoIndexedCount_ = protoIds.size();
+    return Ok(index);
 }
 
 Result<void, ReadError> DexFile::setClassInterfaces(ca::u32 classDefIdx,
@@ -897,6 +882,68 @@ void DexFile::refreshInternIndex()
             continue;  // 坏条目不能作为查重目标
         }
         internIndex_.emplace(std::string(text.unwrap().as_std_view()), i);
+    }
+}
+
+void DexFile::refreshIdIndexes()
+{
+    typeIndexByKey_.clear();
+    protoIndexByKey_.clear();
+    fieldIndexByKey_.clear();
+    methodIndexByKey_.clear();
+    for (ca::u32 i = 0; i < typeIds.size(); ++i) {
+        typeIndexByKey_.emplace(typeIds[i].descriptorIdx, i);
+    }
+    for (ca::u32 i = 0; i < protoIds.size(); ++i) {
+        const ProtoId& proto = protoIds[i];
+        TypeListSpan span;
+        if (proto.ownedParameters) {
+            // 池内不存在空列表；entries 为空说明池下标悬垂。
+            span = ownedTypeListSpan(proto.ownedParametersIdx);
+            if (span.entries == nullptr) {
+                continue;  // 池下标悬垂，不作为查重目标
+            }
+        } else {
+            Result<TypeListSpan, ReadError> list = typeList(proto.parametersOff);
+            if (list.is_err()) {
+                continue;  // 源条目损坏时不作为查重目标
+            }
+            span = list.unwrap();
+        }
+        ProtoKey key;
+        key.shortyIdx = proto.shortyIdx;
+        key.returnTypeIdx = proto.returnTypeIdx;
+        key.params.reserve(span.size);
+        for (ca::u32 j = 0; j < span.size; ++j) {
+            key.params.push_back(span.at(j));
+        }
+        protoIndexByKey_.emplace(std::move(key), i);
+    }
+    for (ca::u32 i = 0; i < fieldIds.size(); ++i) {
+        const FieldId& field = fieldIds[i];
+        const ca::u64 key = (static_cast<ca::u64>(field.classIdx) << 48)
+                            | (static_cast<ca::u64>(field.typeIdx) << 32) | field.nameIdx;
+        fieldIndexByKey_.emplace(key, i);
+    }
+    for (ca::u32 i = 0; i < methodIds.size(); ++i) {
+        const MethodId& method = methodIds[i];
+        const ca::u64 key = (static_cast<ca::u64>(method.classIdx) << 48)
+                            | (static_cast<ca::u64>(method.protoIdx) << 32)
+                            | method.nameIdx;
+        methodIndexByKey_.emplace(key, i);
+    }
+    typeIndexedCount_ = typeIds.size();
+    protoIndexedCount_ = protoIds.size();
+    fieldIndexedCount_ = fieldIds.size();
+    methodIndexedCount_ = methodIds.size();
+}
+
+void DexFile::ensureIdIndexes()
+{
+    if (typeIndexedCount_ != typeIds.size() || protoIndexedCount_ != protoIds.size()
+        || fieldIndexedCount_ != fieldIds.size()
+        || methodIndexedCount_ != methodIds.size()) {
+        refreshIdIndexes();
     }
 }
 
