@@ -83,6 +83,53 @@ TEST(DexMethodEditor, CommitLowersDebugEvents)
     EXPECT_EQ(info.unwrap().ops[1].opcode, kDbgSetPrologueEnd);
 }
 
+/// @brief 地址差超出 special 域宽（>16 unit）时必须拆 AdvancePC+AdvanceLine
+///        精确前进；钳位地址差会让行号锚点静默漂移（回放地址 < 事件地址）。
+TEST(DexMethodEditor, DebugLineBeyondSpecialRangeKeepsExactAddress)
+{
+    MethodEditor editor(1, 0, 0);
+    editor.debugLine(1);  // 尚无指令 → 锚方法开头（地址 0）→ lineStart
+    for (int i = 0; i < 21; ++i) {
+        editor.append(const4(0, 0));  // 地址 0..20
+    }
+    editor.debugLine(2);  // 锚地址 21：addrDiff=21 超出 special 域宽
+    editor.append(returnVoid());      // 地址 21
+    editor.debugLine(3);  // 锚地址 22：addrDiff=1 走 special
+
+    const Result<MethodBody, CodeDomError> body = editor.commit();
+    ASSERT_TRUE(body.is_ok());
+    ASSERT_FALSE(body.unwrap().debugBytes.empty());
+    const std::vector<ca::u8>& bytes = body.unwrap().debugBytes;
+    const Result<DebugInfo, ReadError> info =
+        readDebugInfo(ByteSlice{bytes.data(), bytes.size()}, 0);
+    ASSERT_TRUE(info.is_ok()) << to_string(info.unwrap_err());
+
+    // line2 拆 AdvancePC(21)+AdvanceLine(+1)，line3 单条 special(1,+1)。
+    ASSERT_EQ(info.unwrap().ops.size(), 3u);
+    EXPECT_EQ(info.unwrap().ops[0].opcode, kDbgAdvancePc);
+    EXPECT_EQ(info.unwrap().ops[0].addressDiff, 21u);
+    EXPECT_EQ(info.unwrap().ops[1].opcode, kDbgAdvanceLine);
+    EXPECT_EQ(info.unwrap().ops[1].lineDiff, 1);
+    EXPECT_TRUE(info.unwrap().ops[2].isSpecial());
+    EXPECT_EQ(info.unwrap().ops[2].addressDiff, 1u);
+    EXPECT_EQ(info.unwrap().ops[2].lineDiff, 1);
+
+    // 回放状态机：行号到达处地址必须与事件锚点一致（21/22），不漂移。
+    ca::u32 addr = 0;
+    ca::i32 line = static_cast<ca::i32>(info.unwrap().lineStart);
+    EXPECT_EQ(line, 1);
+    for (const DebugOp& op : info.unwrap().ops) {
+        addr += op.addressDiff;
+        line += op.lineDiff;
+        if (line == 2) {
+            EXPECT_EQ(addr, 21u);
+        }
+        if (line == 3) {
+            EXPECT_EQ(addr, 22u);
+        }
+    }
+}
+
 TEST(DexMethodEditor, CommitFailsCleanlyOnDanglingLabel)
 {
     MethodEditor editor(1, 0, 0);
