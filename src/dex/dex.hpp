@@ -1,3 +1,7 @@
+/// @defgroup dex 统一入口
+///
+/// libdex core 层公共头的聚合入口：读、写、编辑、分析一组可见。
+
 /// @file        dex.hpp
 /// @brief       libdex 统一入口头。
 ///

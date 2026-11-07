@@ -1,8 +1,12 @@
+/// @defgroup code_item code_item 条目
+///
+/// 头部计数 + 指令区 span + tries/handler 表的目录级视图与重编码。
+
 /// @file        code_item.hpp
 /// @brief       code_item 的结构解码与精确重编码。
 ///
 /// 模型是目录级视图：头部计数 + 指令区 span + tries/handler 表。指令流由
-/// @ref decodeInsns 解码；编码处理器表在此解析为结构化条目，共享的 handler
+/// decodeInsns 解码；编码处理器表在此解析为结构化条目，共享的 handler
 /// 写回时保持共享。
 #pragma once
 

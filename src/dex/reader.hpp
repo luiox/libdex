@@ -1,13 +1,17 @@
+/// @defgroup reader 骨架解析入口
+///
+/// readDex 只解析 eager 骨架，其余懒解码；eager/lazy 分界见 doc:design-eager-lazy。
+
 /// @file        reader.hpp
 /// @brief       DEX 骨架解析入口（eager 骨架 + lazy 数据）。
 ///
-/// @ref readDex 只解析「必须解析才能定位结构」的部分：header、map_list、五张
+/// readDex 只解析「必须解析才能定位结构」的部分：header、map_list、五张
 /// ID 表的定长条目、class_defs。string_data / class_data / code_item / type_list
 /// 一律只记目录并按需解码，因此解析代价与类体规模无关。
 ///
 /// 失败的语义是「无法确定后续结构边界」，不是「输入不合法」：畸形输入的
 /// 降级结果（校验和不符、悬垂索引、map 计数不符）落在
-/// @ref ParseState::Recovered 与 @ref Diagnostics 里，而不是异常或半截模型。
+/// ParseState::Recovered 与 Diagnostics 里，而不是异常或半截模型。
 #pragma once
 
 #include <memory>

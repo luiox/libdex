@@ -1,5 +1,5 @@
 -- libdex：DEX 字节核（L1）——单 DexFile lazy DOM + 保真写回。
--- 设计见 doc/design.md。
+-- 设计见 doc/design.rst。
 --
 -- 依赖：libca（luiox-repo git 直连包）与 libjstr（MUTF-8 容器）经包仓消费；
 -- gtest 仅测试态。libca 模块集取 luiox 家族统一超集，避免同一消费图内

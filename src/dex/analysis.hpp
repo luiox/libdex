@@ -1,3 +1,7 @@
+/// @defgroup analysis CFG 与到达帧分析
+///
+/// buildCfg 基本块与 analyzeFrames 到达帧（best-effort / strict 双档），契约见 doc:design-analysis。
+
 /// @file        analysis.hpp
 /// @brief       分析层：CFG 构建（从解码指令流）+ 逐指令到达帧。
 ///
@@ -29,8 +33,8 @@ enum class RegKind : ca::u8 {
     Double,      ///< cat2（同上）
     Null,        ///< 空引用/字面量零（const 0）：并入引用或 cat1 同族
     Reference,   ///< typeIdx == kNoIndex 表示引用顶
-    UninitRef,   ///< new-instance 后未执行 <init>，addr 记 new 地址
-    UninitThis,  ///< <init> 内 this
+    UninitRef,   ///< new-instance 后未执行 &lt;init&gt;，addr 记 new 地址
+    UninitThis,  ///< &lt;init&gt; 内 this
     Conflicted,  ///< 不可合并（strict 报诊断）
 };
 
@@ -104,7 +108,7 @@ std::vector<CfgBlock> buildCfg(const std::vector<Insn>& insns,
 
 /// @brief 帧分析。@p dex 用于字段/方法/proto 的描述符 → 寄存器种类解析；
 /// @p methodIdx 提供入口帧的参数类型；@p isStatic 决定槽 0 是否 UninitThis。
-/// 指令流解码自 @p code。best-effort（strict=false）不产出诊断。
+/// 指令流解码自 @p code 。best-effort（strict=false）不产出诊断。
 Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& code,
                                                 ca::u32 methodIdx, bool isStatic,
                                                 bool strict);

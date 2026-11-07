@@ -1,9 +1,13 @@
+/// @defgroup dex_file DexFile DOM 本体
+///
+/// 单文件所有权：骨架、ID 表与懒解码缓存；所有权契约见 doc:design-ownership。
+
 /// @file        dex_file.hpp
 /// @brief       单 DexFile DOM：libdex core 的模型本体。
 ///
-/// 一个 @ref DexFile 就是一个 .dex 文件的完整、可独立析构的所有者：头、
+/// 一个 DexFile 就是一个 .dex 文件的完整、可独立析构的所有者：头、
 /// map_list 目录、五张全局 ID 表、class_defs，以及按需解码的 string_data /
-/// class_data / code_item。@ref internString 追加的字符串由同一个对象持有，
+/// class_data / code_item。internString 追加的字符串由同一个对象持有，
 /// 与源字符串共用懒解码入口。它不持有 APK、不持有多 dex 集合、不持有全局
 /// 索引——那些是容器层的事。
 ///
@@ -361,20 +365,20 @@ public:
     /// @brief 追加一个 MUTF-8 字符串并返回 string 索引；内容已存在时复用旧索引。
     ///
     /// 输入必须是合法 MUTF-8（无裸 NUL、无四字节序列）；错误返回
-    /// @ref ReadError::BadStringData。新条目由本对象持有，不写回源字节；
+    /// @ref ReadError::BadStringData 。新条目由本对象持有，不写回源字节；
     /// @ref buildDex 会把它并入 canonical 字符串池并重排所有字符串索引。
     /// 调用方修改 `stringIds` 后需保证自上次 intern 以来条目未变，否则查重表
     /// 可能过期（追加条目会自动重建，原地改写不会）。
     Result<ca::u32, ReadError> internString(jstr::MUtf8StringRef mutf8);
 
-    /// @brief 把标准 UTF-8 转成 MUTF-8 后追加；语义同 @ref internString。
+    /// @brief 把标准 UTF-8 转成 MUTF-8 后追加；语义同 @ref internString 。
     Result<ca::u32, ReadError> internUtf8(std::string_view utf8);
 
     // ---- ID 表条目追加 ----
     //
     // 只追加或复用条目，不保证表内顺序；@ref buildDex 重建时会按 DEX 排序键
     // 重排并重写全部索引。成员索引（class/proto/name/type）必须已存在；
-    // 表达到 @ref kIdTableLimit 时返回 @ref ReadError::IdTableFull。
+    // 表达到 @ref kIdTableLimit 时返回 @ref ReadError::IdTableFull 。
 
     /// @brief 追加或复用 type_ids 条目，返回 type 索引。
     ///
@@ -406,7 +410,7 @@ public:
     /// @brief 追加自有 type_list 并返回池下标；内容重复时复用已有下标。
     ///
     /// @p typeIdxs 每项必须是当前 type_ids 的合法索引，越界返回
-    /// @ref ReadError::BadIndex。空列表不占池位，返回 @ref kNoIndex。
+    /// @ref ReadError::BadIndex 。空列表不占池位，返回 @ref kNoIndex 。
     Result<ca::u32, ReadError> addTypeList(const std::vector<ca::u32>& typeIdxs);
 
     /// @brief 按返回类型与参数列表追加或复用 proto，shorty 自动推导并 intern。
@@ -434,7 +438,7 @@ public:
     ///
     /// 内容（含 valueArg 宽度）相同的项复用旧下标。typeIdx、元素名与值里的
     /// String/Type/Field/Method/Enum/MethodType/MethodHandle 索引必须在当前
-    /// 表内，越界返回 @ref ReadError::BadIndex；索引型载荷的 valueArg 过窄
+    /// 表内，越界返回 @ref ReadError::BadIndex ；索引型载荷的 valueArg 过窄
     /// 时按最小宽度改宽。
     Result<ca::u32, ReadError> addAnnotationItem(const AnnotationItem& item);
 
@@ -479,7 +483,7 @@ public:
     /// 值的类别必须匹配字段类型：原始类型（Z/B/S/C/I/J/F/D）要求同类别值，
     /// 引用类型（L/[）接受 Null/String/Type/Field/Method/Enum/MethodType/
     /// MethodHandle/Array/Annotation；不匹配或索引悬垂返回
-    /// @ref ReadError::BadIndex。载荷宽度一律归一到最小可用（含布尔位）。
+    /// @ref ReadError::BadIndex 。载荷宽度一律归一到最小可用（含布尔位）。
     /// 目标必须是该类生效 class_data 中的静态字段（含注入字段、扣除删除），
     /// 否则重建返回 `InvalidModel`；重复设置覆盖旧值。
     Result<void, ReadError> setStaticFieldValue(ca::u32 classDefIdx, ca::u32 fieldIdx,

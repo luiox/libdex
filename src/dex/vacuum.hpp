@@ -1,3 +1,7 @@
+/// @defgroup vacuum ID 表引用闭包
+///
+/// vacuumIds 的保留集合计算；语义见 doc:design-id-tables。
+
 /// @file        vacuum.hpp
 /// @brief       ID 表引用闭包：计算 vacuum 重写需要保留的条目集合。
 ///

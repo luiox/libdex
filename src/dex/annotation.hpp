@@ -1,11 +1,15 @@
+/// @defgroup annotation 注解族条目
+///
+/// annotation_item / annotation_set / annotations_directory / encoded_array 的懒解码与精确重编码。
+
 /// @file        annotation.hpp
 /// @brief       注解族数据条目：annotation_item / annotation_set_item /
 ///              annotation_set_ref_list / annotations_directory_item /
 ///              encoded_array_item。
 ///
-/// 每个条目保留自己在源字节中的完整区间 @ref ByteSpan raw：未修改时写回
+/// 每个条目保留自己在源字节中的完整区间（ByteSpan，见 bytes.hpp）：未修改时写回
 /// 可以 copy 这段字节，保真不依赖重编码器正确。
-/// 条目内部只解到结构层，值树由 @ref EncodedValue 承载；目录里的 set 偏移
+/// 条目内部只解到结构层，值树由 EncodedValue 承载；目录里的 set 偏移
 /// 与 set 里的 annotation 偏移都原样保留，供调用方按需继续解码。
 #pragma once
 

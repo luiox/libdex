@@ -1,3 +1,7 @@
+/// @defgroup leb128 LEB128 原语
+///
+/// ULEB128 / SLEB128 读写，越界与超限走 BadLeb128。
+
 /// @file        leb128.hpp
 /// @brief       DEX 的 ULEB128 读取面。
 ///

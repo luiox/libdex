@@ -1,3 +1,7 @@
+/// @defgroup insn 指令 DOM
+///
+/// 26 种定长格式解码为 Insn 结构并保留原始 code unit；见 doc:design-insns。
+
 /// @file        insn.hpp
 /// @brief       code_item.insns 的指令 DOM：逐条解码为定长结构。
 ///
@@ -5,8 +9,8 @@
 /// 分支偏移；控制流、栈帧与类型推导留给上层。payload 伪指令不展开成 target
 /// 数组，而是保留指向源字节的零拷贝视图，调用方按索引取值。
 ///
-/// 与 @ref DexFile 的 lazy 视图不同，本接口不持有源字节：传入的 ByteSlice 必须
-/// 在 @ref Insn 使用期内有效（通常就是 DexFile 的 source()）。
+/// 与 DexFile 的 lazy 视图不同，本接口不持有源字节：传入的 ByteSlice 必须
+/// 在 Insn 使用期内有效（通常就是 DexFile 的 source()）。
 #pragma once
 
 #include <vector>
@@ -47,10 +51,10 @@ const char* to_string(InsnEncodeError e) noexcept;
 
 /// @brief 单条 DEX 指令（含 payload 伪指令）。
 ///
-/// 寄存器操作数统一放在 @ref registers，@ref registerCount 表示有效个数：
+/// 寄存器操作数统一放在 @ref registers ，@ref registerCount 表示有效个数：
 ///   - 普通格式按格式文档的 A/B/C 顺序填入（最多 3 个）；
 ///   - 35c/45cc 按调用参数顺序填 C、D、E、F、G，最多 5 个；
-///   - 3rc/4rcc 不使用该数组，改用 @ref startRegister 与 @ref registerCount。
+///   - 3rc/4rcc 不使用该数组，改用 @ref startRegister 与 @ref registerCount 。
 struct Insn
 {
     ca::u32 address = 0;  ///< 相对 insns 起点的 code unit 地址
@@ -121,7 +125,7 @@ struct Insn
 /// （宽度 1）。
 Result<std::vector<Insn>, InsnError> decodeInsns(ByteSlice insns);
 
-/// @brief 按 opcode 的定长格式精确编码一条指令，追加到 @p out。
+/// @brief 按 opcode 的定长格式精确编码一条指令，追加到 @p out 。
 ///
 /// 只写该操作码对应的格式，不做形态选择。10x/20t/30t/32x 的未用高位在
 /// @ref Insn::raw 与当前 opcode 一致时原样沿用，保证 nop 变体等源字节可还原；

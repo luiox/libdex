@@ -1,3 +1,7 @@
+/// @defgroup format 格式常量
+///
+/// header 尺寸、access flags、value 格式与 map type 等 DEX 取值单源。
+
 /// @file        format.hpp
 /// @brief       DEX 格式层常量：reader/builder/incremental 共用的取值。
 #pragma once

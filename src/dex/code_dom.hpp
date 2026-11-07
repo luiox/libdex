@@ -1,15 +1,19 @@
+/// @defgroup code_dom 方法体结构编辑模型
+///
+/// CodeUnit + label + 值句柄的编辑底座；分层定位见 doc:design-layering。
+
 /// @file        code_dom.hpp
 /// @brief       方法体的结构编辑模型：CodeUnit + label + 值句柄。
 ///
-/// CodeUnit 是 @ref Insn 流之上的编辑层：指令住在稳定的槽表（deque，只追加，
+/// CodeUnit 是 Insn 流之上的编辑层：指令住在稳定的槽表（deque，只追加，
 /// 引用不失效），程序序在 @c order_ 里；插入/删除只改 order_，已有槽位与
 /// 句柄不失效。分支、switch payload、try 区间与 handler 一律引用 label，
 /// lower 时一次算定地址与偏移——编辑者永远不碰字节偏移。
 ///
-/// @ref InsnId{owner, slot, gen} 三元句柄：gen 在槽被 erase 时自增防 ABA；
+/// InsnId{owner, slot, gen} 三元句柄：gen 在槽被 erase 时自增防 ABA；
 /// 跨 owner 或过期句柄结构性拒绝。不引入 visitor。
 ///
-/// 保真边界：promote 保留语义字段，丢弃 @ref Insn::raw 原始字节（nop 变体、
+/// 保真边界：promote 保留语义字段，丢弃 Insn::raw 原始字节（nop 变体、
 /// 非规范高字节不保留）——CodeDom 面向编辑后的方法体，未编辑方法体走
 /// dex_file 的透传路径，不经过这里。
 #pragma once
@@ -163,7 +167,7 @@ public:
                                               std::vector<ca::u8> payloadStorage =
                                                   std::vector<ca::u8>{});
 
-    /// @brief 删除一条指令。policy 语义见 @ref ErasePolicy。
+    /// @brief 删除一条指令。policy 语义见 @ref ErasePolicy 。
     Result<void, CodeDomError> erase(InsnId id, ErasePolicy policy);
 
     // ---- label ----
@@ -189,7 +193,7 @@ public:
                                            std::vector<LabelId> targets);
 
     /// @brief 新增 try 区间与 handler。区间 [start, end) 由 label 定界，
-    ///        handler 挂在 @p handlerIndex；typed/catchAll 的 label 为
+    ///        handler 挂在 @p handlerIndex ；typed/catchAll 的 label 为
     ///        kNoLabel 表示该目标暂缺（lower 报 DanglingLabel）。
     Result<void, CodeDomError> addTry(LabelId start, LabelId end, ca::u32 handlerIndex);
     ca::u32 addHandler(HandlerDom handler);
