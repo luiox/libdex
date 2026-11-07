@@ -6,7 +6,7 @@
 
 DEX（Android 字节码）单文件读写库。保真 DOM 加逐条目 codec，返回值与错误都走 `Result`；不定义方法体 AST，语义简化留给使用方 adapter。
 
-- 读：035–041 全条目，未建模 section 原字节保留。
+- 读：d8 与 ART 产出的全部 dex 格式版本（magic 035–041），未建模 section 原字节保留。
 - 写：未修改逐字节透传；canonical 重建与增量布局两条写回路径，校验字段自动重算。
 - 编辑：成员增删改、改名与索引重排、注解与静态初值、方法体 CodeDom（插删指令、控制流）、ID 表 vacuum、从零构建。
 - 分析：基本块 CFG 与逐指令到达帧，best-effort / strict 双档。
