@@ -1,18 +1,22 @@
+/// @defgroup builder canonical 重建
+///
+/// buildDex 布局分派与 BuildOptions；canonical 与增量两条写回路径的契约见 doc:design-incremental。
+
 /// @file        builder.hpp
 /// @brief       整文件 canonical 重建：布局、偏移回填、map_list 与校验字段。
 ///
-/// 与 @ref writeDex 的分工：`writeDex` 是未修改透传（源字节原样交回），
+/// 与 writeDex 的分工：`writeDex` 是未修改透传（源字节原样交回），
 /// `buildDex` 是把 DOM 重新排布成一份新 dex。后者的输入必须是可完整解码的
 /// 文件；重建只输出从 class_defs 可达的条目，不可达的建模条目被丢弃。
 ///
 /// 重建保持的保真项：string_data 原字节复制（含非最小 ULEB 与共享条目）、
 /// encoded_value 的 value_arg 宽度、debug_info 的原始操作编码、handler 共享、
 /// method_handle 的 unused 字段，以及未建模 section 的原始字节（可由
-/// @ref BuildOptions::keepUnknownSections 关闭）。
+/// BuildOptions::keepUnknownSections 关闭）。
 ///
 /// 五张 ID 表按 DEX 约定重排：string_ids 按 UTF-16 并去重，type_ids 按描述符，
 /// proto_ids 按返回类型、参数个数与逐参数，field_ids 与 method_ids 按
-/// (class, name, type/proto)，class_defs 按 class_idx。@ref DexFile::internString
+/// (class, name, type/proto)，class_defs 按 class_idx。DexFile::internString
 /// 追加的字符串并入池；type_list 重新编码；ID 表、class_data、指令、catch
 /// handler、debug_info、注解与 encoded_value 中的索引按旧→新全部重写。索引变化
 /// 时若仍保留未建模 section，返回 `UnmappedRawSection`（无法迁移其中可能存在的
@@ -63,7 +67,7 @@ struct FieldAddition
 /// @brief 往已有类里追加一个方法并附带方法体。
 ///
 /// @ref methodIdx 必须已在 method_ids 中且未被任何 class_data 定义；
-/// @ref item 与 @ref insns 的约定同 @ref CodeReplacement。
+/// @ref item 与 @ref insns 的约定同 @ref CodeReplacement 。
 struct MethodAddition
 {
     ca::u32 classDefIdx = 0;
@@ -108,8 +112,8 @@ struct BuildOptions
     /// @brief 走增量布局：保留源布局，未编辑条目源字节透传，只重编码被改条目。
     ///
     /// 前提是编辑不触及 ID 表（无 intern、无 addType/addProto/addField/addMethod/
-    /// addProtoWithParams），违反返回 @ref WriteError::NotIncremental，调用方应
-    /// 改走 canonical。语义细节见 doc/design.md「增量重建」。
+    /// addProtoWithParams），违反返回 @ref WriteError::NotIncremental ，调用方应
+    /// 改走 canonical。语义细节见 doc:design-incremental。
     bool incremental = false;
     /// @brief 重建 static_values 时裁掉尾部的合成默认槽位；全默认则整个数组
     /// 不写（class_def.static_values_off 置 0）。与 d8 输出约定一致，汇编器
@@ -128,7 +132,7 @@ struct BuildOptions
 /// code_item、class_data、unknown sections、map_list。所有模型内偏移按新布局
 /// 回填，checksum/signature 重算。
 ///
-/// 失败原因见 @ref WriteError：非空 link 区返回 `NotModeled`；041 的 canonical
+/// 失败原因见 @ref WriteError ：非空 link 区返回 `NotModeled`；041 的 canonical
 /// 重建按独立文件约定重置 container 字段，但增量路径仍返回 `NotModeled`
 /// （实物复核前不承诺字节恒等）；重建期间再次解码源条目失败返回 `SourceUnreadable`；
 /// 替换项指向不存在或无可替换方法体的方法返回 `InvalidModel`；新增成员重复
@@ -141,11 +145,11 @@ struct BuildOptions
 Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
                                                  const BuildOptions& options = {});
 
-/// @brief buildDex 的增量布局路径；入口分派在 @ref buildDex，实现见 incremental.cpp。
+/// @brief buildDex 的增量布局路径；由 @ref buildDex 按选项分派，实现见 incremental.cpp。
 ///
 /// 保留源布局：条目与 gap 按源偏移顺序平移，未编辑且引用偏移未变的条目
 /// 源字节透传。编辑集必须不触及 ID 表（调用方显式选择，护栏返回
-/// `NotIncremental`）。契约见 doc/design.md「增量重建」。
+/// `NotIncremental`）。契约见 doc:design-incremental。
 Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
                                                             const BuildOptions& options);
 

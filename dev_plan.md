@@ -1,6 +1,6 @@
 # dev_plan
 
-libdex 的剩余工作。契约与裁决见 doc/design.md，范围外清单见 doc/non_goals.md。
+libdex 的剩余工作。契约与裁决见 doc/design.rst，范围外清单见 doc/non_goals.rst。
 
 ## 剩余工作
 

@@ -1,3 +1,7 @@
+/// @defgroup encoded_value encoded_value 值编码
+///
+/// 递归值 DOM 与读取；原始 value_arg 保真，非最小宽度原样重编码。
+
 /// @file        encoded_value.hpp
 /// @brief       encoded_value / encoded_annotation 的递归 DOM 与读取。
 ///
@@ -98,7 +102,7 @@ inline constexpr ca::u32 kMaxValueDepth = 256;
 /// @brief 读取一个 encoded_value；depth 是当前嵌套层数。
 Result<EncodedValue, ReadError> readEncodedValue(Reader& cur, ca::u32 depth = 0) noexcept;
 
-/// @brief 读取一个 encoded_annotation；depth 含义同 @ref readEncodedValue。
+/// @brief 读取一个 encoded_annotation；depth 含义同 @ref readEncodedValue 的同名参数。
 Result<EncodedAnnotation, ReadError> readEncodedAnnotation(Reader& cur,
                                                            ca::u32 depth = 0) noexcept;
 

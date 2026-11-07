@@ -1,10 +1,14 @@
+/// @defgroup bytes 字节区段与随机访问
+///
+/// ByteSpan / ByteSlice 视图与小端读取器；字节原语复用 libca 的 Bytes 家族。
+
 /// @file        bytes.hpp
 /// @brief       源字节区段、视图助手与基于 libca Bytes 的随机访问读取器。
 ///
 /// 字节原语全部复用 libca 的 Bytes 家族：`Bytes` 持有源字节并提供小端
 /// `get_u16_le`/`get_u32_le`，`ByteSlice` 是非拥有视图，重编码写回用
 /// `BytesMut`。libca 的 Bytes 只能从当前游标顺序读、`slice()` 越界抛异常，
-/// 而 DEX 解析需要从任意 offset 开始；这里的 @ref Reader 只做两件事：
+/// 而 DEX 解析需要从任意 offset 开始；这里的 Reader 只做两件事：
 /// 在 offset 处切出一个 `Bytes` 视图，并把 `BytesError` 映射为 `ReadError`。
 /// 所有错误仍走 Result，绝不用异常表达输入截断。
 #pragma once

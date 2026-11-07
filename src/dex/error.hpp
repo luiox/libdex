@@ -1,9 +1,13 @@
+/// @defgroup error 错误码与诊断
+///
+/// ReadError / WriteError / FrameDiagnostic 与 ParseState；逐码语义见 doc:design-errors。
+
 /// @file        error.hpp
 /// @brief       读取/写出错误码、解析状态与诊断收集。
 ///
 /// 三条纪律：
 ///   - 解析失败用返回值（Result）而非异常抛出，恶意输入是预期输入；
-///   - @ref ParseState 描述「这个模型还能做什么」，不把输入武断判成合法/非法；
+///   - ParseState 描述「这个模型还能做什么」，不把输入武断判成合法/非法；
 ///   - 诊断是解析产物的一部分，不是 stderr 副作用——调用方决定怎么处理。
 #pragma once
 
@@ -16,11 +20,11 @@ namespace dex::core {
 /// @brief 读取失败原因。
 ///
 /// 结构性错误（无法确定后续边界）走 Err；语义性错误（索引悬垂、校验和不符）
-/// 只记诊断并让模型进入 @ref ParseState::Recovered。
+/// 只记诊断并让模型进入 @ref ParseState::Recovered 。
 enum class ReadError {
     Ok = 0,
     Truncated,             ///< 字节不够读完一个结构
-    BadMagic,              ///< 不是 dex\nNNN\0
+    BadMagic,              ///< 不是 dex\\nNNN\\0
     UnsupportedVersion,    ///< 版本号不在 035/037/038/039/040/041 之列
     BadHeaderSize,         ///< header_size 小于 0x70 或与版本约定不符
     BadEndianTag,          ///< endian_tag 不是 0x12345678（大端变体不支持）

@@ -1,3 +1,7 @@
+/// @defgroup class_data class_data 条目
+///
+/// 字段/方法目录的解码与精确重编码（ULEB 差分、静态初值槽位）。
+
 /// @file        class_data.hpp
 /// @brief       class_data_item 的结构解码与精确重编码。
 ///

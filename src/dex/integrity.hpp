@@ -1,3 +1,7 @@
+/// @defgroup integrity 校验字段
+///
+/// adler32 checksum 与 SHA-1 signature 的读验与写算。
+
 /// @file        integrity.hpp
 /// @brief       DEX 头校验字段：adler32 checksum 与 SHA-1 signature。
 ///

@@ -1,10 +1,14 @@
+/// @defgroup builder_edit 编辑应用层
+///
+/// canonical 与增量共享的编辑校验与合成；成员/注解/静态初值编辑语义见 doc:design-id-tables。
+
 /// @file        builder_edit.hpp
 /// @brief       buildDex 的编辑应用层：canonical 与增量布局共享的编辑校验与合成。
 ///
-/// @ref buildDex 的两条布局路径对「编辑是什么」必须给出同一答案：成员增删与
+/// buildDex 的两条布局路径对「编辑是什么」必须给出同一答案：成员增删与
 /// 标志覆盖构成的有效 class_data、静态初值的合成、注解覆盖与源目录的合并。
 /// 本头把这些与布局无关的编辑语义集中在一处，canonical 路径与
-/// @ref BuildOptions::incremental 路径共用，保证两条产物语义一致。
+/// BuildOptions::incremental 路径共用，保证两条产物语义一致。
 #pragma once
 
 #include <map>
@@ -27,7 +31,7 @@ namespace dex::core {
 /// @brief 注解合成键的基址：源偏移与合成键以 0x60000000 为界。
 /// @{
 
-/// @brief 布局路径的合成键分配规则（见 @ref AnnotationPlan）。
+/// @brief 布局路径的合成键分配规则（见 @ref AnnotationPlan ）。
 inline constexpr ca::u32 kOwnedTypeListKeyBase = 0x40000000u;
 inline constexpr ca::u32 kOwnedItemKeyBase = 0x50000000u;
 inline constexpr ca::u32 kOwnedSetKeyBase = 0x60000000u;
@@ -66,7 +70,7 @@ Result<std::map<ca::u32, const ClassData*>, WriteError> collectSourceClassData(D
 
 /// @brief 校验 BuildOptions 中的成员编辑并构建逐类注入后的 class_data。
 ///
-/// @p classDataByOff 来自 @ref collectSourceClassData。重复定义、索引越界、
+/// @p classDataByOff 来自 @ref collectSourceClassData 。重复定义、索引越界、
 /// 替换与删除冲突、标志编辑指向未定义成员等都返回 `InvalidModel`。
 Result<MemberEditSet, WriteError> collectMemberEdits(
     const DexFile& dex, const BuildOptions& options,

@@ -1,3 +1,7 @@
+/// @defgroup descriptor 类型与方法描述符
+///
+/// 字段类型/方法原型字符串解析；不查 ID 表，契约见 doc:design-types。
+
 /// @file        descriptor.hpp
 /// @brief       DEX 类型描述符与方法描述符解析。
 ///

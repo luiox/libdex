@@ -1,9 +1,13 @@
+/// @defgroup insn_edit 指令编辑原语
+///
+/// 分支目标、寄存器域、地址重算与 payload 构造；adapter 原语面见 doc:design-insns。
+
 /// @file        insn_edit.hpp
 /// @brief       指令编辑原语：分支目标、寄存器域、地址重算与 payload 构造。
 ///
 /// 这是 adapter 层的原语面：按调用方给定的形态与域宽精确改写指令字段，
 /// 不做形态提升或合并（design「指令」）。只需要解码/编码指令流的代码
-/// include @ref insn.hpp 即可，不必见到这一层；analysis 就不依赖本文件。
+/// include insn.hpp 即可，不必见到这一层；analysis 就不依赖本文件。
 #pragma once
 
 #include <vector>
@@ -38,7 +42,7 @@ ca::u32 insnIndexLimit(InsnFormat format) noexcept;
 /// @brief 分支目标地址（code unit）：`address + branchOffset`。
 ca::i64 insnBranchTarget(const Insn& insn) noexcept;
 
-/// @brief 让分支指令指向 @p target，按格式检查偏移域宽。
+/// @brief 让分支指令指向 @p target ，按格式检查偏移域宽。
 ///
 /// 非分支格式返回 BadFormat；target 与当前 address 的差超出该格式范围返回
 /// OperandOverflow。31t 的 payload 对齐不在此检查。
@@ -64,7 +68,7 @@ RegisterLayout insnRegisterLayout(const Insn& insn) noexcept;
 /// @brief 布局内的寄存器个数（None 为 0）。
 ca::u32 insnRegisterTotal(const Insn& insn) noexcept;
 
-/// @brief 第 i 个寄存器编号（i < @ref insnRegisterTotal；Range 返回 startRegister+i）。
+/// @brief 第 i 个寄存器编号（i < @ref insnRegisterTotal ；Range 返回 startRegister+i）。
 ca::u16 insnRegisterAt(const Insn& insn, ca::u32 i) noexcept;
 
 /// @brief 改 List 布局的第 i 个寄存器，按格式域宽校验。

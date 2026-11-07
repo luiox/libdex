@@ -1,3 +1,7 @@
+/// @defgroup method_editor 方法体编辑门面
+///
+/// MethodEditor 压平 CodeUnit→lower→MethodBody 接线；debug 事件降级见 doc:design-insns。
+
 /// @file        method_editor.hpp
 /// @brief       方法体中层编辑门面：指令/label/try/payload 走 CodeUnit，
 ///              debug 事件在本层记录、commit 时降级为 debug_info_item 字节。
@@ -17,7 +21,7 @@
 
 namespace dex::core {
 
-/// @brief commit 的产物：可直接放进 @ref BuildOptions::methodAdditions，
+/// @brief commit 的产物：可直接放进 @ref BuildOptions::methodAdditions 列表，
 ///        或配成 @ref CodeReplacement 覆盖既有方法体。
 struct MethodBody
 {

@@ -1,3 +1,7 @@
+/// @defgroup smali_opcodes smali 助记表
+///
+/// 助记符与 opcode 的映射，编译期断言锁死与 core kOpcodes 一致；见 doc:design-insns。
+
 /// @file        opcodes.hpp
 /// @brief       libsmali 共享表：opcode ↔ 助记符、格式与 access flags。
 ///

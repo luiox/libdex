@@ -12,11 +12,11 @@ libdex 的"正确"由外部 oracle 定义：库内 reparse 只能证明自洽，
 | baksmali（dexlib2 2.5.2，版本钉死） | 反汇编文本等价：指令、try/catch、注解、调试信息 | `check.sh`（默认模式）；CI 对 fixture 与 d8 语料 |
 | ReDex | 第二实现交叉验证：原文与重建产物走同一优化管线，产物反汇编必须一致 | `check.sh`（`LIBDEX_ORACLE_MODE=redex`）；CI（Linux） |
 | ART 实机（dex2oat/dexopt） | 终极消费者：verify/compile 接受，执行语义正确 | `check.sh`（`LIBDEX_ORACLE_MODE=art`），常驻设备 |
-| AOSP dex-format 规范 | 结构争议时的文本依据 | 人工 + design.md 记录 |
+| AOSP dex-format 规范 | 结构争议时的文本依据 | 人工 + design.rst 记录 |
 
 ## 仲裁顺序
 
-意见一致时无事可做；不一致时按以下顺序裁决，并把裁决记录进 design.md
+意见一致时无事可做；不一致时按以下顺序裁决，并把裁决记录进 doc/design.rst
 或对应测试注释：
 
 1. **ART 实机为终审**。dex 的存在意义是被 ART 加载执行；baksmali/ReDex
@@ -26,7 +26,7 @@ libdex 的"正确"由外部 oracle 定义：库内 reparse 只能证明自洽，
 2. **规范文本解决工具间的分歧**。两个用户态工具意见相左、ART 缺席时，
    以 AOSP dex-format 规范为准；规范自身含糊或滞后（如 map type 常量
    的勘误）时，按"现代实现共识"（d8 产物 + ART + dexlib2 三方一致）
-   处理，并在 design.md 注明依据。
+   处理，并在 doc/design.rst 注明依据。
 3. **语义不变是修复底线**。任何修复不得以"让某个工具闭嘴"为目标改变
    语义——布局可以调整，字节 diff 大小不是优化目标。
 

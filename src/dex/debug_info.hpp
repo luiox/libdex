@@ -1,3 +1,7 @@
+/// @defgroup debug_info debug_info 条目
+///
+/// 状态机字节码的保真解码与重编码，原始字节逐条保留。
+
 /// @file        debug_info.hpp
 /// @brief       debug_info_item 的结构解码与精确重编码。
 ///
