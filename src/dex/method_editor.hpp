@@ -1,6 +1,6 @@
 /// @defgroup method_editor 方法体编辑门面
 ///
-/// MethodEditor 压平 CodeUnit→lower→MethodBody 接线；debug 事件降级见 doc:design-insns。
+/// MethodEditor 压平 CodeUnit→lower→MethodBody 接线；debug 事件降级见 doc:insns-method-editor。
 
 /// @file        method_editor.hpp
 /// @brief       方法体中层编辑门面：指令/label/try/payload 走 CodeUnit，

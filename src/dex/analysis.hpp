@@ -1,6 +1,6 @@
 /// @defgroup analysis CFG 与到达帧分析
 ///
-/// buildCfg 基本块与 analyzeFrames 到达帧（best-effort / strict 双档），契约见 doc:design-analysis。
+/// buildCfg 基本块与 analyzeFrames 到达帧（best-effort / strict 双档），契约见 doc:analysis。
 
 /// @file        analysis.hpp
 /// @brief       分析层：CFG 构建（从解码指令流）+ 逐指令到达帧。

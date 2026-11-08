@@ -80,7 +80,7 @@ auto rebuilt = buildDex(*file);  // canonical 布局 + 校验字段重算
 
 ## 文档
 
-- [doc/design.rst](doc/design.rst)：分层、契约与设计裁决（Sphinx 源码，`sphinx-build -b html doc doc/_build` 本地构建）。
+- [doc/](doc)：分模块设计规格，自 [doc/module-map.rst](doc/module-map.rst) 按头文件进入（Sphinx 源码，`sphinx-build -b html doc doc/_build` 本地构建）。
 - [doc/non_goals.rst](doc/non_goals.rst)：不做清单。
 - [dev_plan.md](dev_plan.md)：剩余工作。
 - [CONTRIBUTING.md](CONTRIBUTING.md)：构建、语料、对拍与提交约定。

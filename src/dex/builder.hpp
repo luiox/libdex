@@ -1,6 +1,6 @@
 /// @defgroup builder canonical 重建
 ///
-/// buildDex 布局分派与 BuildOptions；canonical 与增量两条写回路径的契约见 doc:design-incremental。
+/// buildDex 布局分派与 BuildOptions；canonical 与增量两条写回路径的契约见 doc:rebuild-incremental。
 
 /// @file        builder.hpp
 /// @brief       整文件 canonical 重建：布局、偏移回填、map_list 与校验字段。
@@ -113,7 +113,7 @@ struct BuildOptions
     ///
     /// 前提是编辑不触及 ID 表（无 intern、无 addType/addProto/addField/addMethod/
     /// addProtoWithParams），违反返回 @ref WriteError::NotIncremental ，调用方应
-    /// 改走 canonical。语义细节见 doc:design-incremental。
+    /// 改走 canonical。语义细节见 doc:rebuild-incremental。
     bool incremental = false;
     /// @brief 重建 static_values 时裁掉尾部的合成默认槽位；全默认则整个数组
     /// 不写（class_def.static_values_off 置 0）。与 d8 输出约定一致，汇编器
@@ -149,7 +149,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 ///
 /// 保留源布局：条目与 gap 按源偏移顺序平移，未编辑且引用偏移未变的条目
 /// 源字节透传。编辑集必须不触及 ID 表（调用方显式选择，护栏返回
-/// `NotIncremental`）。契约见 doc:design-incremental。
+/// `NotIncremental`）。契约见 doc:rebuild-incremental。
 Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
                                                             const BuildOptions& options);
 

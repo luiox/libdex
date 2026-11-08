@@ -1,6 +1,6 @@
 /// @defgroup opcode 操作码元数据
 ///
-/// kOpcodes[256] 单源：名字、格式、索引类别与 DataType 三元组；见 doc:design-insns。
+/// kOpcodes[256] 单源：名字、格式、索引类别与 DataType 三元组；见 doc:insns-opcode。
 
 /// @file        opcode.hpp
 /// @brief       DEX 操作码与指令格式的静态元数据。

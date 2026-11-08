@@ -38,3 +38,7 @@ compile_commands.json
 *.pdb
 *.dump
 *.log
+
+### Docs ###
+doc/_build/
+doc/_apidoc/

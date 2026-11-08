@@ -1,6 +1,6 @@
 /// @defgroup insn 指令 DOM
 ///
-/// 26 种定长格式解码为 Insn 结构并保留原始 code unit；见 doc:design-insns。
+/// 26 种定长格式解码为 Insn 结构并保留原始 code unit；见 doc:insns-codec。
 
 /// @file        insn.hpp
 /// @brief       code_item.insns 的指令 DOM：逐条解码为定长结构。

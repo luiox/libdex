@@ -1,6 +1,6 @@
 /// @defgroup builder_edit 编辑应用层
 ///
-/// canonical 与增量共享的编辑校验与合成；成员/注解/静态初值编辑语义见 doc:design-id-tables。
+/// canonical 与增量共享的编辑校验与合成；成员/注解/静态初值编辑语义见 doc:model-editing。
 
 /// @file        builder_edit.hpp
 /// @brief       buildDex 的编辑应用层：canonical 与增量布局共享的编辑校验与合成。

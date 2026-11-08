@@ -1,6 +1,6 @@
 /// @defgroup dex_file DexFile DOM 本体
 ///
-/// 单文件所有权：骨架、ID 表与懒解码缓存；所有权契约见 doc:design-ownership。
+/// 单文件所有权：骨架、ID 表与懒解码缓存；所有权契约见 doc:architecture-ownership。
 
 /// @file        dex_file.hpp
 /// @brief       单 DexFile DOM：libdex core 的模型本体。

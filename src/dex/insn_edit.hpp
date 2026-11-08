@@ -1,6 +1,6 @@
 /// @defgroup insn_edit 指令编辑原语
 ///
-/// 分支目标、寄存器域、地址重算与 payload 构造；adapter 原语面见 doc:design-insns。
+/// 分支目标、寄存器域、地址重算与 payload 构造；adapter 原语面见 doc:insns-primitives。
 
 /// @file        insn_edit.hpp
 /// @brief       指令编辑原语：分支目标、寄存器域、地址重算与 payload 构造。
