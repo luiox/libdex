@@ -1,6 +1,6 @@
 # Contributing
 
-libdex 处于施工中（Under Construction）：API、文件布局与错误码会变，提交前先跑完整门禁。改动应保持分层边界：保真 DOM 与逐条目 codec 是底座，方法体编辑走 CodeDom（值句柄 + label），CFG 由分析层从指令流派生，DEX 与 smali 文本互转归仓内 libsmali；不引入 visitor 与方法体 AST。细节见 [doc/design.rst](doc/design.rst)。
+libdex 处于施工中（Under Construction）：API、文件布局与错误码会变，提交前先跑完整门禁。改动应保持分层边界：保真 DOM 与逐条目 codec 是底座，方法体编辑走 CodeDom（值句柄 + label），CFG 由分析层从指令流派生，DEX 与 smali 文本互转归仓内 libsmali；不引入 visitor 与方法体 AST。细节见分模块规格，自 [doc/module-map.rst](doc/module-map.rst) 按域进入。
 
 ## 构建与测试
 

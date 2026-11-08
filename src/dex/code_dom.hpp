@@ -1,6 +1,6 @@
 /// @defgroup code_dom 方法体结构编辑模型
 ///
-/// CodeUnit + label + 值句柄的编辑底座；分层定位见 doc:design-layering。
+/// CodeUnit + label + 值句柄的编辑底座；分层定位见 doc:architecture-layering。
 
 /// @file        code_dom.hpp
 /// @brief       方法体的结构编辑模型：CodeUnit + label + 值句柄。

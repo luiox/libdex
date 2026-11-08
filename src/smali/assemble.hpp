@@ -1,6 +1,6 @@
 /// @defgroup assemble 汇编器
 ///
-/// smali 文本 → DexFile 编辑；形态选择在汇编器侧，分层定位见 doc:design-layering。
+/// smali 文本 → DexFile 编辑；形态选择在汇编器侧，分层定位见 doc:smali-adapter。
 
 /// @file        assemble.hpp
 /// @brief       libsmali 汇编器：smali 文本 → DexFile 编辑。

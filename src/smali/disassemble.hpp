@@ -1,12 +1,12 @@
 /// @defgroup disassemble 反汇编器
 ///
-/// DexFile → baksmali 兼容文法子集文本，往返封闭；见 doc:design-layering。
+/// DexFile → baksmali 兼容文法子集文本，往返封闭；见 doc:smali-adapter。
 
 /// @file        disassemble.hpp
 /// @brief       libsmali 反汇编器：DexFile → smali 文本。
 ///
 /// 文法是 baksmali 的可读子集加少量本库方言（有意偏离处均以确定性往返为
-/// 目标，见 doc:design-layering）：
+/// 目标，见 doc:smali-adapter）：
 ///   - payload 用 `.packed-switch/.sparse-switch/.fill-array-data` 指令块，
 ///     就地渲染在指令流里 payload 所在的位置；
 ///   - 注解块 `.annotation <visibility> <type>`，元素 `name = value`；

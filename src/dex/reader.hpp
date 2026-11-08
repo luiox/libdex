@@ -1,6 +1,6 @@
 /// @defgroup reader 骨架解析入口
 ///
-/// readDex 只解析 eager 骨架，其余懒解码；eager/lazy 分界见 doc:design-eager-lazy。
+/// readDex 只解析 eager 骨架，其余懒解码；eager/lazy 分界见 doc:architecture-eager-lazy。
 
 /// @file        reader.hpp
 /// @brief       DEX 骨架解析入口（eager 骨架 + lazy 数据）。

@@ -1,6 +1,6 @@
 /// @defgroup writer 未修改透传写回
 ///
-/// writeDex 原字节交回、不重算校验字段；保真契约见 doc:design-fidelity。
+/// writeDex 原字节交回、不重算校验字段；保真契约见 doc:fidelity。
 
 /// @file        writer.hpp
 /// @brief       DEX 未修改透传写回。

@@ -1,6 +1,6 @@
 /// @defgroup error 错误码与诊断
 ///
-/// ReadError / WriteError / FrameDiagnostic 与 ParseState；逐码语义见 doc:design-errors。
+/// ReadError / WriteError / FrameDiagnostic 与 ParseState；逐码语义见 doc:errors。
 
 /// @file        error.hpp
 /// @brief       读取/写出错误码、解析状态与诊断收集。
