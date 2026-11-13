@@ -1,6 +1,6 @@
 # libdex
 
-> **Under Construction / 施工中** — API 与格式会变，尚未发布。
+> **Under Construction / 施工中**：API 与格式会变，尚未发布。
 
 [![ci](https://github.com/luiox/libdex/actions/workflows/ci.yml/badge.svg)](https://github.com/luiox/libdex/actions/workflows/ci.yml)
 
@@ -26,8 +26,7 @@ xmake run libdex_unittest --gtest_brief=1
 
 `smalict` 三个子命令：`dis <file.dex> <out-dir>` 每类输出一个 `.smali`；`asm <smali-dir> <out.dex>` 把目录内 `*.smali` 汇编成一份 dex；`roundtrip <file.dex> <tmp-dir>` 走反汇编→汇编→重读→再反汇编，要求文本逐字节一致。
 
-其它工具 target（`--with_asan=y` 配合泄漏门）：`libdex_leak_check`（ASan
-走查：读→全解码→帧分析→重建→重读）、`dexperf`（大文件性能基线计时）。
+其它工具 target（`--with_asan=y` 配合泄漏检查）：`libdex_leak_check`（ASan 走查：读→全解码→帧分析→重建→重读）、`dexperf`（大文件性能基线计时）。
 
 依赖经 xmake 自动拉取（libca / libjstr 来自 [luiox-repo](https://github.com/luiox/luiox-repo)）。Windows 需要 Visual Studio 2022；若 xmake 误选 mingw，显式 `xmake f -p windows --toolchain=msvc`。
 

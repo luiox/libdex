@@ -6,7 +6,7 @@
 /// @brief       DEX 未修改透传写回。
 ///
 /// writeDex 是保真透传：把源字节原样交回，连 header 的 checksum/signature
-/// 都不重算——写回不是 sanitizer，原文件校验字段本就错误时往返产物保留错误。
+/// 都不重算：写回不是 sanitizer，原文件校验字段本就错误时往返产物保留错误。
 /// 库不检测模型是否被修改，也不自动选择写回路径：透传原样交回源字节，
 /// 改动后的文件由调用方显式走 buildDex （canonical 重排 + 校验字段重算）。
 #pragma once

@@ -147,7 +147,7 @@ TEST(DexMalformed, BadMapOffsetIsRecovered)
     EXPECT_TRUE(file->diagnostics().contains(ReadError::BadMapList));
     EXPECT_TRUE(file->mapItems.empty());
 
-    // 头部表仍然可读——map 是目录，不是唯一寻址路径。
+    // 头部表仍然可读：map 是目录，不是唯一寻址路径。
     const auto name = file->classDescriptor(0);
     ASSERT_TRUE(name.is_ok());
     EXPECT_EQ(name.unwrap().as_std_view(), "LHello;");

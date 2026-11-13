@@ -1428,7 +1428,7 @@ Result<std::vector<ca::u8>, WriteError> buildDex(DexFile& dex,
 
     // 目录按新的 class_def 顺序发射：未覆盖的类沿用源偏移作键（共享目录自动去重），
     // 覆盖的类用合成键且内容为合并后的生效目录；内容全空则不发射。发射序必须
-    // 取 classOrder 而非 DOM 序——重排后 DOM 序在两次重建间不同，会导致目录
+    // 取 classOrder 而非 DOM 序：重排后 DOM 序在两次重建间不同，会导致目录
     // 落位漂移、破坏二次重建固定点。
     ItemTable annotationDirectories;
     for (ca::u32 i = 0; i < classOrder.oldIndexByNew.size(); ++i) {

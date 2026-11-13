@@ -413,8 +413,8 @@ TEST(DexSmaliRoundtrip, FieldAnnotationKeepsFollowingField)
 
 TEST(DexSmaliRoundtrip, ParameterAnnotationRoundtrip)
 {
-    // 反汇编端不生成 .end parameter-annotation：汇编端按「下一行不再是
-    // .annotation」收敛，否则会吞掉整个方法体。
+    // 反汇编端不生成 .end parameter-annotation：汇编端按下一行不再是
+    // .annotation 收敛，否则会吞掉整个方法体。
     const char* kSrc =
         ".class public LParamAnn;\n"
         ".super Ljava/lang/Object;\n"

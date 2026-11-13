@@ -17,9 +17,9 @@ libdex 是 DEX 字节核：输入单个 ``.dex``，输出保真 DOM 与写回字
 分层
 ----
 
-库三层：保真 DOM、逐条目 codec、方法体 CodeDom；同仓另有 libsmali 文本层（:ref:`smali-adapter`）。源码布局与库目标对齐：``src/dex`` 是 libdex、``src/smali`` 是 libsmali，库内扁平不设子目录——模块化落在文件级，条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；``dex_file`` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
+库三层：保真 DOM、逐条目 codec、方法体 CodeDom；同仓另有 libsmali 文本层（:ref:`smali-adapter`）。源码布局与库目标对齐：``src/dex`` 是 libdex、``src/smali`` 是 libsmali，库内扁平不设子目录，模块化落在文件级，条目 codec 按条目族一个文件、解析与精确重编码同住（annotation / encoded_value / debug_info / insn / leb128 / class_data / code_item）；``dex_file`` 是文档层，负责骨架、ID 表与懒解码缓存，不含条目编解码。
 
-CodeDom（code_dom 头注）是方法体的结构编辑模型：``CodeUnit`` 拥有指令槽表与程序序，分支/try/handler/payload 用 label 与值句柄（``InsnId{owner,slot,gen}``）引用，insert/replace/erase 后地址与 try 区间联动重算。它是 libsmali 与上层方法体编辑的唯一底座（:ref:`insns`）：libsmali 就是那个 adapter，建在库内 CodeDom 上，不在库外私养第二套方法体模型。
+CodeDom（code_dom 头注）是方法体的结构编辑模型：``CodeUnit`` 拥有指令槽表与程序序，分支/try/handler/payload 用 label 与值句柄（``InsnId{owner,slot,gen}``）引用，insert/replace/erase 后地址与 try 区间联动重算。它是 libsmali 与上层方法体编辑的唯一底座（:ref:`insns`）：libsmali 就是那个 adapter，建在库内 CodeDom 上，不在库外另维护第二套方法体模型。
 
 .. _architecture-ownership:
 

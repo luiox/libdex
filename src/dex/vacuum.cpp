@@ -410,9 +410,9 @@ Result<VacuumKeep, WriteError> computeVacuumClosure(DexFile& dex,
             }
         }
 
-        // class_data：定义成员本身是根；被编辑层移除的成员除外——闭包若
+        // class_data：定义成员本身是根；被编辑层移除的成员除外，闭包若
         // 给它们续命，首次 vacuum+removal 的产物会留死条目，二次 vacuum
-        // 才掉，破坏「重建即不动点」。
+        // 才掉，重建不再是不动点。
         const Result<const ClassData*, ReadError> data = dex.classData(i);
         if (data.is_err()) {
             return Err(WriteError::SourceUnreadable);

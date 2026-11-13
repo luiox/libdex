@@ -38,7 +38,7 @@ if LIBDEX_ASAN_SELFTEST=1 "$LC" "$1" >/dev/null 2>"$tmp/self.txt"; then
     :
 fi
 if ! grep -q "AddressSanitizer" "$tmp/self.txt"; then
-    echo "leak_check: FAIL selftest — asan instrumentation not effective" >&2
+    echo "leak_check: FAIL selftest: asan instrumentation not effective" >&2
     cat "$tmp/self.txt" >&2
     exit 1
 fi
@@ -48,7 +48,7 @@ if "$LC" "$@" >"$tmp/walk.txt" 2>"$tmp/walk.err"; then
     :
 fi
 if grep -q "ERROR: AddressSanitizer" "$tmp/walk.err"; then
-    echo "leak_check: FAIL — asan report during walk" >&2
+    echo "leak_check: FAIL: asan report during walk" >&2
     grep -A25 "ERROR: AddressSanitizer" "$tmp/walk.err" | head -40 >&2
     exit 1
 fi

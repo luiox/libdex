@@ -1,5 +1,5 @@
 /// @file        main.cpp
-/// @brief       smalict：libsmali 的 CLI——反汇编 dex 目录与汇编 smali 目录。
+/// @brief       smalict：libsmali 的 CLI，反汇编 dex 目录与汇编 smali 目录。
 ///
 /// 用法：
 ///   smalict dis <file.dex> <out-dir>     每类一个 .smali 文件

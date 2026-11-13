@@ -5,11 +5,11 @@
 /// @file        reader.hpp
 /// @brief       DEX 骨架解析入口（eager 骨架 + lazy 数据）。
 ///
-/// readDex 只解析「必须解析才能定位结构」的部分：header、map_list、五张
+/// readDex 只解析必须解析才能定位结构的部分：header、map_list、五张
 /// ID 表的定长条目、class_defs。string_data / class_data / code_item / type_list
 /// 一律只记目录并按需解码，因此解析代价与类体规模无关。
 ///
-/// 失败的语义是「无法确定后续结构边界」，不是「输入不合法」：畸形输入的
+/// 失败的语义是无法确定后续结构边界，不是输入不合法：畸形输入的
 /// 降级结果（校验和不符、悬垂索引、map 计数不符）落在
 /// ParseState::Recovered 与 Diagnostics 里，而不是异常或半截模型。
 #pragma once
@@ -28,7 +28,7 @@ namespace dex::core {
 /// @brief 读取选项。
 struct ReadOptions
 {
-    /// @brief 保留源字节副本——lazy 解码与保真写回的共同前提。
+    /// @brief 保留源字节副本：lazy 解码与保真写回的共同前提。
     ///
     /// 开启（默认）时字节被复制进模型，解析产出的一切视图（字符串、class_data、
     /// code_item span）都指向模型内部，与调用方 buffer 生命周期解耦。
@@ -40,7 +40,7 @@ struct ReadOptions
 
     /// @brief 核对 header 的 adler32 checksum 与 SHA-1 signature。
     ///
-    /// 核对失败只记诊断（模型进入 Recovered），不拒绝读取——分析对象常常
+    /// 核对失败只记诊断（模型进入 Recovered），不拒绝读取，分析对象常常
     /// 是被工具改过头部字段的产物。
     bool verifyIntegrity = true;
 

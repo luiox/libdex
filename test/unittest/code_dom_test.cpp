@@ -282,7 +282,7 @@ TEST(DexCodeDom, BindPayloadRejectsKindMismatch)
 TEST(DexCodeDom, PromoteRejectsSwitchTargetingNonPayload)
 {
     // 31t 指向普通指令（畸形流）：promote 若收下，lower 会把目标槽改写成
-    // 重建 payload，静默破坏指令流——必须当场拒绝。
+    // 重建 payload，静默破坏指令流，必须当场拒绝。
     // 手工编码：addr0 packed-switch（branchOffset=+2 → addr2），addr2 nop，
     // addr4 return-void。insnsSize = 5 units。
     const std::vector<ca::u8> bytes = {
@@ -502,8 +502,8 @@ TEST(DexCodeDom, PromoteRejectsMidInstructionBranchTarget)
     item.registersSize = 1;
     // F21s 在 addr 0..1；手工编一个 10t goto 指向 1？goto 会自身占位。
     // 直接构造：[0] const/16 (2u)，其后再无指令；promote 的输入流只有这条。
-    // 分支指向 1 的流无法用 decodeInsns 合法表达——改走 CodeUnit 层验证：
-    // lower 出去的流必然目标对齐，此处验证 promote 对「流末=1」可接受。
+    // 分支指向 1 的流无法用 decodeInsns 合法表达，改走 CodeUnit 层验证：
+    // lower 出去的流必然目标对齐，此处验证 promote 可接受流末=1。
     CodeUnit unit;
     unit.append(f21s(0x13, 0, 5));
     unit.append(f10x(0x0e));

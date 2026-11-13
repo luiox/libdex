@@ -316,7 +316,7 @@ Result<void, CodeDomError> CodeUnit::bindPayload(InsnId switchInsn, InsnId paylo
     const PayloadKind kind = switchKindOf(sw.opcode);
     if (kind != pl.payloadKind) {
         // 种类错配（如 packed-switch 绑 sparse payload）：lower 按 opcode
-        // 种类读 payload 字段会静默错码——在这里拒绝。
+        // 种类读 payload 字段会静默错码，在这里拒绝。
         return Err(CodeDomError::BadShape);
     }
     if (kind == PayloadKind::PackedSwitch || kind == PayloadKind::SparseSwitch) {
@@ -581,7 +581,7 @@ Result<LoweredCode, CodeDomError> CodeUnit::lower(bool autoAlign)
     // 当前地址重建一次把宽度定下来，再插对齐 nop，最后用终态地址重算全部
     // 偏移。重建对固定宽度是幂等的。
     // 手工构造的 Insn 容易忘填 width；地址/偏移全建立在 width 上，而编码按
-    // 格式规范宽度写——先对不上就当场报错，免得静默错位。
+    // 格式规范宽度写，先对不上就当场报错，免得静默错位。
     for (const ca::u32 slot : order_) {
         const Insn& s = slots_[slot].insn;
         if (!s.isPayload() && s.width != insnWidth(s.format)) {
@@ -826,7 +826,7 @@ Result<LoweredCode, CodeDomError> CodeUnit::lower(bool autoAlign)
         return a.startAddress < b.startAddress;
     });
     // 规范要求 try 条目不交叠，但 d8 实发完全相同的区间（同一范围挂多个
-    // handler），ART 接受——按现实放宽：只要求按起始地址排序。
+    // handler），ART 接受，按现实放宽：只要求按起始地址排序。
     (void)0;
 
     std::vector<CatchHandler> handlers;

@@ -3,14 +3,14 @@
 libdex 模块地图
 ===============
 
-模块面导航：每个头文件（及其 ``@defgroup`` 组）属于哪个域、职责边界是什么、宏观规格在哪一篇。微观契约（参数、返回、失败模式）在对应头注里，本表只做落点。域内设计裁决见「规格」列指向的篇章。
+模块面导航：每个头文件（及其 ``@defgroup`` 组）属于哪个域、职责边界是什么、宏观规格在哪一篇。微观契约（参数、返回、失败模式）在对应头注里，本表只给位置。域内设计裁决见规格列指向的篇章。
 
 原语层
 ------
 
 .. _module-map-primitives:
 
-bytes / leb128 / format / descriptor / dex（统一入口头）。字节区段与随机访问、ULEB128 读取面、格式层常量、描述符解析——它们没有独立规格页，边界即头注；唯一上升为宏观裁决的是 descriptor 的范围：type 层只解析字段类型与方法描述符，不查 ID 表、不解析泛型签名（descriptor 头注）。
+bytes / leb128 / format / descriptor / dex（统一入口头）。字节区段与随机访问、ULEB128 读取面、格式层常量、描述符解析，它们没有独立规格页，边界即头注；唯一上升为宏观裁决的是 descriptor 的范围：type 层只解析字段类型与方法描述符，不查 ID 表、不解析泛型签名（descriptor 头注）。
 
 骨架与读入
 ----------
@@ -86,7 +86,7 @@ bytes / leb128 / format / descriptor / dex（统一入口头）。字节区段�
      - 方法体结构编辑模型：CodeUnit + label + 值句柄
      - :ref:`architecture-layering`
    * - method_editor
-     - 方法体中层编辑门面：接线 CodeDom 与 debug 事件
+     - 方法体中层编辑门面：衔接 CodeDom 与 debug 事件
      - :ref:`insns-method-editor`
 
 重建与写回

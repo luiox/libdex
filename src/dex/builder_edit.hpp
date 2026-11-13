@@ -5,7 +5,7 @@
 /// @file        builder_edit.hpp
 /// @brief       buildDex 的编辑应用层：canonical 与增量布局共享的编辑校验与合成。
 ///
-/// buildDex 的两条布局路径对「编辑是什么」必须给出同一答案：成员增删与
+/// buildDex 的两条布局路径对编辑语义的理解必须给出同一答案：成员增删与
 /// 标志覆盖构成的有效 class_data、静态初值的合成、注解覆盖与源目录的合并。
 /// 本头把这些与布局无关的编辑语义集中在一处，canonical 路径与
 /// BuildOptions::incremental 路径共用，保证两条产物语义一致。

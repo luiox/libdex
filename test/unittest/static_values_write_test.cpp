@@ -206,7 +206,7 @@ TEST(DexStaticValuesWrite, MaterializesValuesWithoutSourceArray)
     value.integer = 9;
     ASSERT_TRUE(file->setStaticFieldValue(0, gen, value).is_ok());
 
-    // 模拟「无源数组」的类：static_values_off 置 0，编辑仍应物化出数组。
+    // 模拟无源数组的类：static_values_off 置 0，编辑仍应物化出数组。
     file->classDefs[0].staticValuesOff = 0;
 
     BuildOptions options = plainOptions();

@@ -156,7 +156,7 @@ Result<MethodBody, CodeDomError> MethodEditor::commit()
             } else {
                 // special opcode 一体编码地址差与行差，要求两者同时落进域宽：
                 // adj = addrDiff*15 + lineDiff+4 ≤ 245（u8 上界），行差 ∈ [-4,10]
-                // （line_range 15 的余数域）。地址差不能钳位——special 只前进
+                // （line_range 15 的余数域）。地址差不能钳位：special 只前进
                 // 钳后步长而调用方记录的是真实地址，后续行号会整体漂移；越界
                 // 组合拆成 AdvancePC+AdvanceLine 精确表达。
                 const ca::i32 adj = static_cast<ca::i32>(addrDiff) * 15 + (lineDiff + 4);

@@ -9,7 +9,7 @@
 /// map_list 目录、五张全局 ID 表、class_defs，以及按需解码的 string_data /
 /// class_data / code_item。internString 追加的字符串由同一个对象持有，
 /// 与源字符串共用懒解码入口。它不持有 APK、不持有多 dex 集合、不持有全局
-/// 索引——那些是容器层的事。
+/// 索引，那些是容器层的事。
 ///
 /// eager/lazy 划线：
 ///   - eager：header、map_list、五张 ID 表的定长条目、class_defs；
@@ -241,7 +241,7 @@ struct TypeListSpan
 
 /// @brief 一个类的注解覆盖：哪些注解集由自有注解项池重建。
 ///
-/// 只记录显式覆盖：字段/方法/参数的 map 中「存在键」即覆盖该成员（空向量
+/// 只记录显式覆盖：字段/方法/参数的 map 中存在键即覆盖该成员（空向量
 /// 表示清空该成员的注解条目），未出现的成员沿用源 annotations_directory。
 /// std::map 按 memberIdx 排序，保证重建发射顺序确定。
 struct AnnotationAttachments
@@ -266,7 +266,7 @@ struct AnnotationAttachments
 class DexFile
 {
 public:
-    /// @brief DEX 的「无索引」哨兵（superclass_idx / source_file_idx）。
+    /// @brief DEX 的无索引哨兵（superclass_idx / source_file_idx）。
     static constexpr ca::u32 kNoIndex = 0xFFFFFFFFu;
 
     /// @brief type/proto/field/method 表的最大条目数（16 位索引）。

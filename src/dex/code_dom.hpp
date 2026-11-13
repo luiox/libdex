@@ -8,13 +8,13 @@
 /// CodeUnit 是 Insn 流之上的编辑层：指令住在稳定的槽表（deque，只追加，
 /// 引用不失效），程序序在 @c order_ 里；插入/删除只改 order_，已有槽位与
 /// 句柄不失效。分支、switch payload、try 区间与 handler 一律引用 label，
-/// lower 时一次算定地址与偏移——编辑者永远不碰字节偏移。
+/// lower 时一次算定地址与偏移，编辑者永远不碰字节偏移。
 ///
 /// InsnId{owner, slot, gen} 三元句柄：gen 在槽被 erase 时自增防 ABA；
 /// 跨 owner 或过期句柄结构性拒绝。不引入 visitor。
 ///
 /// 保真边界：promote 保留语义字段，丢弃 Insn::raw 原始字节（nop 变体、
-/// 非规范高字节不保留）——CodeDom 面向编辑后的方法体，未编辑方法体走
+/// 非规范高字节不保留）。CodeDom 面向编辑后的方法体，未编辑方法体走
 /// dex_file 的透传路径，不经过这里。
 #pragma once
 
@@ -68,7 +68,7 @@ struct InsnId
     }
 };
 
-/// @brief end() 哨兵槽位与「label 绑在指令流末尾」的内部标记。
+/// @brief end() 哨兵槽位与 label 绑在指令流末尾的内部标记。
 inline constexpr ca::u32 kEndSlot = 0xFFFFFFFFu;
 
 /// @brief label id；由 CodeUnit 签发的稠密 u32。

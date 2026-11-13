@@ -6,12 +6,12 @@
 /// @brief       方法体中层编辑门面：指令/label/try/payload 走 CodeUnit，
 ///              debug 事件在本层记录、commit 时降级为 debug_info_item 字节。
 ///
-/// 把「建 CodeUnit → lower → 备好 CodeItem/insns/debug」的接线压成一次
-/// commit。只压缩接线层数，错误模型不变：每个可失败操作当场返回
+/// 把建 CodeUnit → lower → 备好 CodeItem/insns/debug 的流程压成一次
+/// commit。只压缩衔接层数，错误模型不变：每个可失败操作当场返回
 /// Result，无 sticky 失败态、无析构自动提交。
 ///
 /// 编排（intern 类/名字/proto、addMethod、push classDefs、把产物放进
-/// BuildOptions::methodAdditions）是调用方或 libsmali 的事——本门面不碰
+/// BuildOptions::methodAdditions）是调用方或 libsmali 的事，本门面不碰
 /// ID 表，保持与增量路径的护栏互斥性清晰。
 #pragma once
 
