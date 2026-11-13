@@ -1240,7 +1240,7 @@ R<void> assembleMethod(DexFile& dex, SmaliAssembler& self, const std::string& he
             const ca::u32 param =
                 static_cast<ca::u32>(std::strtoul(toks[1].c_str(), nullptr, 10));
             std::vector<AnnotationItem> items;
-            // 注解块收集到下一个非 .annotation 行为止——反汇编输出不生成
+            // 注解块收集到下一个非 .annotation 行为止，反汇编输出不生成
             // .end parameter-annotation 终结符；若出现则按终结符消费。
             while (bi + 1 < bodyLines.size() &&
                    bodyLines[bi + 1].compare(0, 11, ".annotation") == 0) {

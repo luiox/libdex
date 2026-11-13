@@ -15,7 +15,7 @@
 
 baksmali 不覆盖未建模 section，也不等于 ART 接受。仲裁规则（ART 终审、规范裁决工具分歧、环境缺席明确 skip）见 ``tools/oracle/README.md``；``check.sh`` 按 ``LIBDEX_ORACLE_MODE`` 分派 baksmali/redex/art 三种模式，redex 与 art 在对应工具缺席时明确 skip。
 
-redex 模式是双边管线对比：原文与重建产物走同一 ReDex 优化管线，管线自身的改写（内联、DCE 等）对两侧等价生效而抵消，两侧产物反汇编后必须一致——单边对比会被管线自身改写污染。CI（Linux）用 Homebrew bottle 装 redex，并用 runner 预装 Android SDK 的 d8 生成语料跑 baksmali/redex 对拍；art 的常驻设备配方见 oracle README。
+redex 模式是双边管线对比：原文与重建产物走同一 ReDex 优化管线，管线自身的改写（内联、DCE 等）对两侧等价生效而抵消，两侧产物反汇编后必须一致，单边对比会被管线自身改写污染。CI（Linux）用 Homebrew bottle 装 redex，并用 runner 预装 Android SDK 的 d8 生成语料跑 baksmali/redex 对拍；art 的常驻设备配方见 oracle README。
 
 语料纪律
 --------

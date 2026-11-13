@@ -1,13 +1,13 @@
 # Doxygen 配置：微观契约层（头文件 /// 注释）
 #
-# 分层口径见 CONTRIBUTING.md「文档规范」：/// 注释是单个符号与单个模块的背景/
+# 分层口径见 CONTRIBUTING.md 的文档规范一节：/// 注释是单个符号与单个模块的背景/
 # 定位，doc/*.rst 是跨模块设计规格。两站各自构建，RST 站不归 Doxygen 管。
 #
-# 路径按「从仓根执行 doxygen doc/Doxyfile」写；Doxygen 的相对路径以当前
+# 路径按从仓根执行 doxygen doc/Doxyfile 写；Doxygen 的相对路径以当前
 # 工作目录为基准，不以本文件位置为基准。
 #
-# 告警面：WARN_AS_ERROR=YES，但「未写注释」不算告警（EXTRACT_ALL +
-# WARN_IF_UNDOCUMENTED=NO）——门禁挡的是写错的文档（坏 @ref、坏命令、
+# 告警面：WARN_AS_ERROR=YES，但未写注释不算告警（EXTRACT_ALL +
+# WARN_IF_UNDOCUMENTED=NO），门禁挡的是写错的文档（坏 @ref、坏命令、
 # 参数名对不上），不是没写的文档。
 
 PROJECT_NAME           = "libdex"

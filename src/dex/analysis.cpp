@@ -94,7 +94,7 @@ RegType mergeKinds(const RegType& a, const RegType& b) noexcept
     }
     const bool aRefish = a.kind == RegKind::Reference || a.kind == RegKind::Null;
     const bool bRefish = b.kind == RegKind::Reference || b.kind == RegKind::Null;
-    // Null（含 const 0 的字面量零）与 cat1 同族相遇并入对方——ART 的
+    // Null（含 const 0 的字面量零）与 cat1 同族相遇并入对方，即 ART 的
     // Constant(0) 语义：既是合法 int 也是合法 null。
     if (a.kind == RegKind::Null && (b.kind == RegKind::IntLike || b.kind == RegKind::Float)) {
         return b;
@@ -534,7 +534,7 @@ Result<MethodAnalysis, ReadError> analyzeFrames(DexFile& dex, const CodeItem& co
         }
         Frame merged = inFrame[idx];
         if (merged.mergeFrom(f)) {
-            // 冲突合并静默进帧（Conflicted），诊断推迟到读取点——与 ART
+            // 冲突合并静默进帧（Conflicted），诊断推迟到读取点，与 ART
             // 一致：合流冲突只有被后续指令读到才构成 VerifyError。
             inFrame[idx] = merged;
             work.push_back(idx);

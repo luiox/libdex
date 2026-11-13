@@ -143,7 +143,7 @@ TEST(DexRealCorpus, ParseRoundtripSummary)
         std::unique_ptr<dex::core::DexFile> file = std::move(result).unwrap();
         EXPECT_FALSE(file->diagnostics().hasError()) << path.string();
 
-        // 现实语料常见「checksum 已更新、签名过期」的被改产物；完整性诊断
+        // 现实语料常见 checksum 已更新、签名过期的被改产物；完整性诊断
         // 属预期降级，其余诊断（结构/索引）一律视为失败。
         for (const dex::core::Diagnostic& diagnostic : file->diagnostics().items()) {
             const bool integrityOnly = diagnostic.code == dex::core::ReadError::BadChecksum ||

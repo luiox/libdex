@@ -57,18 +57,18 @@ baksmali 文本对拍不等于 ART 接受；涉及布局、对齐或未建模 se
 
 | 载体 | 层 | 写什么 | 谁能引用它 |
 |---|---|---|---|
-| `///` Doxygen | 微观 | 单个符号的契约：参数、返回、失败模式、不变量；单模块的「背景/定位」（`@defgroup` 组注） | 随代码移动 |
+| `///` Doxygen | 微观 | 单个符号的契约：参数、返回、失败模式、不变量；单模块的背景与定位（`@defgroup` 组注） | 随代码移动 |
 | `doc/*.rst` | 宏观 | 跨模块设计、数据模型、增量重建与对拍契约 | 代码/测试/构建脚本 |
 | `*.md` | 人 + AI 方向 | README、CONTRIBUTING、dev_plan 等流程文档 | 只有人和 AI 读 |
 
-理由：markdown 撑不住代码耦合的规格——无 label、无校验引用面，代码改动后引用静默腐烂。RST 白送可校验的引用面，规范才谈得上执行。
+理由：markdown 没有 label、引用无法校验，代码改动后引用失效也无人发现。RST 提供可校验的引用，规范才谈得上执行。
 
 硬规则（`doc/check_refs.py` + Sphinx `-W` 在 CI 挡）：
 
 1. 代码/测试/工具脚本只可引用 `doc/*.rst`，路径必须存在；出现 `.md` 设计引用即失败（流程文档白名单除外）。
 2. 引用定位用 label，形式 `doc:<label>`；被引用的位置必须有 `.. _<label>:` 声明（不必每节都放），命名 `<doc-slug>[-<section-slug>]`。跨文档的 `§N` 一律换 `:ref:`，编号会随插入章节漂移。
-3. RST 里「`X` 头注」指向微观层：`X` 必须是某个 `@defgroup` 组名或头文件名。
+3. RST 里写 `` `X` 头注 `` 指向微观层：`X` 必须是某个 `@defgroup` 组名或头文件名。
 4. RST 站点以 `sphinx-build -b html -E -W --keep-going doc doc/_build` 构建，警告即失败；本地验证先 `pip install "sphinx==9.1.1"`（与 CI 钉同版）。
 5. 微观层以 `doxygen doc/Doxyfile` 构建，`WARN_AS_ERROR` 生效；`///` 注释是 API 契约的唯一来源，与代码同仓同改。
 
-RST 写作约定（中文正文的坑）：表格一律 `.. list-table::`（禁 grid table，全角字形会破坏边框校验）；行内代码紧邻中文或全角开括号时在闭定界符后补转义（docutils 要求 end-string 后接空白或 ASCII 标点）；标题层级 `=` / `-` / `^`；跨仓出处带仓名标记（libca / libjstr / luiox），带标记视为 prose 不校验存在性。
+RST 写作约定（中文正文的坑）：表格一律 `.. list-table::`（禁 grid table，全角字形会破坏边框校验）；行内代码紧邻中文或全角开括号时在闭定界符后补转义（docutils 要求 end-string 后接空白或 ASCII 标点）；标题层级 `=` / `-` / `^`；跨仓出处带仓名标记（libca / libjstr / luiox），带标记视为普通文字，不做存在性校验。

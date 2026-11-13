@@ -6,7 +6,7 @@
 /// @brief       指令编辑原语：分支目标、寄存器域、地址重算与 payload 构造。
 ///
 /// 这是 adapter 层的原语面：按调用方给定的形态与域宽精确改写指令字段，
-/// 不做形态提升或合并（design「指令」）。只需要解码/编码指令流的代码
+/// 不做形态提升或合并（见 doc/insns.rst）。只需要解码/编码指令流的代码
 /// include insn.hpp 即可，不必见到这一层；analysis 就不依赖本文件。
 #pragma once
 
@@ -100,7 +100,7 @@ Result<void, InsnEncodeError> shiftInsnRegisters(std::vector<Insn>& insns,
 /// @brief 按 mapping[旧编号] = 新编号 重排全部寄存器。
 ///
 /// List 布局逐槽查表；Range 布局要求映射在区间上是平移（mapping[start+k]
-/// == mapping[start]+k），否则返回 BadFormat——不平移的重排需要改成 35c
+/// == mapping[start]+k），否则返回 BadFormat：不平移的重排需要改成 35c
 /// 形态，归 adapter。旧编号超出 mapping 长度返回 OperandOverflow。
 Result<void, InsnEncodeError> remapInsnRegisters(
     std::vector<Insn>& insns, const std::vector<ca::u16>& mapping) noexcept;

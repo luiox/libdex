@@ -1,4 +1,4 @@
--- libdex：DEX 字节核（L1）——单 DexFile lazy DOM + 保真写回。
+-- libdex：DEX 字节核，单 DexFile lazy DOM + 保真写回。
 -- 设计见 doc/ 分模块规格（doc/module-map.rst 起步）。
 --
 -- 依赖：libca（luiox-repo git 直连包）与 libjstr（MUTF-8 容器）经包仓消费；

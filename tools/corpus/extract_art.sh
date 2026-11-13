@@ -13,7 +13,7 @@
 #
 # 提取语义：vdex 只是容器，内嵌的 dex/cdex 段按其自身 header 的 file_size
 # 切出；magic 与版本以段自身为准，不做任何结构改写。040/041 之外的标准
-# dex（035-039）不收——那些由 d8 语料覆盖（gen_corpus.sh）。
+# dex（035-039）不收，那些由 d8 语料覆盖（gen_corpus.sh）。
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -75,7 +75,7 @@ echo "pulled $n candidates"
 
 # 切取与分类统一交给内嵌 python：扫描内嵌 magic，按段自身 header 的
 # file_size（偏移 +32 的 u32）定长切出，并校验落在容器边界内。来源清单经
-# 临时文件传递——设备伪路径不能经 argv（MSYS 会改写），heredoc 又占着
+# 临时文件传递：设备伪路径不能经 argv（MSYS 会改写），heredoc 又占着
 # stdin；给 python 的路径显式转成 Windows 形态。
 printf '%s\n' "$listing" > "$work/sources.txt"
 py_sources=$(host_path "$work/sources.txt")

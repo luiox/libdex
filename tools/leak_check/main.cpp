@@ -271,7 +271,7 @@ int main(int argc, char** argv)
     }
     if (std::getenv("LIBDEX_ASAN_SELFTEST") != nullptr) {
         // 自检：故意 use-after-free。MSVC 的 ASan 不启用 LSan，漏内存不报，
-        // 但 UAF 是确定性报告——插桩生效时进程带 ERROR: AddressSanitizer
+        // 但 UAF 是确定性报告：插桩生效时进程带 ERROR: AddressSanitizer
         // 退出，外层脚本据此断言"门是通的"；没生效时这里静默 0。
         auto* probe = new char[64];
         std::snprintf(probe, 64, "asan probe");

@@ -425,7 +425,7 @@ std::string literalText(ca::i64 literal, core::InsnFormat format)
     char buf[32];
     if (format == core::InsnFormat::F21h) {
         // 已移位的 high16：按位模式十六进制渲染，保证无歧义。负值必须带
-        // 符号前缀——纯 0x%llx 形式超过 i64 上界，汇编端 strtoll 会钳位。
+        // 符号前缀，纯 0x%llx 形式超过 i64 上界，汇编端 strtoll 会钳位。
         if (literal < 0) {
             std::snprintf(buf, sizeof(buf), "-0x%llx",
                           static_cast<unsigned long long>(0u - static_cast<ca::u64>(literal)));
@@ -713,7 +713,7 @@ Result<void, SmaliError> renderMethod(DexFile& dex, ca::u32 classDefIdx,
     out += ind(2) + ".registers " + std::to_string(item->registersSize) + "\n";
 
     // debug 头部投影（.params / .prologue / .epilogue）。
-    // debugInfo 的指针归 DexFile 的 lazy 缓存所有——绝不能包进本地
+    // debugInfo 的指针归 DexFile 的 lazy 缓存所有，绝不能包进本地
     // unique_ptr，否则缓存条目被提前释放（双重析构）。
     const core::DebugInfo* info = nullptr;
     if (item->debugInfoOff != 0) {
@@ -1220,7 +1220,7 @@ Result<std::string, SmaliError> disassembleClass(DexFile& dex, ca::u32 classDefI
 
     if (cd != nullptr) {
         // canonical 文本形态：字段/方法按 (名字, 类型/proto) 文本序渲染，与
-        // buildDex 重排后的 class_data 顺序一致——反汇编(汇编(反汇编(x)))
+        // buildDex 重排后的 class_data 顺序一致，反汇编(汇编(反汇编(x)))
         // 的文本因此逐字节稳定。
         std::vector<ca::u32> staticOrder(cd->staticFields.size());
         for (ca::u32 i = 0; i < staticOrder.size(); ++i) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""代码引用面门禁：规范见 CONTRIBUTING.md「文档规范」。
+"""代码侧文档引用检查：规范见 CONTRIBUTING.md 文档规范一节。
 
 只认三类可校验事实，其余一律失败：
 
@@ -9,8 +9,8 @@
 3. 代码面不得引用设计内容形态的 ``.md``。白名单只有流程文档（README/
    CONTRIBUTING/SECURITY/CHANGELOG）；跨仓出处必须带仓名标记
    （libca / libjstr / luiox 等），带标记即视为 prose，不做存在性校验。
-4. RST 里「``X`` 头注」指向微观层：``X`` 必须是某个 ``@defgroup`` 组名或某个
-   头文件名。宏观规格不许指向不存在的组注释——那一半内容就失踪了。
+4. RST 里写 ``X`` 头注 指向微观层：``X`` 必须是某个 ``@defgroup`` 组名或某个
+   头文件名。宏观规格不许指向不存在的组注释，否则那一半内容就丢失了。
 
 用法：python doc/check_refs.py [仓库根]
 """
@@ -44,7 +44,7 @@ DEFGROUP = re.compile(r"@defgroup\s+([\w.-]+)")
 
 
 def micro_targets(src_root: Path):
-    """微观层可被「X 头注」点名的锚点：@defgroup 组名 + 头文件名/.stem。"""
+    """微观层可被 X 头注 点名的锚点：@defgroup 组名 + 头文件名/.stem。"""
     groups, headers = set(), set()
     if not src_root.is_dir():
         return groups, headers
@@ -139,7 +139,7 @@ def check(root: Path):
                 if any(marker in line for marker in UPSTREAM_MARKERS):
                     continue
                 problems.append(
-                    f"{p.name}:{lineno}: 文档点名 markdown 规格 {m.group(0)}——"
+                    f"{p.name}:{lineno}: 文档点名 markdown 规格 {m.group(0)}，"
                     "本仓设计内容用 :ref:，跨仓出处加仓名标记"
                 )
             for m in REF_ROLE.finditer(line):
@@ -155,7 +155,7 @@ def check(root: Path):
                 if target in groups or target in headers:
                     continue
                 problems.append(
-                    f"{p.name}:{lineno}: 「{target} 头注」在微观层无锚点——"
+                    f"{p.name}:{lineno}: {target} 头注 在微观层无锚点，"
                     f"应为 @defgroup 组名或头文件名（现有组：{', '.join(sorted(groups)) or '无'}）"
                 )
 
@@ -176,7 +176,7 @@ def check(root: Path):
                     continue
                 if any(marker in line for marker in UPSTREAM_MARKERS):
                     continue
-                problems.append(f"{rel}:{lineno}: 代码面引用 markdown 规格 {name}——设计内容转 {DOC_DIRNAME}/*.rst，或删指")
+                problems.append(f"{rel}:{lineno}: 代码面引用 markdown 规格 {name}，设计内容转 {DOC_DIRNAME}/*.rst，或删指")
 
     return problems
 

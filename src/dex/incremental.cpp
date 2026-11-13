@@ -4,7 +4,7 @@
 /// 与 canonical 路径（builder.cpp）的分工：canonical 把 DOM 重排成规范布局，
 /// 适合表级编辑（intern/重命名后必须全表重排）；本路径假设五张 ID 表与源
 /// 一致，条目与 gap 按源偏移顺序平移，未编辑且引用偏移未变的条目按源字节
-/// 透传——未触碰 copy、触碰的重编码。条目级编辑（方法体替换、成员增删、
+/// 透传：未触碰 copy、触碰的重编码。条目级编辑（方法体替换、成员增删、
 /// 标志覆盖、注解覆盖、静态初值、
 /// 剥离）的语义来自共享的 @ref builder_edit，两条路径产出等价内容。
 ///
@@ -872,7 +872,7 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
     }
 
     // map 段逐项走查：引用闭包只能发现被目录/方法体指向的条目，而工具
-    // （d8）会为"无注解"发射无人引用的空 annotation_set_item 等孤儿——
+    // （d8）会为"无注解"发射无人引用的空 annotation_set_item 等孤儿，
     // 段的 map 计数按条目总数声明。孤儿不入池则 no-edit 重建的 map size
     // 与 first 偏移漂移，checksum/signature 全变，破坏逐字节恒等承诺。
     // 六类自描述段按结构走查到段末；走查失败即段内布局不可靠，拒绝增量。
@@ -1569,7 +1569,7 @@ Result<std::vector<ca::u8>, WriteError> buildDexIncremental(DexFile& dex,
             }
             return Ok(v);
         };
-        // 解析并检查「映射后 == 源值」：悬垂返回 kDangling，调用方判 !ok。
+        // 解析并检查映射后 == 源值：悬垂返回 kDangling，调用方判 !ok。
         const auto resolveSame = [&offsets](ca::u32 key, bool* ok) {
             const ca::u32 v = offsets.resolve(key);
             *ok = v != OffsetMap::kDangling;

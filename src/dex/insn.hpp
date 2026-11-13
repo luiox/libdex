@@ -35,7 +35,7 @@ const char* to_string(InsnError e) noexcept;
 
 /// @brief 指令编码失败原因。
 ///
-/// 编码只做「按该 opcode 的定长格式逐位写入」，不做形态提升或合并：
+/// 编码只做按该 opcode 的定长格式逐位写入，不做形态提升或合并：
 /// `const/4` 不会自动改成 `const/16`，`const-string` 不会自动改成 jumbo。
 /// 形态选择是调用方（adapter）的职责。
 enum class InsnEncodeError {

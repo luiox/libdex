@@ -9,7 +9,7 @@ namespace dex::core {
 namespace {
 
 /// payload 标识，取 AOSP DEX 规范值：packed 0x0100、sparse 0x0200、fill 0x0300。
-/// 注意 0x0101 不是 ident——它是 `move vA, vB`（A=0,B=1）的合法编码；曾按
+/// 注意 0x0101 不是 ident，它是 `move vA, vB`（A=0,B=1）的合法编码；曾按
 /// 0x0101 识别导致真实文件里的 move 指令被误判成 payload（d8 实测语料拦截）。
 constexpr ca::u16 kPackedSwitchIdent = 0x0100;
 constexpr ca::u16 kSparseSwitchIdent = 0x0200;
